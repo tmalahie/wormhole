@@ -11,7 +11,7 @@ import {
 } from "../core/universe.js";
 import { worktreeAdd } from "../core/git.js";
 import { ensureSymlink } from "../core/symlinks.js";
-import { runHook } from "../core/hooks.js";
+import { hookEnv, runHook } from "../core/hooks.js";
 import { localSharedFile, slotAnchorPath } from "../core/paths.js";
 import { universeLabel } from "../core/universe.js";
 
@@ -114,16 +114,4 @@ async function injectSharedLinks(
     await ensureSymlink(linkPath, sharedSource, { relative: true });
     logger.step(`🔗 anomaly ${shared} → ${logger.dim(path.relative(srcPath, sharedSource))}`);
   }
-}
-
-function hookEnv(
-  projectRoot: string,
-  slot: string,
-  branch: string
-): NodeJS.ProcessEnv {
-  return {
-    WORM_PROJECT_ROOT: projectRoot,
-    WORM_SLOT: slot,
-    WORM_BRANCH: branch,
-  };
 }

@@ -82,6 +82,10 @@ export function slotName(index: number): string {
   return `${SLOT_PREFIX}${index}`;
 }
 
+export function slotIndex(slot: string): number {
+  return Number.parseInt(slot.slice(SLOT_PREFIX.length), 10);
+}
+
 export function slotPath(projectRoot: string, slot: string): string {
   return path.join(localUniversesDir(projectRoot), slot);
 }

@@ -1,5 +1,6 @@
 import { runShell } from "../utils/exec.js";
 import { logger } from "../utils/logger.js";
+import { slotIndex } from "./paths.js";
 
 export interface HookResult {
   ran: boolean;
@@ -11,6 +12,19 @@ export interface HookResult {
 export interface HookContext {
   cwd: string;
   env?: NodeJS.ProcessEnv;
+}
+
+export function hookEnv(
+  projectRoot: string,
+  slot: string,
+  branch: string
+): NodeJS.ProcessEnv {
+  return {
+    WORM_PROJECT_ROOT: projectRoot,
+    WORM_SLOT: slot,
+    WORM_SLOT_INDEX: String(slotIndex(slot)),
+    WORM_BRANCH: branch,
+  };
 }
 
 export async function runHook(

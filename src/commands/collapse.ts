@@ -6,7 +6,7 @@ import { findProjectRoot } from "../core/project.js";
 import { loadLocalConfig } from "../core/config.js";
 import { findSlotByBranch, scanUniverses, universeLabel } from "../core/universe.js";
 import { pruneWorktrees, worktreeRemove } from "../core/git.js";
-import { runHook } from "../core/hooks.js";
+import { hookEnv, runHook } from "../core/hooks.js";
 import type { Config } from "../types.js";
 
 export interface CollapseOptions {
@@ -41,11 +41,7 @@ export async function runCollapse(
   if (!options.skipHook && config.hooks.on_collapse) {
     const result = await runHook("on_collapse", config.hooks.on_collapse, {
       cwd: slot.srcPath,
-      env: {
-        WORM_PROJECT_ROOT: projectRoot,
-        WORM_SLOT: slot.name,
-        WORM_BRANCH: branch,
-      },
+      env: hookEnv(projectRoot, slot.name, branch),
     });
     if (result.ran && result.exitCode !== 0 && !options.force) {
       throw new WormError(

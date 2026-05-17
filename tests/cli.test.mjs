@@ -233,24 +233,32 @@ test("default on_warp hook runs scripts/setup.sh with WORM_* env vars", async (t
   const sb = await createSandbox();
   t.after(() => sb.cleanup());
   await createBranch(sb.projectRoot, "feature-a");
+  await createBranch(sb.projectRoot, "feature-b");
 
-  await sb.worm(["init", "--universes", "1"]);
+  await sb.worm(["init", "--universes", "2"]);
 
   // Overwrite the default setup.sh to print the env vars we care about.
   const setupPath = path.join(sb.projectRoot, ".worm", "scripts", "setup.sh");
   await writeFile(
     setupPath,
-    `#!/usr/bin/env bash\necho "ROOT=$WORM_PROJECT_ROOT"\necho "SLOT=$WORM_SLOT"\necho "BRANCH=$WORM_BRANCH"\n`
+    `#!/usr/bin/env bash\necho "ROOT=$WORM_PROJECT_ROOT"\necho "SLOT=$WORM_SLOT"\necho "INDEX=$WORM_SLOT_INDEX"\necho "BRANCH=$WORM_BRANCH"\n`
   );
   await chmod(setupPath, 0o755);
 
-  const r = await sb.worm(["warp", "feature-a"]);
-  assert.equal(r.exitCode, 0, r.stderr);
+  const r1 = await sb.worm(["warp", "feature-a"]);
+  assert.equal(r1.exitCode, 0, r1.stderr);
   // On macOS, tmpdir paths resolve through /private/var/..., so compare realpaths.
   const resolvedRoot = await realpath(sb.projectRoot);
-  assert.match(r.stdout, new RegExp(`ROOT=${escapeRegex(resolvedRoot)}`));
-  assert.match(r.stdout, /SLOT=uni-1/);
-  assert.match(r.stdout, /BRANCH=feature-a/);
+  assert.match(r1.stdout, new RegExp(`ROOT=${escapeRegex(resolvedRoot)}`));
+  assert.match(r1.stdout, /SLOT=uni-1/);
+  assert.match(r1.stdout, /INDEX=1/);
+  assert.match(r1.stdout, /BRANCH=feature-a/);
+
+  // Index advances with the slot — uni-2 should see INDEX=2.
+  const r2 = await sb.worm(["warp", "feature-b"]);
+  assert.equal(r2.exitCode, 0, r2.stderr);
+  assert.match(r2.stdout, /SLOT=uni-2/);
+  assert.match(r2.stdout, /INDEX=2/);
 });
 
 test("init --template <dir> seeds from a custom template", async (t) => {

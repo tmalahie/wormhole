@@ -59,7 +59,7 @@ Keep that in mind when reviewing changes: a "clever" addition that breaks idempo
 ### Hooks
 - User-supplied commands always run through `runShell()` (not `run()`), with `inheritStdio: true`. They get the full shell, including pipes and `&&`.
 - A non-zero exit from `on_collapse` aborts the collapse unless `--force` is set. `on_warp` failures are warned but not fatal — the worktree exists either way.
-- Hooks receive `WORM_PROJECT_ROOT`, `WORM_SLOT`, and `WORM_BRANCH` env vars. Wire them through `runHook(name, command, { cwd, env })` — don't pass `cwd` as a bare string.
+- Hooks receive `WORM_PROJECT_ROOT`, `WORM_SLOT`, `WORM_SLOT_INDEX` (1-based numeric), and `WORM_BRANCH` env vars. Build the env with `hookEnv(projectRoot, slot, branch)` from `core/hooks.ts` — don't inline the object at the call site, and don't pass `cwd` as a bare string to `runHook`.
 - The default `on_warp` invokes `bash "$WORM_PROJECT_ROOT/.worm/scripts/setup.sh"`. Users edit `setup.sh` rather than the JSON config. Don't change the hook-command default without also updating the seeded `setup.sh` template.
 
 ### Templates

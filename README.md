@@ -102,6 +102,7 @@ Hook commands (and any script they invoke, like `setup.sh`) receive these env va
 |---|---|
 | `WORM_PROJECT_ROOT` | Absolute path to the project root. |
 | `WORM_SLOT` | Slot name being acted on (e.g. `uni-1`). |
+| `WORM_SLOT_INDEX` | The numeric, 1-based slot index (e.g. `1` for `uni-1`). Handy for derived values: `PORT=$((8079 + WORM_SLOT_INDEX))`. |
 | `WORM_BRANCH` | Branch name being warped or collapsed. |
 
 ### Templates

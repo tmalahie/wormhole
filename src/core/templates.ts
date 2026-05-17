@@ -23,7 +23,7 @@ export const DEFAULT_SETUP_SCRIPT = `#!/usr/bin/env bash
 #   pip install -r requirements.txt
 #   bundle install
 #
-# Env: $WORM_PROJECT_ROOT, $WORM_SLOT, $WORM_BRANCH
+# Env: $WORM_PROJECT_ROOT, $WORM_SLOT, $WORM_SLOT_INDEX (1-based), $WORM_BRANCH
 `;
 
 export interface ResolvedTemplate {
