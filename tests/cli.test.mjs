@@ -30,7 +30,7 @@ test("first `worm init` lazily provisions the global root", async (t) => {
   }
 });
 
-test("worm init binds project, writes gitignore, is idempotent", async (t) => {
+test("worm init binds project, writes self-contained gitignore, is idempotent", async (t) => {
   const sb = await createSandbox();
   t.after(() => sb.cleanup());
 
@@ -48,8 +48,17 @@ test("worm init binds project, writes gitignore, is idempotent", async (t) => {
     assert.ok(s.isDirectory());
   }
 
-  const gitignore = await readFile(path.join(sb.projectRoot, ".gitignore"), "utf8");
-  assert.match(gitignore, /^\.worm\/$/m);
+  // Ignore lives inside .worm/ — project root .gitignore is untouched.
+  const localIgnore = await readFile(
+    path.join(sb.projectRoot, ".worm", ".gitignore"),
+    "utf8"
+  );
+  assert.equal(localIgnore.trim(), "*");
+  await assert.rejects(
+    stat(path.join(sb.projectRoot, ".gitignore")),
+    /ENOENT/,
+    "wormhole should not touch the project's root .gitignore"
+  );
 
   const r2 = await sb.worm(["init", "--universes", "2"]);
   assert.equal(r2.exitCode, 0, r2.stderr);

@@ -19,7 +19,7 @@ One file per command. Each exports a single `runX(args, options)` async function
 
 | File | Responsibility |
 |---|---|
-| `init.ts` | Bind a project to a wormhole profile. Lazily provisions `~/.worm/` (seeds `templates/default/` and `git init`s the personal repo) on first run, then creates/refreshes the global profile + local `.worm/` layout, writes `.gitignore`, provisions empty slot folders. Idempotent. |
+| `init.ts` | Bind a project to a wormhole profile. Lazily provisions `~/.worm/` (seeds `templates/default/` and `git init`s the personal repo) on first run, then creates/refreshes the global profile + local `.worm/` layout, writes `.worm/.gitignore` (self-contained `*`), provisions empty slot folders. Idempotent. |
 | `status.ts` | Walk slots, render table or `--json`. |
 | `warp.ts` | Pick free slot → `git worktree add src/` → inject anchor + shared symlinks → run `on_warp` with `WORM_*` env vars. |
 | `collapse.ts` | Run `on_collapse` (with `WORM_*` env vars) → strip injected symlinks → `git worktree remove` → prune. |
@@ -30,7 +30,7 @@ Domain primitives. Pure functions where possible; the only side effects are file
 | File | Owns |
 |---|---|
 | `paths.ts` | **Single source of truth** for every path the CLI touches. If you need a path, get it here — never hardcode. `globalRoot()` honours `WORM_HOME`. |
-| `project.ts` | Walk up to find `.git`, derive project name, append entries to `.gitignore`. |
+| `project.ts` | Walk up to find `.git`, derive project name. |
 | `config.ts` | Load / save / validate `Config` via zod. Distinguishes global (`~/.worm/multiverses/<name>/config.json`) from local (`.worm/config.json`, which is itself a symlink to global). |
 | `templates.ts` | Seed `~/.worm/templates/default/` and resolve a template (override → global default → built-in) into a `Config` + `scripts/` to materialise into a new multiverse. |
 | `git.ts` | Typed wrappers for `git worktree {add,remove,list,prune}`, `branch` lookups. Parses porcelain output. |

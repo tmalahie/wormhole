@@ -51,7 +51,8 @@ Run `worm <command> --help` for the full option list.
 
 ```
 <project-root>/
-└── .worm/                            ← gitignored
+└── .worm/                            ← self-ignored (contains its own .gitignore: *)
+    ├── .gitignore                    ← single line: `*`
     ├── config.json                   → symlink to ~/.worm/multiverses/<project>/config.json
     ├── scripts/                      → symlink to ~/.worm/multiverses/<project>/scripts/
     │   └── setup.sh                  ← runs after `worm warp` (edit this!)

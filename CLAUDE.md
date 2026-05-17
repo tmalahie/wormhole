@@ -38,7 +38,7 @@ Keep that in mind when reviewing changes: a "clever" addition that breaks idempo
 ### User-facing output
 - Every line of CLI output goes through `logger.*`. Do not call `console.log` / `console.error` directly outside of `cli.ts` and the json branch of `scan.ts`.
 - Tone: `info` for intent, `step` for substeps, `success` at the end, `warn` for recoverable issues, `error` only via thrown `WormError`.
-- **Vocabulary is themed.** Keep it consistent: `🪐` multiverse, `🌌` universe / available, `🚀` warp / active, `💫` collapse, `⚓` anchor, `🔗` shared "anomaly", `🪢` worktree, `⚡` hook, `🎯` target, `🛸` init / binding, `📐` template, `🌱` sprouted local placeholder, `📝` gitignore touch, `💥` broken / error, `✨` success, `💡` hint. New messages should pick from this palette rather than introducing a new emoji per command.
+- **Vocabulary is themed.** Keep it consistent: `🪐` multiverse, `🌌` universe / available, `🚀` warp / active, `💫` collapse, `⚓` anchor, `🔗` shared "anomaly", `🪢` worktree, `⚡` hook, `🎯` target, `🛸` init / binding, `📐` template, `🌱` sprouted local placeholder, `📝` gitignore write, `💥` broken / error, `✨` success, `💡` hint. New messages should pick from this palette rather than introducing a new emoji per command.
 
 ### Paths
 - All filesystem locations come from `src/core/paths.ts`. If you need a new one, add a function there — never concatenate path segments at the call site.

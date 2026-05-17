@@ -8,7 +8,6 @@ import {
 } from "../utils/fs.js";
 import {
   deriveProjectName,
-  ensureGitignoreEntry,
   findProjectRoot,
 } from "../core/project.js";
 import {
@@ -96,9 +95,12 @@ export async function runInit(options: InitOptions = {}): Promise<void> {
     `🌌 carved ${config.universes_count} universe slot${config.universes_count === 1 ? "" : "s"}`
   );
 
-  const gitignore = await ensureGitignoreEntry(projectRoot);
-  if (gitignore.updated) {
-    logger.step("📝 appended .worm/ to .gitignore");
+  const ignored = await writeTextIfMissing(
+    path.join(localRoot(projectRoot), ".gitignore"),
+    "*\n"
+  );
+  if (ignored) {
+    logger.step("📝 wrote .worm/.gitignore (self-contained)");
   }
 
   logger.success(
