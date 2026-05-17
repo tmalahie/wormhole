@@ -8,15 +8,24 @@ export interface HookResult {
   stderr: string;
 }
 
+export interface HookContext {
+  cwd: string;
+  env?: NodeJS.ProcessEnv;
+}
+
 export async function runHook(
   hookName: string,
   command: string | undefined,
-  cwd: string
+  context: HookContext
 ): Promise<HookResult> {
   if (!command || command.trim().length === 0) {
     return { ran: false, exitCode: 0, stdout: "", stderr: "" };
   }
-  logger.step(`hook ${hookName}: ${command}`);
-  const result = await runShell(command, { cwd, inheritStdio: true });
+  logger.step(`⚡ hook ${hookName}: ${command}`);
+  const result = await runShell(command, {
+    cwd: context.cwd,
+    env: context.env,
+    inheritStdio: true,
+  });
   return { ran: true, ...result };
 }

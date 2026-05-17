@@ -8,6 +8,10 @@ export const UNIVERSES_DIR_NAME = "universes";
 export const WORKTREE_SRC_NAME = "src";
 export const CONFIG_FILE_NAME = "config.json";
 export const MULTIVERSES_DIR_NAME = "multiverses";
+export const TEMPLATES_DIR_NAME = "templates";
+export const DEFAULT_TEMPLATE_NAME = "default";
+export const SCRIPTS_DIR_NAME = "scripts";
+export const SETUP_SCRIPT_NAME = "setup.sh";
 export const SLOT_PREFIX = "uni-";
 
 export function globalRoot(): string {
@@ -56,6 +60,22 @@ export function localSharedFile(projectRoot: string, fileName: string): string {
 
 export function localUniversesDir(projectRoot: string): string {
   return path.join(localRoot(projectRoot), UNIVERSES_DIR_NAME);
+}
+
+export function localScriptsDir(projectRoot: string): string {
+  return path.join(localRoot(projectRoot), SCRIPTS_DIR_NAME);
+}
+
+export function globalProjectScriptsDir(projectName: string): string {
+  return path.join(globalProjectDir(projectName), SCRIPTS_DIR_NAME);
+}
+
+export function globalTemplatesDir(): string {
+  return path.join(globalRoot(), TEMPLATES_DIR_NAME);
+}
+
+export function globalDefaultTemplateDir(): string {
+  return path.join(globalTemplatesDir(), DEFAULT_TEMPLATE_NAME);
 }
 
 export function slotName(index: number): string {

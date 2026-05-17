@@ -62,7 +62,10 @@ export async function runWarp(
   await injectSharedLinks(projectRoot, target.srcPath, config.shared_paths);
 
   if (!options.skipHook && config.hooks.on_warp) {
-    const result = await runHook("on_warp", config.hooks.on_warp, target.srcPath);
+    const result = await runHook("on_warp", config.hooks.on_warp, {
+      cwd: target.srcPath,
+      env: hookEnv(projectRoot, target.name, branch),
+    });
     if (result.ran && result.exitCode !== 0) {
       logger.warn(
         `on_warp hook exited with code ${result.exitCode}. The worktree exists but may be unstable.`
@@ -111,4 +114,16 @@ async function injectSharedLinks(
     await ensureSymlink(linkPath, sharedSource, { relative: true });
     logger.step(`🔗 anomaly ${shared} → ${logger.dim(path.relative(srcPath, sharedSource))}`);
   }
+}
+
+function hookEnv(
+  projectRoot: string,
+  slot: string,
+  branch: string
+): NodeJS.ProcessEnv {
+  return {
+    WORM_PROJECT_ROOT: projectRoot,
+    WORM_SLOT: slot,
+    WORM_BRANCH: branch,
+  };
 }

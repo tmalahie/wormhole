@@ -38,7 +38,7 @@ Keep that in mind when reviewing changes: a "clever" addition that breaks idempo
 ### User-facing output
 - Every line of CLI output goes through `logger.*`. Do not call `console.log` / `console.error` directly outside of `cli.ts` and the json branch of `scan.ts`.
 - Tone: `info` for intent, `step` for substeps, `success` at the end, `warn` for recoverable issues, `error` only via thrown `WormError`.
-- **Vocabulary is themed.** Keep it consistent: `🪐` multiverse, `🌌` universe / available, `🚀` warp / active, `💫` collapse, `⚓` anchor, `🔗` shared "anomaly", `🪢` worktree, `⚡` hook, `🎯` target, `🛸` register, `💥` broken / error, `✨` success, `💡` hint. New messages should pick from this palette rather than introducing a new emoji per command.
+- **Vocabulary is themed.** Keep it consistent: `🪐` multiverse, `🌌` universe / available, `🚀` warp / active, `💫` collapse, `⚓` anchor, `🔗` shared "anomaly", `🪢` worktree, `⚡` hook, `🎯` target, `🛸` init / binding, `📐` template, `🌱` sprouted local placeholder, `📝` gitignore touch, `💥` broken / error, `✨` success, `💡` hint. New messages should pick from this palette rather than introducing a new emoji per command.
 
 ### Paths
 - All filesystem locations come from `src/core/paths.ts`. If you need a new one, add a function there — never concatenate path segments at the call site.
@@ -53,11 +53,18 @@ Keep that in mind when reviewing changes: a "clever" addition that breaks idempo
 - Before calling `git worktree remove`, strip the symlinks wormhole injected (`collapse.ts:removeInjectedSymlinks`). Git treats them as untracked files and refuses removal otherwise.
 
 ### Idempotency
-- `register`, `warp`, and `collapse` may be re-run after partial failure. Always reach for `ensureDir`, `ensureSymlink`, and `writeTextIfMissing` rather than raw create operations. If you write something destructively, gate it behind `--force`.
+- `init`, `warp`, and `collapse` may be re-run after partial failure. Always reach for `ensureDir`, `ensureSymlink`, and `writeTextIfMissing` rather than raw create operations. If you write something destructively, gate it behind `--force`.
+- `worm init` lazily provisions `~/.worm/` on first run (detected via the existence of `~/.worm/multiverses/`, not the root itself — the root can be pre-created in sandboxes). Do not bypass `ensureGlobalRoot` from other commands; if a future command needs the global root, call it from `init` flows only.
 
 ### Hooks
 - User-supplied commands always run through `runShell()` (not `run()`), with `inheritStdio: true`. They get the full shell, including pipes and `&&`.
 - A non-zero exit from `on_collapse` aborts the collapse unless `--force` is set. `on_warp` failures are warned but not fatal — the worktree exists either way.
+- Hooks receive `WORM_PROJECT_ROOT`, `WORM_SLOT`, and `WORM_BRANCH` env vars. Wire them through `runHook(name, command, { cwd, env })` — don't pass `cwd` as a bare string.
+- The default `on_warp` invokes `bash "$WORM_PROJECT_ROOT/.worm/scripts/setup.sh"`. Users edit `setup.sh` rather than the JSON config. Don't change the hook-command default without also updating the seeded `setup.sh` template.
+
+### Templates
+- `~/.worm/templates/default/` is seeded on first global init by [src/core/templates.ts](src/core/templates.ts). Each new multiverse is bootstrapped from a template (CLI `--template <dir>` > global default > built-in `DEFAULT_CONFIG`).
+- After bootstrap each multiverse owns its files — templates are **copied**, never symlinked. Editing the template later won't affect existing projects. If you need to update an existing project, edit `~/.worm/multiverses/<name>/` directly.
 
 ## Don'ts
 

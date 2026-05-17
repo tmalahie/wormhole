@@ -35,14 +35,11 @@ git branch experiment-ai
 
 header() { echo; echo "════════════════════ $* ════════════════════"; }
 
-header "worm init"
-node "$WORM_BIN" init
+header "worm init --universes 3 (also lazy-creates ~/.worm/)"
+node "$WORM_BIN" init --universes 3
 
-header "worm register --universes 3"
-node "$WORM_BIN" register --universes 3
-
-header "worm scan (empty multiverse)"
-node "$WORM_BIN" scan
+header "worm status (empty multiverse)"
+node "$WORM_BIN" status
 
 header "worm warp feature-stripe-fix"
 node "$WORM_BIN" warp feature-stripe-fix --skip-hook
@@ -50,8 +47,8 @@ node "$WORM_BIN" warp feature-stripe-fix --skip-hook
 header "worm warp feature-billing"
 node "$WORM_BIN" warp feature-billing --skip-hook
 
-header "worm scan (mid-multiverse)"
-node "$WORM_BIN" scan
+header "worm status (mid-multiverse)"
+node "$WORM_BIN" status
 
 header "ERROR: warp same branch twice"
 node "$WORM_BIN" warp feature-billing --skip-hook || true
@@ -59,9 +56,15 @@ node "$WORM_BIN" warp feature-billing --skip-hook || true
 header "worm collapse feature-stripe-fix"
 node "$WORM_BIN" collapse feature-stripe-fix --skip-hook
 
-header "worm scan (after collapse)"
-node "$WORM_BIN" scan
+header "worm status (after collapse)"
+node "$WORM_BIN" status
+
+header "fill the remaining slots"
+node "$WORM_BIN" warp experiment-ai --skip-hook >/dev/null
+node "$WORM_BIN" warp temp-stash --create --skip-hook >/dev/null
+
+header "worm status (everything taken)"
+node "$WORM_BIN" status
 
 header "ERROR: no free slot"
-node "$WORM_BIN" warp experiment-ai --skip-hook >/dev/null
 node "$WORM_BIN" warp another --create --skip-hook || true

@@ -2,8 +2,7 @@ import { Command } from "commander";
 import { logger } from "./utils/logger.js";
 import { isWormError } from "./utils/errors.js";
 import { runInit } from "./commands/init.js";
-import { runRegister } from "./commands/register.js";
-import { runScan } from "./commands/scan.js";
+import { runStatus } from "./commands/status.js";
 import { runWarp } from "./commands/warp.js";
 import { runCollapse } from "./commands/collapse.js";
 
@@ -25,32 +24,28 @@ program
 
 program
   .command("init")
-  .description("Initialize the global ~/.worm/ root with a template profile.")
-  .option("-f, --force", "Overwrite the template config if it already exists.")
-  .action(async (opts) => {
-    await runInit(opts);
-  });
-
-program
-  .command("register")
-  .description("Bind the current project to a wormhole profile and provision local layout.")
+  .description("Bind the current project to a wormhole profile. Lazily creates ~/.worm/ on first run.")
   .option("-n, --name <name>", "Override the project name (default: basename of project root).")
   .option(
     "-u, --universes <count>",
     "Number of universe slots to provision.",
     (val) => Number.parseInt(val, 10)
   )
+  .option(
+    "-t, --template <dir>",
+    "Seed from a custom template directory (config.json + optional scripts/)."
+  )
   .option("-f, --force", "Overwrite existing profile fields when they conflict.")
   .action(async (opts) => {
-    await runRegister(opts);
+    await runInit(opts);
   });
 
 program
-  .command("scan")
+  .command("status")
   .description("Show the state of every universe slot.")
   .option("--json", "Output as JSON.")
   .action(async (opts) => {
-    await runScan(opts);
+    await runStatus(opts);
   });
 
 program

@@ -19,11 +19,10 @@ One file per command. Each exports a single `runX(args, options)` async function
 
 | File | Responsibility |
 |---|---|
-| `init.ts` | Provision `~/.worm/`, write template config, `git init` the personal repo. |
-| `register.ts` | Create/refresh global profile + local layout, write gitignore, provision empty slot folders. Idempotent. |
-| `scan.ts` | Walk slots, render table or `--json`. |
-| `warp.ts` | Pick free slot → `git worktree add src/` → inject anchor + shared symlinks → run `on_warp`. |
-| `collapse.ts` | Run `on_collapse` → strip injected symlinks → `git worktree remove` → prune. |
+| `init.ts` | Bind a project to a wormhole profile. Lazily provisions `~/.worm/` (seeds `templates/default/` and `git init`s the personal repo) on first run, then creates/refreshes the global profile + local `.worm/` layout, writes `.gitignore`, provisions empty slot folders. Idempotent. |
+| `status.ts` | Walk slots, render table or `--json`. |
+| `warp.ts` | Pick free slot → `git worktree add src/` → inject anchor + shared symlinks → run `on_warp` with `WORM_*` env vars. |
+| `collapse.ts` | Run `on_collapse` (with `WORM_*` env vars) → strip injected symlinks → `git worktree remove` → prune. |
 
 ### `core/`
 Domain primitives. Pure functions where possible; the only side effects are filesystem and `git`.
@@ -33,9 +32,10 @@ Domain primitives. Pure functions where possible; the only side effects are file
 | `paths.ts` | **Single source of truth** for every path the CLI touches. If you need a path, get it here — never hardcode. `globalRoot()` honours `WORM_HOME`. |
 | `project.ts` | Walk up to find `.git`, derive project name, append entries to `.gitignore`. |
 | `config.ts` | Load / save / validate `Config` via zod. Distinguishes global (`~/.worm/multiverses/<name>/config.json`) from local (`.worm/config.json`, which is itself a symlink to global). |
+| `templates.ts` | Seed `~/.worm/templates/default/` and resolve a template (override → global default → built-in) into a `Config` + `scripts/` to materialise into a new multiverse. |
 | `git.ts` | Typed wrappers for `git worktree {add,remove,list,prune}`, `branch` lookups. Parses porcelain output. |
 | `symlinks.ts` | `ensureSymlink()` — idempotent, prefers relative paths, refuses to overwrite real files. |
-| `hooks.ts` | Runs user-supplied shell commands with inherited stdio and a captured exit code. |
+| `hooks.ts` | Runs user-supplied shell commands with inherited stdio, a captured exit code, and `WORM_PROJECT_ROOT` / `WORM_SLOT` / `WORM_BRANCH` env vars. |
 | `universe.ts` | Combines `scanUniverses()` with the live git worktree list to classify each slot as `STABLE` / `ACTIVE` / `BROKEN`. Exposes `pickFreeSlot` / `findSlotByBranch`. |
 
 ### `utils/`
@@ -65,7 +65,9 @@ These are easy to break and hard to debug — keep them in mind when touching th
 
 5. **All paths route through `core/paths.ts`.** If you need to compute a path, add a function there. No string concatenation of path segments elsewhere.
 
-6. **Commands are idempotent.** Re-running `register` or `warp` on the same input should produce the same end state. `ensureSymlink` and `ensureDir` are the workhorses here.
+6. **Commands are idempotent.** Re-running `init` or `warp` on the same input should produce the same end state. `ensureSymlink`, `ensureDir`, and `writeTextIfMissing` are the workhorses here.
+
+7. **Templates are seeded, not symlinked.** `~/.worm/templates/default/` is the source of truth for new multiverses, but each multiverse owns its own copy of `config.json` and `scripts/setup.sh` after creation — editing a template later does not affect existing projects. `init.ts:prepareGlobalProfile` only writes the config on first creation or with `--force` to preserve user edits.
 
 ## Adding a new command
 

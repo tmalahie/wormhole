@@ -24,7 +24,7 @@ export const DEFAULT_CONFIG: Config = {
   anchors: ["node_modules", ".venv"],
   shared_paths: [".env", "CLAUDE.local.md", "SKILL.md"],
   hooks: {
-    on_warp: "npm install",
+    on_warp: 'bash "$WORM_PROJECT_ROOT/.worm/scripts/setup.sh"',
     on_collapse: "git stash -u",
   },
 };

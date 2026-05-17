@@ -30,7 +30,7 @@ export async function runCollapse(
   if (!slot) {
     throw new WormError(
       `Branch "${branch}" is not currently warped into any universe slot.`,
-      { hint: "Run `worm scan` to see active branches." }
+      { hint: "Run `worm status` to see active branches." }
     );
   }
 
@@ -39,7 +39,14 @@ export async function runCollapse(
   );
 
   if (!options.skipHook && config.hooks.on_collapse) {
-    const result = await runHook("on_collapse", config.hooks.on_collapse, slot.srcPath);
+    const result = await runHook("on_collapse", config.hooks.on_collapse, {
+      cwd: slot.srcPath,
+      env: {
+        WORM_PROJECT_ROOT: projectRoot,
+        WORM_SLOT: slot.name,
+        WORM_BRANCH: branch,
+      },
+    });
     if (result.ran && result.exitCode !== 0 && !options.force) {
       throw new WormError(
         `on_collapse hook exited with code ${result.exitCode}. Aborting to avoid losing state.`,

@@ -6,11 +6,11 @@ import { loadLocalConfig } from "../core/config.js";
 import { scanUniverses, universeLabel } from "../core/universe.js";
 import type { UniverseSlot } from "../types.js";
 
-export interface ScanOptions {
+export interface StatusOptions {
   json?: boolean;
 }
 
-export async function runScan(options: ScanOptions = {}): Promise<void> {
+export async function runStatus(options: StatusOptions = {}): Promise<void> {
   const projectRoot = await findProjectRoot();
   const config = await loadLocalConfig(projectRoot);
   const slots = await scanUniverses(projectRoot, config);

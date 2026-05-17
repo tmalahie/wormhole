@@ -1,4 +1,4 @@
-import { ConfigSchema, DEFAULT_CONFIG, type Config } from "../types.js";
+import { ConfigSchema, type Config } from "../types.js";
 import { WormError } from "../utils/errors.js";
 import { pathExists, readJson, writeJson } from "../utils/fs.js";
 import {
@@ -6,10 +6,6 @@ import {
   globalProjectDir,
   localConfigFile,
 } from "./paths.js";
-
-export function defaultConfig(): Config {
-  return ConfigSchema.parse(DEFAULT_CONFIG);
-}
 
 export async function loadConfigFromPath(filePath: string): Promise<Config> {
   if (!(await pathExists(filePath))) {
