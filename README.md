@@ -28,7 +28,7 @@ worm init --universes 3
 worm warp my-feature
 
 # work in it
-cd .worm/universes/uni-1/src
+cd .worm/universes/uni-0/src
 
 # when done, free the slot (keeps caches warm)
 worm collapse my-feature
@@ -61,15 +61,15 @@ Run `worm <command> --help` for the full option list.
     │   ├── CLAUDE.local.md           → symlink to ~/.worm/multiverses/<project>/CLAUDE.local.md
     │   └── SKILL.md                  → symlink to ~/.worm/multiverses/<project>/SKILL.md
     └── universes/
-        ├── uni-1/
+        ├── uni-0/
         │   ├── node_modules/         ← anchor (persistent cache)
         │   ├── .venv/                ← anchor
         │   └── src/                  ← git worktree target (created on warp)
         │       ├── node_modules      → ../node_modules
         │       ├── .env              → ../../../shared/.env
         │       └── …
-        ├── uni-2/
-        └── uni-3/
+        ├── uni-1/
+        └── uni-2/
 ```
 
 The trick: `git worktree add` refuses non-empty target directories, so the worktree always lives in `src/` while anchors sit one level above. A relative symlink inside the worktree connects them, and install commands write through the link into the persistent anchor.
@@ -101,8 +101,8 @@ Hook commands (and any script they invoke, like `setup.sh`) receive these env va
 | Variable | Value |
 |---|---|
 | `WORM_PROJECT_ROOT` | Absolute path to the project root. |
-| `WORM_SLOT` | Slot name being acted on (e.g. `uni-1`). |
-| `WORM_SLOT_INDEX` | The numeric, 1-based slot index (e.g. `1` for `uni-1`). Handy for derived values: `PORT=$((8079 + WORM_SLOT_INDEX))`. |
+| `WORM_SLOT` | Slot name being acted on (e.g. `uni-0`). |
+| `WORM_SLOT_INDEX` | The numeric, 0-based slot index (e.g. `0` for `uni-0`). Handy for derived values: `PORT=$((8080 + WORM_SLOT_INDEX))`. |
 | `WORM_BRANCH` | Branch name being warped or collapsed. |
 
 ### Templates

@@ -15,7 +15,7 @@ export async function scanUniverses(
 ): Promise<UniverseSlot[]> {
   const worktrees = await safeListWorktrees(projectRoot);
   const slots: UniverseSlot[] = [];
-  for (let i = 1; i <= config.universes_count; i += 1) {
+  for (let i = 0; i < config.universes_count; i += 1) {
     const name = slotName(i);
     const sPath = slotPath(projectRoot, name);
     const srcPath = slotSrcPath(projectRoot, name);

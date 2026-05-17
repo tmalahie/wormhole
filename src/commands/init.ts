@@ -88,7 +88,7 @@ export async function runInit(options: InitOptions = {}): Promise<void> {
     await provisionSharedPath(projectRoot, projectName, sharedPath);
   }
 
-  for (let i = 1; i <= config.universes_count; i += 1) {
+  for (let i = 0; i < config.universes_count; i += 1) {
     await ensureDir(slotPath(projectRoot, slotName(i)));
   }
   logger.step(

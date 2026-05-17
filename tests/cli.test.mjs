@@ -43,7 +43,7 @@ test("worm init binds project, writes self-contained gitignore, is idempotent", 
   const scriptsLink = await readlink(path.join(sb.projectRoot, ".worm", "scripts"));
   assert.match(scriptsLink, /multiverses\/.+\/scripts$/);
 
-  for (const slot of ["uni-1", "uni-2"]) {
+  for (const slot of ["uni-0", "uni-1"]) {
     const s = await stat(path.join(sb.projectRoot, ".worm", "universes", slot));
     assert.ok(s.isDirectory());
   }
@@ -76,7 +76,7 @@ test("warp mounts a branch with anchor + shared symlinks", async (t) => {
   const r = await sb.worm(["warp", "feature-a", "--skip-hook"]);
   assert.equal(r.exitCode, 0, r.stderr);
 
-  const srcPath = path.join(sb.projectRoot, ".worm", "universes", "uni-1", "src");
+  const srcPath = path.join(sb.projectRoot, ".worm", "universes", "uni-0", "src");
 
   const anchor = await readlink(path.join(srcPath, "node_modules"));
   assert.equal(anchor, "../node_modules", "anchor should be a relative symlink");
@@ -100,10 +100,10 @@ test("status --json reflects slot states", async (t) => {
   assert.equal(r.exitCode, 0, r.stderr);
   const state = JSON.parse(r.stdout);
   assert.equal(state.slots.length, 2);
-  assert.equal(state.slots[0].name, "uni-1");
+  assert.equal(state.slots[0].name, "uni-0");
   assert.equal(state.slots[0].status, "ACTIVE");
   assert.equal(state.slots[0].branch, "feature-a");
-  assert.equal(state.slots[1].name, "uni-2");
+  assert.equal(state.slots[1].name, "uni-1");
   assert.equal(state.slots[1].status, "STABLE");
 });
 
@@ -119,12 +119,12 @@ test("collapse frees slot, keeps anchors warm, src removed", async (t) => {
   assert.equal(r.exitCode, 0, r.stderr);
 
   const anchor = await stat(
-    path.join(sb.projectRoot, ".worm", "universes", "uni-1", "node_modules")
+    path.join(sb.projectRoot, ".worm", "universes", "uni-0", "node_modules")
   );
   assert.ok(anchor.isDirectory(), "node_modules anchor should survive collapse");
 
   await assert.rejects(
-    stat(path.join(sb.projectRoot, ".worm", "universes", "uni-1", "src")),
+    stat(path.join(sb.projectRoot, ".worm", "universes", "uni-0", "src")),
     /ENOENT/,
     "src/ should be removed by collapse"
   );
@@ -134,7 +134,7 @@ test("collapse frees slot, keeps anchors warm, src removed", async (t) => {
   assert.equal(state.slots[0].status, "STABLE");
 });
 
-test("warp into freed slot reuses uni-1 (anchors stay hot)", async (t) => {
+test("warp into freed slot reuses uni-0 (anchors stay hot)", async (t) => {
   const sb = await createSandbox();
   t.after(() => sb.cleanup());
   await createBranch(sb.projectRoot, "feature-a");
@@ -145,7 +145,7 @@ test("warp into freed slot reuses uni-1 (anchors stay hot)", async (t) => {
 
   const r = await sb.worm(["warp", "feature-a", "--skip-hook"]);
   assert.equal(r.exitCode, 0, r.stderr);
-  assert.match(r.stdout, /uni-1/);
+  assert.match(r.stdout, /uni-0/);
 });
 
 test("warp fails with helpful error when no slot is free", async (t) => {
@@ -175,7 +175,7 @@ test("warp refuses to mount the same branch twice", async (t) => {
 
   const r = await sb.worm(["warp", "a", "--skip-hook"]);
   assert.notEqual(r.exitCode, 0);
-  assert.match(r.stderr, /already active in slot uni-1/);
+  assert.match(r.stderr, /already active in slot uni-0/);
 });
 
 test("warp --create makes a new branch on the fly", async (t) => {
@@ -250,15 +250,15 @@ test("default on_warp hook runs scripts/setup.sh with WORM_* env vars", async (t
   // On macOS, tmpdir paths resolve through /private/var/..., so compare realpaths.
   const resolvedRoot = await realpath(sb.projectRoot);
   assert.match(r1.stdout, new RegExp(`ROOT=${escapeRegex(resolvedRoot)}`));
-  assert.match(r1.stdout, /SLOT=uni-1/);
-  assert.match(r1.stdout, /INDEX=1/);
+  assert.match(r1.stdout, /SLOT=uni-0/);
+  assert.match(r1.stdout, /INDEX=0/);
   assert.match(r1.stdout, /BRANCH=feature-a/);
 
-  // Index advances with the slot — uni-2 should see INDEX=2.
+  // Index advances with the slot — uni-1 should see INDEX=1.
   const r2 = await sb.worm(["warp", "feature-b"]);
   assert.equal(r2.exitCode, 0, r2.stderr);
-  assert.match(r2.stdout, /SLOT=uni-2/);
-  assert.match(r2.stdout, /INDEX=2/);
+  assert.match(r2.stdout, /SLOT=uni-1/);
+  assert.match(r2.stdout, /INDEX=1/);
 });
 
 test("init --template <dir> seeds from a custom template", async (t) => {
@@ -298,7 +298,7 @@ test("init --template <dir> seeds from a custom template", async (t) => {
   );
   assert.match(setupContents, /from-template/);
 
-  for (const slot of ["uni-1", "uni-2", "uni-3", "uni-4"]) {
+  for (const slot of ["uni-0", "uni-1", "uni-2", "uni-3"]) {
     const s = await stat(path.join(sb.projectRoot, ".worm", "universes", slot));
     assert.ok(s.isDirectory());
   }
