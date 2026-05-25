@@ -82,9 +82,10 @@ export async function runCollapse(
 
   await pruneWorktrees(projectRoot);
 
-  logger.success(
-    `${universeLabel(slot)} is stable. Anchors (node_modules, .venv) kept warm for the next warp.`
-  );
+  const anchorsMsg = config.anchors.length > 0
+    ? ` Anchors (${config.anchors.join(", ")}) kept warm for the next warp.`
+    : "";
+  logger.success(`${universeLabel(slot)} is stable.${anchorsMsg}`);
 }
 
 async function removeInjectedSymlinks(srcPath: string, config: Config): Promise<void> {

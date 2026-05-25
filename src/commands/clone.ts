@@ -60,6 +60,24 @@ export async function runClone(
   );
   logger.step(`🔗 wrote .git → ./.bare pointer`);
 
+  // `git clone --bare` doesn't set up the standard fetch refspec, so
+  // `refs/remotes/origin/*` stays empty and tools that diff against
+  // `origin/<branch>` fail. Configure it like a normal clone, then fetch
+  // to materialize the remote-tracking refs (fast — objects are local).
+  await runOrThrow(
+    "git",
+    ["-C", barePath, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"],
+    {},
+    "Failed to configure remote.origin.fetch"
+  );
+  await runOrThrow(
+    "git",
+    ["-C", barePath, "fetch", "--quiet", "origin"],
+    {},
+    "Failed to fetch origin after configuring refspec"
+  );
+  logger.step("🔗 wired refs/remotes/origin/* tracking refs");
+
   const initOptions: InitOptions = {
     name: options.name,
     universes: options.universes,

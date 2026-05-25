@@ -106,6 +106,12 @@ test("worm clone builds a bare-clone container and binds it", async (t) => {
   assert.equal(status.exitCode, 0, status.stderr);
   const state = JSON.parse(status.stdout);
   assert.equal(state.slots.length, 2);
+
+  // `git clone --bare` doesn't populate refs/remotes/origin/*; `worm clone`
+  // patches that up. Verify `origin/main` resolves inside the container.
+  const remoteHead = await execa("git", ["rev-parse", "origin/main"], { cwd: cloneTarget });
+  assert.equal(remoteHead.exitCode, 0);
+  assert.match(remoteHead.stdout, /^[0-9a-f]{40}$/);
 });
 
 test("warp mounts a branch with anchor + shared symlinks (when configured)", async (t) => {
