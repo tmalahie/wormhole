@@ -2,22 +2,26 @@ import path from "node:path";
 import { logger } from "../utils/logger.js";
 import { WormError } from "../utils/errors.js";
 import { ensureDir } from "../utils/fs.js";
-import { findProjectRoot } from "../core/project.js";
+import { findContainerRoot } from "../core/project.js";
 import { loadLocalConfig } from "../core/config.js";
 import {
   findSlotByBranch,
   pickFreeSlot,
   scanUniverses,
 } from "../core/universe.js";
-import { worktreeAdd } from "../core/git.js";
+import { listWorktrees, worktreeAdd } from "../core/git.js";
 import { ensureSymlink } from "../core/symlinks.js";
 import { hookEnv, runHook } from "../core/hooks.js";
+import { loadGlobalConfig } from "../core/global-config.js";
+import { run } from "../utils/exec.js";
 import { localSharedFile, slotAnchorPath } from "../core/paths.js";
 import { universeLabel } from "../core/universe.js";
 
 export interface WarpOptions {
   create?: boolean;
   skipHook?: boolean;
+  detach?: boolean;
+  open?: boolean;
 }
 
 export async function runWarp(
@@ -28,7 +32,7 @@ export async function runWarp(
     throw new WormError("Branch name is required.");
   }
 
-  const projectRoot = await findProjectRoot();
+  const projectRoot = await findContainerRoot();
   const config = await loadLocalConfig(projectRoot);
   const slots = await scanUniverses(projectRoot, config);
 
@@ -38,6 +42,26 @@ export async function runWarp(
       `Branch "${branch}" is already active in slot ${already.name} (${universeLabel(already)}).`,
       { hint: `Open it at ${already.srcPath}` }
     );
+  }
+
+  // Catch the case where the branch is checked out in a worktree OUTSIDE the
+  // multiverse (the main clone, or a manually-added worktree). Without this,
+  // `git worktree add` would fail with a raw `fatal:` message. --detach skips
+  // this check since it doesn't claim the branch ref.
+  if (!options.detach) {
+    const slotPaths = new Set(slots.map((s) => path.resolve(s.srcPath)));
+    const allWorktrees = await listWorktrees(projectRoot);
+    const external = allWorktrees.find(
+      (wt) => wt.branch === branch && !slotPaths.has(path.resolve(wt.path))
+    );
+    if (external) {
+      throw new WormError(
+        `Branch "${branch}" is checked out at ${external.path} (outside the multiverse).`,
+        {
+          hint: "Switch that clone to a different branch, warp a different branch here, or pass --detach for a read-only checkout.",
+        }
+      );
+    }
   }
 
   const target = pickFreeSlot(slots);
@@ -55,6 +79,7 @@ export async function runWarp(
 
   await worktreeAdd(projectRoot, target.srcPath, branch, {
     createIfMissing: options.create,
+    detach: options.detach,
   });
   logger.step(`🪢 worktree opened at ${logger.dim(target.srcPath)}`);
 
@@ -76,6 +101,23 @@ export async function runWarp(
   logger.success(`Quantum link established — ${logger.bold(branch)} is live in ${universeLabel(target)}.`);
   logger.raw("");
   logger.raw(`  🎯 cd ${target.srcPath}`);
+
+  if (options.open) {
+    await openInEditor(target.srcPath);
+  }
+}
+
+async function openInEditor(worktreePath: string): Promise<void> {
+  const { editor } = await loadGlobalConfig();
+  if (!editor) {
+    throw new WormError("No editor configured.", {
+      hint: "Set one once with `worm config editor <code|vim|subl|…>`.",
+    });
+  }
+  const { exitCode } = await run(editor, [worktreePath]);
+  if (exitCode !== 0) {
+    logger.warn(`Editor "${editor}" exited with code ${exitCode}.`);
+  }
 }
 
 async function prepareAnchorDirs(

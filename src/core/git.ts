@@ -79,25 +79,38 @@ export async function worktreeAdd(
   repoRoot: string,
   targetPath: string,
   branch: string,
-  options: { createIfMissing?: boolean } = {}
+  options: { createIfMissing?: boolean; detach?: boolean } = {}
 ): Promise<void> {
-  const exists = await branchExists(repoRoot, branch);
   const args = ["worktree", "add"];
-  if (!exists) {
-    if (!options.createIfMissing) {
+
+  if (options.detach) {
+    // Detached HEAD at branch's tip — doesn't claim refs/heads/<branch>,
+    // so it's safe even if the branch is checked out elsewhere.
+    if (!(await branchExists(repoRoot, branch))) {
       throw new WormError(`Branch "${branch}" does not exist.`, {
-        hint: `Pass --create to spin it up, or create it first with \`git branch ${branch}\`.`,
+        hint: `Create it first with \`git branch ${branch}\`, or drop --detach to use --create.`,
       });
     }
-    const remoteRef = await remoteBranchExists(repoRoot, branch);
-    if (remoteRef) {
-      args.push("--track", "-b", branch, targetPath, remoteRef);
-    } else {
-      args.push("-b", branch, targetPath);
-    }
+    args.push("--detach", targetPath, branch);
   } else {
-    args.push(targetPath, branch);
+    const exists = await branchExists(repoRoot, branch);
+    if (!exists) {
+      if (!options.createIfMissing) {
+        throw new WormError(`Branch "${branch}" does not exist.`, {
+          hint: `Pass --create to spin it up, or create it first with \`git branch ${branch}\`.`,
+        });
+      }
+      const remoteRef = await remoteBranchExists(repoRoot, branch);
+      if (remoteRef) {
+        args.push("--track", "-b", branch, targetPath, remoteRef);
+      } else {
+        args.push("-b", branch, targetPath);
+      }
+    } else {
+      args.push(targetPath, branch);
+    }
   }
+
   await runOrThrow(
     "git",
     args,
@@ -124,4 +137,22 @@ export async function worktreeRemove(
 
 export async function pruneWorktrees(repoRoot: string): Promise<void> {
   await run("git", ["worktree", "prune"], { cwd: repoRoot });
+}
+
+/**
+ * Returns porcelain status lines (modified + untracked) for the given worktree.
+ * `--untracked-files=all` so nested untracked paths are listed individually
+ * rather than collapsed into their parent directory.
+ */
+export async function dirtyFiles(worktreePath: string): Promise<string[]> {
+  const { stdout, exitCode } = await run(
+    "git",
+    ["status", "--porcelain", "--untracked-files=all"],
+    { cwd: worktreePath }
+  );
+  if (exitCode !== 0) return [];
+  return stdout
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .filter((line) => line.length > 0);
 }

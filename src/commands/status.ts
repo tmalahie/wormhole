@@ -1,7 +1,7 @@
 import path from "node:path";
 import pc from "picocolors";
 import { logger } from "../utils/logger.js";
-import { findProjectRoot, deriveProjectName } from "../core/project.js";
+import { findContainerRoot, deriveProjectName } from "../core/project.js";
 import { loadLocalConfig } from "../core/config.js";
 import { scanUniverses, universeLabel } from "../core/universe.js";
 import type { UniverseSlot } from "../types.js";
@@ -11,7 +11,7 @@ export interface StatusOptions {
 }
 
 export async function runStatus(options: StatusOptions = {}): Promise<void> {
-  const projectRoot = await findProjectRoot();
+  const projectRoot = await findContainerRoot();
   const config = await loadLocalConfig(projectRoot);
   const slots = await scanUniverses(projectRoot, config);
 

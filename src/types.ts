@@ -21,11 +21,10 @@ export type Hooks = z.infer<typeof HooksSchema>;
 
 export const DEFAULT_CONFIG: Config = {
   universes_count: 3,
-  anchors: ["node_modules", ".venv"],
-  shared_paths: [".env", "CLAUDE.local.md", "SKILL.md"],
+  anchors: [],
+  shared_paths: [],
   hooks: {
     on_warp: 'bash "$WORM_PROJECT_ROOT/.worm/scripts/setup.sh"',
-    on_collapse: "git stash -u",
   },
 };
 

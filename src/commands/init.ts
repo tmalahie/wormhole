@@ -8,7 +8,7 @@ import {
 } from "../utils/fs.js";
 import {
   deriveProjectName,
-  findProjectRoot,
+  findContainerRoot,
 } from "../core/project.js";
 import {
   globalProfileExists,
@@ -49,8 +49,21 @@ export interface InitOptions {
 }
 
 export async function runInit(options: InitOptions = {}): Promise<void> {
-  const projectRoot = await findProjectRoot();
+  // findContainerRoot walks up looking for a bare-clone container — that's
+  // exactly the precondition for init, so the validation is implicit.
+  const projectRoot = await findContainerRoot();
+  await bindProject(projectRoot, options);
+}
 
+/**
+ * The "make this directory a worm-managed multiverse" core flow.
+ * Shared between `worm init` (when called in an existing container) and
+ * `worm clone` (which sets up the container first, then calls this).
+ */
+export async function bindProject(
+  projectRoot: string,
+  options: InitOptions = {}
+): Promise<void> {
   await ensureGlobalRoot();
 
   const template = await resolveTemplate(options.template);
@@ -182,15 +195,6 @@ async function prepareGlobalProfile(
   }
 
   await materializeTemplateScripts(template, globalProjectScriptsDir(projectName));
-
-  await writeTextIfMissing(
-    globalProjectFile(projectName, "CLAUDE.local.md"),
-    `# CLAUDE.local.md\n\nAgent instructions for the ${projectName} project.\n`
-  );
-  await writeTextIfMissing(
-    globalProjectFile(projectName, "SKILL.md"),
-    `# SKILL.md\n\nSpecialized skills the agent should bring to ${projectName}.\n`
-  );
 
   return config;
 }

@@ -5,7 +5,6 @@ export const GLOBAL_ROOT_NAME = ".worm";
 export const LOCAL_ROOT_NAME = ".worm";
 export const SHARED_DIR_NAME = "shared";
 export const UNIVERSES_DIR_NAME = "universes";
-export const WORKTREE_SRC_NAME = "src";
 export const CONFIG_FILE_NAME = "config.json";
 export const MULTIVERSES_DIR_NAME = "multiverses";
 export const TEMPLATES_DIR_NAME = "templates";
@@ -28,6 +27,10 @@ export function globalMultiversesDir(): string {
 
 export function globalSharedDir(): string {
   return path.join(globalRoot(), SHARED_DIR_NAME);
+}
+
+export function globalConfigFile(): string {
+  return path.join(globalRoot(), CONFIG_FILE_NAME);
 }
 
 export function globalProjectDir(projectName: string): string {
@@ -90,8 +93,17 @@ export function slotPath(projectRoot: string, slot: string): string {
   return path.join(localUniversesDir(projectRoot), slot);
 }
 
-export function slotSrcPath(projectRoot: string, slot: string): string {
-  return path.join(slotPath(projectRoot, slot), WORKTREE_SRC_NAME);
+/**
+ * Top-level worktree directory: <project>/<projectName>-uniN/
+ * The git worktree lives here. Anchors stay in slotPath() (~/.worm/universes/uni-N/).
+ */
+export function worktreeDir(
+  projectRoot: string,
+  projectName: string,
+  slot: string
+): string {
+  const index = slotIndex(slot);
+  return path.join(projectRoot, `${projectName}-uni${index}`);
 }
 
 export function slotAnchorPath(
