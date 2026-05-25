@@ -8,8 +8,11 @@ import { WormError } from "../utils/errors.js";
  *
  * The scripts complete:
  *   - Subcommand names (static list).
- *   - Branch names for `warp`, `collapse`, `cd` — via `git for-each-ref`
- *     run from the user's cwd, so it works inside any worm container.
+ *   - Branch names for `warp` (via `git for-each-ref`).
+ *   - Currently-active branch names + slot indices for `collapse` / `cd` /
+ *     `tp` / `path` (via `git worktree list --porcelain`). Listing only
+ *     active refs keeps suggestions valid — a non-warped branch / free slot
+ *     would error if completed.
  *   - Config keys for `config`.
  */
 export function runCompletion(shell: string | undefined): void {
@@ -48,7 +51,11 @@ const COMMANDS = [
   "completion",
 ];
 
-const BRANCH_COMMANDS = ["warp", "collapse", "cd", "path"];
+// `warp` mounts a branch into a fresh slot — only branches are valid.
+const BRANCH_ONLY_COMMANDS = ["warp"];
+// `collapse`/`cd`/`tp`/`path` all flow through `worm path`'s resolver, which
+// accepts either a branch name or a 0-based slot index.
+const REF_COMMANDS = ["collapse", "cd", "tp", "path"];
 const CONFIG_KEYS = ["editor"];
 
 const BASH = `# worm bash completion. Source with: eval "$(worm completion bash)"
@@ -63,10 +70,17 @@ _worm_complete() {
   fi
 
   case "$cmd" in
-    ${BRANCH_COMMANDS.join("|")})
+    ${BRANCH_ONLY_COMMANDS.join("|")})
       local branches
       branches="$(git for-each-ref --format='%(refname:short)' refs/heads 2>/dev/null)"
       COMPREPLY=($(compgen -W "$branches" -- "$cur"))
+      ;;
+    ${REF_COMMANDS.join("|")})
+      local refs wtlist
+      wtlist="$(git worktree list --porcelain 2>/dev/null)"
+      refs="$(printf '%s\\n' "$wtlist" | sed -nE 's|^branch refs/heads/||p;')
+$(printf '%s\\n' "$wtlist" | sed -nE 's|^worktree .*-uni([0-9]+)$|\\1|p;')"
+      COMPREPLY=($(compgen -W "$refs" -- "$cur"))
       ;;
     config)
       if [[ $COMP_CWORD -eq 2 ]]; then
@@ -100,9 +114,15 @@ _worm_complete() {
   fi
 
   case "\${words[2]}" in
-    ${BRANCH_COMMANDS.join("|")})
+    ${BRANCH_ONLY_COMMANDS.join("|")})
       _worm_branches=(\${(f)"$(git for-each-ref --format='%(refname:short)' refs/heads 2>/dev/null)"})
       compadd -- $_worm_branches
+      ;;
+    ${REF_COMMANDS.join("|")})
+      local _worm_wtlist
+      _worm_wtlist="$(git worktree list --porcelain 2>/dev/null)"
+      compadd -- \${(f)"$(printf '%s\\n' "$_worm_wtlist" | sed -nE 's|^branch refs/heads/||p;')"}
+      compadd -- \${(f)"$(printf '%s\\n' "$_worm_wtlist" | sed -nE 's|^worktree .*-uni([0-9]+)$|\\1|p;')"}
       ;;
     config)
       if (( CURRENT == 3 )); then
