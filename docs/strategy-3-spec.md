@@ -185,6 +185,12 @@ hook blocks during `sync`/`universe add`:
 
 This replaces the hand-copied per-multiverse wiring with one generated source of truth (paths.ts).
 
+**Status — shipped in the MVP, with deltas from the sketch above (see §13.1):**
+- Recipes live in a single module `src/core/sandbox.ts` (not `sandbox/recipes/`); the registry is `none` + `docker`.
+- The `SandboxRecipe` interface is `artifacts()` only. `classifyCommand` is **data**, not a method — the policy (`neverSandbox`/`exemptDirs`) is written to `.worm/sandbox/sandbox-policy.json` and read by a fixed interceptor. `remediation` and the container lifecycle are **hardcoded to Docker** in the wiring, not behind methods.
+- Wiring lands in each slot's **`.claude/settings.local.json`** (gitignored), not `settings.json` — worm never dirties a tracked repo. The merge is idempotent and only touches entries whose command references `.worm/sandbox/`.
+- Artifacts: `Dockerfile`, `compose.yml`, `redirect-to-sandbox.js`, `sandbox-policy.json`. `promptShaping` is reserved in the schema but **not wired** yet.
+
 ## 7. Code-level refactor map
 
 | File | Change |
@@ -257,3 +263,44 @@ Concrete current state to migrate:
 2. `autostop` default (leave containers warm vs reclaim on SessionEnd) — §6.
 3. Whether `worm switch` is worth shipping vs relying on plain `git switch` — §3.
 4. `worm migrate` automation now, or manual non-destructive migration first — §9.
+
+## 13. Follow-ups (deferred — not in the MVP)
+
+The MVP shipped on `feat/strategy-3`: topology, commands, `sync`, docs/demo, and the sandbox
+engine (provision + per-slot `.claude/settings.local.json` wiring). These are the known,
+deliberate gaps — none block daily use; each is an additive layer on a clean seam.
+
+1. **True recipe pluggability.** Lift `remediation()` and the session/transport command builder
+   onto the `SandboxRecipe` interface so a non-Docker backend (podman, firejail, bubblewrap,
+   remote VM) is a registry entry, not a rewrite. Today the Docker model leaks into
+   `slotHookBlock` (`docker compose … up -d`) and the interceptor's `docker exec …` remediation
+   string, so the registry is effectively `none` + `docker` only.
+
+2. **Multi-agent `AgentAdapter` axis (orthogonal to the sandbox recipe).** All Claude coupling is
+   isolated to `src/core/sandbox.ts`; the core (pool, tunnels, hooks, manifest) is already
+   agent-neutral. An `AgentAdapter` would own (a) where session/interceptor hooks are installed
+   and (b) the deny-output format, so `recipe × adapter` compose. **Capability caveat:** the
+   sandbox *redirect* depends on the agent exposing a pre-execution deny hook (Claude Code's
+   `PreToolUse` → `permissionDecision: "deny"`). Agents without one still get the pool + tunnels +
+   lifecycle hooks, but not command interception.
+
+3. **`shareHistory` — share agent conversation history across slots** (an `AgentAdapter` feature
+   for Claude). A managed symlink `~/.claude/projects/<slot-slug>` → `<slot0-slug>` makes every
+   slot share Slot 0's timeline (slug = absolute path with `/` and `.` → `-`). Reuse the
+   deref-guarded managed-link manifest; strip on `universe rm`/`destroy`. Safe under parallel
+   agents (Claude writes one JSONL per session id, no clobber). Caveats: the slug rule is an
+   undocumented Claude internal (keep it in the adapter), and it writes into global
+   `~/.claude/projects/` state — guard hard, never touch a real history dir. Works **today** via
+   the `on_create` hook (`setup.sh`); first-class form is a `claude: { shareHistory: true }` toggle.
+
+4. **`promptShaping`** — wire the reserved `block-prompt-forcing` PreToolUse middleware (deny
+   command-substitution / control-flow / inline interpreters so the model restructures into
+   allowlistable steps). Schema field exists; default off; not yet emitted.
+
+5. **`worm migrate`** — automate the non-destructive §9 cutover (recognise a legacy bare container
+   via the retained `isBareCloneContainer` detector, clone alongside, re-create slots, re-apply
+   dirty files). Manual for now.
+
+6. **Secret hygiene (§11)** — purge tracked secrets from `~/.worm` history, move `shared_paths`
+   secrets to a store, ship a strict `.gitignore` in the shareable template. Prerequisite before
+   the grimoire is shared; independent of the code.
