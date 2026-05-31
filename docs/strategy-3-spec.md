@@ -73,7 +73,7 @@ there is no `universes_count` driver; you add a slot when you want one.
 
 | Command | Behaviour |
 |---|---|
-| `worm init` | Bind Slot 0 (the current normal clone). Provision `.worm/`, structural links, default sandbox recipe (`none`), empty managed-links manifest. Idempotent. No `--universes`. |
+| `worm init` | Bind Slot 0 (the current normal clone). Provision `.worm/`, structural links, default sandbox recipe (`none`), empty managed-links manifest. Then warm Slot 0 by firing `on_create` (non-fatal, `--skip-hook` to opt out) — `init` is the "create" event for the primary slot. Idempotent. No `--universes`. |
 | `worm universe add <branch>` | Create a permanent sibling worktree on `<branch>` (`-c`/`--track` if it doesn't exist). Refuse if the branch is already in a slot. Run `on_create` hook once, then `sync` the new slot. |
 | `worm universe rm <slot>` | Remove a slot. **Refuse if `slot == 0`**; refuse if dirty/untracked unless `--force`. Run `on_remove`, strip managed links, `git worktree remove` + prune. |
 | `worm switch <branch>` | In the current slot: `git switch [-c] <branch>` + re-run `on_create` (warm-up). Optional sugar over plain `git switch`. |
@@ -88,7 +88,7 @@ there is no `universes_count` driver; you add a slot when you want one.
 
 ```ts
 const HooksSchema = z.object({
-  on_create: z.string().optional(),   // was on_warp — runs once at slot creation / on `switch`
+  on_create: z.string().optional(),   // was on_warp — warms a slot: init/clone (Slot 0), universe add, switch
   on_remove: z.string().optional(),   // was on_collapse — runs at slot removal
 }).strict();
 

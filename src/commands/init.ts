@@ -30,7 +30,10 @@ import {
 } from "../core/paths.js";
 import { ensureSymlink } from "../core/symlinks.js";
 import { applySlotWiring, materializeSandbox } from "../core/sandbox.js";
+import { currentBranch } from "../core/git.js";
+import { hookEnv, runHook } from "../core/hooks.js";
 import { run } from "../utils/exec.js";
+import type { UniverseSlot } from "../types.js";
 import {
   materializeTemplateScripts,
   resolveTemplate,
@@ -43,6 +46,7 @@ export interface InitOptions {
   name?: string;
   template?: string;
   force?: boolean;
+  skipHook?: boolean;
 }
 
 export async function runInit(options: InitOptions = {}): Promise<void> {
@@ -130,6 +134,30 @@ export async function bindProject(
   for (const file of sandboxFiles) logger.step(`📦 sandbox/${file}`);
   if (await applySlotWiring(projectRoot, projectName, { name: "main", path: projectRoot }, config.sandbox)) {
     logger.step("⚡ wired sandbox hooks for Slot 0");
+  }
+
+  // Warm up Slot 0 by firing on_create — `init` is the "create" event for the
+  // primary slot. Same contract as `universe add`: non-fatal (the bind succeeds
+  // regardless) and skippable via --skip-hook for an already-warm checkout.
+  if (!options.skipHook && config.hooks.on_create) {
+    const branch = (await currentBranch(projectRoot)) ?? "";
+    const slot: UniverseSlot = {
+      index: 0,
+      name: "main",
+      isPrimary: true,
+      path: projectRoot,
+      status: "READY",
+      branch: branch || undefined,
+    };
+    const result = await runHook("on_create", config.hooks.on_create, {
+      cwd: projectRoot,
+      env: hookEnv(projectRoot, slot, branch),
+    });
+    if (result.ran && result.exitCode !== 0) {
+      logger.warn(
+        `on_create hook exited with code ${result.exitCode}. Slot 0 is bound but may not be fully warmed.`
+      );
+    }
   }
 
   logger.success(

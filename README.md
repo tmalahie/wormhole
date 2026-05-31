@@ -57,8 +57,8 @@ worm universe rm my-other-feature
 
 | Command | What it does |
 |---|---|
-| `worm clone <url> [path] [--name X] [--template <dir>]` | Recommended entry point. Normal-clones `<url>` and binds it as Slot 0. |
-| `worm init [--name X] [--template <dir>]` | Bind the current git clone as Slot 0. Lazily creates `~/.worm/` on first use. Idempotent. |
+| `worm clone <url> [path] [--name X] [--template <dir>] [--skip-hook]` | Recommended entry point. Normal-clones `<url>`, binds it as Slot 0, and warms it via `on_create`. |
+| `worm init [--name X] [--template <dir>] [--skip-hook]` | Bind the current git clone as Slot 0 and warm it via `on_create`. Lazily creates `~/.worm/` on first use. Idempotent. |
 | `worm status [--json]` | List every slot in the pool (Slot 0 + siblings) and the branch each is on. |
 | `worm universe add <branch> [--create] [--skip-hook]` | Create a permanent sibling worktree on `<branch>` at `<repo>-<N>`, link shared paths, run `on_create`. Refuses a branch already checked out in another slot. |
 | `worm universe rm <ref> [--force] [--skip-hook]` | Remove a sibling universe — `<ref>` is a slot index or a branch. Refuses Slot 0; refuses uncommitted changes unless `--force`; runs `on_remove`. |
@@ -115,7 +115,7 @@ Each project gets a config at `~/.worm/multiverses/<project-name>/config.json`. 
 Edit the file (or pre-seed a `--template <dir>`) to add what your project needs.
 
 - **`shared_paths`** — files tunnelled from `.worm/shared/` into every slot. If a matching file exists at `~/.worm/multiverses/<project>/<path>`, it's symlinked there; otherwise an empty local placeholder is created on first `init`. Common entries: `.env`, `CLAUDE.local.md`, `.mcp.json`. Run `worm sync` after changing this list.
-- **`hooks`** — `on_create` runs inside a slot when it's created (`universe add`) and on `switch`; `on_remove` runs before a slot is removed. The default `on_create` invokes `.worm/scripts/setup.sh` — drop your install commands there (`npm install`, `pip install -r requirements.txt`, …) instead of editing the JSON. A non-zero `on_create` warns but doesn't abort; a non-zero `on_remove` aborts the removal unless `--force`.
+- **`hooks`** — `on_create` runs inside a slot to warm it up: when Slot 0 is bound (`init` / `clone`), when a sibling is created (`universe add`), and on `switch`. `on_remove` runs before a slot is removed. The default `on_create` invokes `.worm/scripts/setup.sh` — drop your install commands there (`npm install`, `pip install -r requirements.txt`, …) instead of editing the JSON. A non-zero `on_create` warns but doesn't abort; a non-zero `on_remove` aborts the removal unless `--force`. Pass `--skip-hook` to any of these commands to bind/switch without running the hook (e.g. on an already-warm checkout).
 - **`sandbox`** — opt-in command sandbox (default `none`). With `recipe: "docker"`, `init`/`sync`/`universe add` generate a per-project `.worm/sandbox/` (a Dockerfile from `image` + `tools`, a compose file, and a `redirect-to-sandbox.js` interceptor) and wire each slot's `.claude/settings.local.json` so the slot's container auto-starts (`autostart`) and filesystem-mutating commands are redirected into it (mounted at the same path via `$SANDBOX_DIR`). Other fields: `neverSandbox`, `exemptDirs`, `autostop`. (`promptShaping` is reserved — not yet wired.) See [docs/strategy-3-spec.md](docs/strategy-3-spec.md) §6.
 
 ### Hook environment

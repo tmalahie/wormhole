@@ -35,6 +35,7 @@ program
   .option("-n, --name <name>", "Override the multiverse name (default: derived from the URL).")
   .option("-t, --template <dir>", "Seed from a custom template directory.")
   .option("-f, --force", "Overwrite existing profile fields when they conflict.")
+  .option("--skip-hook", "Skip the on_create hook that warms up Slot 0.")
   .action(async (url: string, target: string | undefined, opts) => {
     await runClone(url, target, opts);
   });
@@ -45,6 +46,7 @@ program
   .option("-n, --name <name>", "Override the project name (default: basename of the repo root).")
   .option("-t, --template <dir>", "Seed from a custom template directory (config.json + optional scripts/).")
   .option("-f, --force", "Overwrite existing profile fields when they conflict.")
+  .option("--skip-hook", "Skip the on_create hook that warms up Slot 0.")
   .action(async (opts) => {
     await runInit(opts);
   });

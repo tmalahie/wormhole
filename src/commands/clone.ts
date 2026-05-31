@@ -9,6 +9,7 @@ export interface CloneOptions {
   name?: string;
   template?: string;
   force?: boolean;
+  skipHook?: boolean;
 }
 
 export async function runClone(
@@ -44,6 +45,7 @@ export async function runClone(
     name: options.name,
     template: options.template,
     force: options.force,
+    skipHook: options.skipHook,
   });
 }
 

@@ -384,6 +384,36 @@ test("on_create hook runs setup.sh with WORM_* env vars on universe add", async 
   assert.match(r.stdout, new RegExp(`WT=${escapeRegex(siblingPath(root, 1))}`));
 });
 
+test("on_create hook warms Slot 0 on init; --skip-hook opts out", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+
+  await sb.worm(["init"]);
+
+  // Replace the default (comment-only) setup.sh with one that echoes the env.
+  const setupPath = path.join(sb.projectRoot, ".worm", "scripts", "setup.sh");
+  await writeFile(
+    setupPath,
+    `#!/usr/bin/env bash\necho "ROOT=$WORM_PROJECT_ROOT"\necho "SLOT=$WORM_SLOT"\necho "INDEX=$WORM_SLOT_INDEX"\necho "BRANCH=$WORM_BRANCH"\necho "WT=$WORM_WORKTREE"\n`
+  );
+  await chmod(setupPath, 0o755);
+
+  // Re-running init is the "create" event for Slot 0, so the hook fires there.
+  const r = await sb.worm(["init", "--force"]);
+  assert.equal(r.exitCode, 0, r.stderr);
+  const root = await realpath(sb.projectRoot);
+  assert.match(r.stdout, new RegExp(`ROOT=${escapeRegex(root)}`));
+  assert.match(r.stdout, /SLOT=main/);
+  assert.match(r.stdout, /INDEX=0/);
+  assert.match(r.stdout, /BRANCH=main/);
+  assert.match(r.stdout, new RegExp(`WT=${escapeRegex(root)}`));
+
+  // --skip-hook suppresses the warm-up while still re-binding cleanly.
+  const skipped = await sb.worm(["init", "--force", "--skip-hook"]);
+  assert.equal(skipped.exitCode, 0, skipped.stderr);
+  assert.doesNotMatch(skipped.stdout, /INDEX=0/);
+});
+
 test("init --template <dir> seeds config + scripts (new schema)", async (t) => {
   const sb = await createSandbox();
   t.after(() => sb.cleanup());
