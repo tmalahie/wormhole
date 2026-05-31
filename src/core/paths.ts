@@ -4,14 +4,13 @@ import path from "node:path";
 export const GLOBAL_ROOT_NAME = ".worm";
 export const LOCAL_ROOT_NAME = ".worm";
 export const SHARED_DIR_NAME = "shared";
-export const UNIVERSES_DIR_NAME = "universes";
 export const CONFIG_FILE_NAME = "config.json";
 export const MULTIVERSES_DIR_NAME = "multiverses";
 export const TEMPLATES_DIR_NAME = "templates";
 export const DEFAULT_TEMPLATE_NAME = "default";
 export const SCRIPTS_DIR_NAME = "scripts";
 export const SETUP_SCRIPT_NAME = "setup.sh";
-export const SLOT_PREFIX = "uni-";
+export const MANAGED_LINKS_FILE_NAME = ".managed-links.json";
 
 export function globalRoot(): string {
   const override = process.env.WORM_HOME;
@@ -45,6 +44,18 @@ export function globalProjectFile(projectName: string, fileName: string): string
   return path.join(globalProjectDir(projectName), fileName);
 }
 
+export function globalProjectScriptsDir(projectName: string): string {
+  return path.join(globalProjectDir(projectName), SCRIPTS_DIR_NAME);
+}
+
+export function globalTemplatesDir(): string {
+  return path.join(globalRoot(), TEMPLATES_DIR_NAME);
+}
+
+export function globalDefaultTemplateDir(): string {
+  return path.join(globalTemplatesDir(), DEFAULT_TEMPLATE_NAME);
+}
+
 export function localRoot(projectRoot: string): string {
   return path.join(projectRoot, LOCAL_ROOT_NAME);
 }
@@ -61,55 +72,27 @@ export function localSharedFile(projectRoot: string, fileName: string): string {
   return path.join(localSharedDir(projectRoot), fileName);
 }
 
-export function localUniversesDir(projectRoot: string): string {
-  return path.join(localRoot(projectRoot), UNIVERSES_DIR_NAME);
-}
-
 export function localScriptsDir(projectRoot: string): string {
   return path.join(localRoot(projectRoot), SCRIPTS_DIR_NAME);
 }
 
-export function globalProjectScriptsDir(projectName: string): string {
-  return path.join(globalProjectDir(projectName), SCRIPTS_DIR_NAME);
-}
-
-export function globalTemplatesDir(): string {
-  return path.join(globalRoot(), TEMPLATES_DIR_NAME);
-}
-
-export function globalDefaultTemplateDir(): string {
-  return path.join(globalTemplatesDir(), DEFAULT_TEMPLATE_NAME);
-}
-
-export function slotName(index: number): string {
-  return `${SLOT_PREFIX}${index}`;
-}
-
-export function slotIndex(slot: string): number {
-  return Number.parseInt(slot.slice(SLOT_PREFIX.length), 10);
-}
-
-export function slotPath(projectRoot: string, slot: string): string {
-  return path.join(localUniversesDir(projectRoot), slot);
+/**
+ * Path to the managed-link manifest at Slot 0 (.worm/.managed-links.json).
+ * `worm sync` records the symlinks it creates here so prune/GC only ever
+ * touches links it owns — never structural wiring or real user files.
+ */
+export function managedLinksFile(slot0Root: string): string {
+  return path.join(localRoot(slot0Root), MANAGED_LINKS_FILE_NAME);
 }
 
 /**
- * Top-level worktree directory: <project>/<projectName>-uniN/
- * The git worktree lives here. Anchors stay in slotPath() (~/.worm/universes/uni-N/).
+ * Directory of a sibling pool worktree. Slot 0 IS the primary working tree
+ * (slot0Root itself); extra slots are TRUE siblings one level up:
+ *   <parent>/<project>-uni<index>   e.g. ~/git/my-project-uni1
+ * Placing them outside slot 0 keeps git from seeing them as untracked dirs.
  */
-export function worktreeDir(
-  projectRoot: string,
-  projectName: string,
-  slot: string
-): string {
-  const index = slotIndex(slot);
-  return path.join(projectRoot, `${projectName}-uni${index}`);
-}
-
-export function slotAnchorPath(
-  projectRoot: string,
-  slot: string,
-  anchor: string
-): string {
-  return path.join(slotPath(projectRoot, slot), anchor);
+export function siblingWorktreeDir(slot0Root: string, index: number): string {
+  const parent = path.dirname(slot0Root);
+  const base = path.basename(slot0Root);
+  return path.join(parent, `${base}-uni${index}`);
 }

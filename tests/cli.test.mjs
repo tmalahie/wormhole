@@ -11,11 +11,16 @@ function escapeRegex(str) {
   return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+// Sibling pool worktree for slot N lives at `<root>-uniN`.
+function siblingPath(root, n) {
+  return `${root}-uni${n}`;
+}
+
 test("first `worm init` lazily provisions the global root", async (t) => {
   const sb = await createSandbox();
   t.after(() => sb.cleanup());
 
-  const r = await sb.worm(["init", "--universes", "2"]);
+  const r = await sb.worm(["init"]);
   assert.equal(r.exitCode, 0, r.stderr);
   assert.match(r.stdout, /First run/);
 
@@ -31,12 +36,13 @@ test("first `worm init` lazily provisions the global root", async (t) => {
   }
 });
 
-test("worm init binds an existing container, writes self-contained gitignore, is idempotent", async (t) => {
+test("worm init binds Slot 0: symlinks, excludes .worm, seeds manifest, idempotent", async (t) => {
   const sb = await createSandbox();
   t.after(() => sb.cleanup());
 
-  const r1 = await sb.worm(["init", "--universes", "2"]);
+  const r1 = await sb.worm(["init"]);
   assert.equal(r1.exitCode, 0, r1.stderr);
+  assert.match(r1.stdout, /bound to the Multiverse \(Slot 0\)/);
 
   const configLink = await readlink(path.join(sb.projectRoot, ".worm", "config.json"));
   assert.match(configLink, /multiverses\/.+\/config\.json$/);
@@ -44,43 +50,38 @@ test("worm init binds an existing container, writes self-contained gitignore, is
   const scriptsLink = await readlink(path.join(sb.projectRoot, ".worm", "scripts"));
   assert.match(scriptsLink, /multiverses\/.+\/scripts$/);
 
-  for (const slot of ["uni-0", "uni-1"]) {
-    const s = await stat(path.join(sb.projectRoot, ".worm", "universes", slot));
-    assert.ok(s.isDirectory());
-  }
-
-  // .worm/ self-ignores via its own .gitignore (`*`). Container itself has no
-  // working tree so root .gitignore is untouched.
-  const localIgnore = await readFile(
-    path.join(sb.projectRoot, ".worm", ".gitignore"),
-    "utf8"
-  );
+  // .worm/ self-ignores AND is excluded locally from Slot 0's git view.
+  const localIgnore = await readFile(path.join(sb.projectRoot, ".worm", ".gitignore"), "utf8");
   assert.equal(localIgnore.trim(), "*");
-  await assert.rejects(
-    stat(path.join(sb.projectRoot, ".gitignore")),
-    /ENOENT/,
-    "container has no working tree so worm should not write a root .gitignore"
-  );
+  const exclude = await readFile(path.join(sb.projectRoot, ".git", "info", "exclude"), "utf8");
+  assert.match(exclude, /^\/\.worm\/$/m);
 
-  const r2 = await sb.worm(["init", "--universes", "2"]);
+  // Managed-link manifest is seeded.
+  const manifest = JSON.parse(
+    await readFile(path.join(sb.projectRoot, ".worm", ".managed-links.json"), "utf8")
+  );
+  assert.equal(typeof manifest, "object");
+
+  const r2 = await sb.worm(["init"]);
   assert.equal(r2.exitCode, 0, r2.stderr);
   assert.match(r2.stdout, /Reused global profile/);
   assert.doesNotMatch(r2.stdout, /First run/, "global init should not run twice");
 });
 
-test("worm init refuses to run in a regular clone (not a bare-clone container)", async (t) => {
+test("worm init outside a git repo errors with a clone hint", async (t) => {
   const sb = await createSandbox();
   t.after(() => sb.cleanup());
 
-  // The seed repo itself is a normal clone — .git/ is a directory, not a pointer file.
-  // findContainerRoot walks up from there, finds nothing, errors out.
-  const r = await sb.worm(["init"], { cwd: sb.seedRepo });
+  const empty = await mkdtemp(path.join(tmpdir(), "worm-empty-"));
+  t.after(() => rm(empty, { recursive: true, force: true }));
+
+  const r = await sb.worm(["init"], { cwd: empty });
   assert.notEqual(r.exitCode, 0);
-  assert.match(r.stderr, /Not inside a worm container/);
+  assert.match(r.stderr, /Not inside a git repository/);
   assert.match(r.stderr, /worm clone/);
 });
 
-test("worm clone builds a bare-clone container and binds it", async (t) => {
+test("worm clone makes a normal clone (no .bare) and binds it as Slot 0", async (t) => {
   const sb = await createSandbox();
   t.after(() => sb.cleanup());
 
@@ -88,217 +89,277 @@ test("worm clone builds a bare-clone container and binds it", async (t) => {
   await rm(cloneTarget, { recursive: true, force: true });
   t.after(() => rm(cloneTarget, { recursive: true, force: true }));
 
-  const r = await sb.worm(["clone", sb.seedRepo, cloneTarget, "--universes", "2"], { cwd: tmpdir() });
+  const r = await sb.worm(["clone", sb.seedRepo, cloneTarget], { cwd: tmpdir() });
   assert.equal(r.exitCode, 0, r.stderr);
 
-  // .bare/ + .git pointer exist.
-  const bareStat = await stat(path.join(cloneTarget, ".bare"));
-  assert.ok(bareStat.isDirectory());
-  const gitPointer = await readFile(path.join(cloneTarget, ".git"), "utf8");
-  assert.match(gitPointer, /^gitdir:\s*\.\/?\.bare/);
+  // Normal clone: .git is a directory, no .bare.
+  const gitStat = await stat(path.join(cloneTarget, ".git"));
+  assert.ok(gitStat.isDirectory(), ".git should be a directory (normal clone)");
+  await assert.rejects(stat(path.join(cloneTarget, ".bare")), /ENOENT/, "no bare container");
 
   // .worm/ scaffolding got laid down.
-  await stat(path.join(cloneTarget, ".worm", "universes", "uni-0"));
-  await stat(path.join(cloneTarget, ".worm", "universes", "uni-1"));
+  await stat(path.join(cloneTarget, ".worm", "config.json"));
 
-  // Status works inside the cloned container.
+  // Status works inside the clone — one slot (Slot 0).
   const status = await sb.worm(["status", "--json"], { cwd: cloneTarget });
   assert.equal(status.exitCode, 0, status.stderr);
   const state = JSON.parse(status.stdout);
-  assert.equal(state.slots.length, 2);
+  assert.equal(state.slots.length, 1);
+  assert.equal(state.slots[0].isPrimary, true);
 
-  // `git clone --bare` doesn't populate refs/remotes/origin/*; `worm clone`
-  // patches that up. Verify `origin/main` resolves inside the container.
+  // origin/main resolves inside the clone.
   const remoteHead = await execa("git", ["rev-parse", "origin/main"], { cwd: cloneTarget });
-  assert.equal(remoteHead.exitCode, 0);
   assert.match(remoteHead.stdout, /^[0-9a-f]{40}$/);
 });
 
-test("warp mounts a branch with anchor + shared symlinks (when configured)", async (t) => {
+test("worm universe add creates a sibling worktree; status shows the pool", async (t) => {
   const sb = await createSandbox();
   t.after(() => sb.cleanup());
   await createBranch(sb.projectRoot, "feature-a");
 
-  // Defaults are empty — provide a template so we have something to symlink.
+  await sb.worm(["init"]);
+  const r = await sb.worm(["universe", "add", "feature-a", "--skip-hook"]);
+  assert.equal(r.exitCode, 0, r.stderr);
+  assert.match(r.stdout, /Universe 1 is live/);
+
+  const root = await realpath(sb.projectRoot);
+  const sib = siblingPath(root, 1);
+  const sibStat = await stat(sib);
+  assert.ok(sibStat.isDirectory(), "sibling worktree should exist one level up");
+
+  const state = JSON.parse((await sb.worm(["status", "--json"])).stdout);
+  assert.equal(state.slots.length, 2);
+  assert.equal(state.slots[0].index, 0);
+  assert.equal(state.slots[0].name, "main");
+  assert.equal(state.slots[0].isPrimary, true);
+  assert.equal(state.slots[0].branch, "main");
+  assert.equal(state.slots[1].index, 1);
+  assert.equal(state.slots[1].name, "uni-1");
+  assert.equal(state.slots[1].branch, "feature-a");
+  assert.equal(state.slots[1].path, sib);
+});
+
+test("shared_paths are linked into Slot 0 and each new universe", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await createBranch(sb.projectRoot, "feature-a");
+
   const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
   t.after(() => rm(templateDir, { recursive: true, force: true }));
   await writeFile(
     path.join(templateDir, "config.json"),
-    JSON.stringify({
-      universes_count: 2,
-      anchors: ["node_modules"],
-      shared_paths: [".env"],
-      hooks: {},
-    })
+    JSON.stringify({ shared_paths: [".env"], hooks: {} })
   );
 
   await sb.worm(["init", "--template", templateDir]);
 
-  const r = await sb.worm(["warp", "feature-a", "--skip-hook"]);
-  assert.equal(r.exitCode, 0, r.stderr);
+  // Slot 0 gets a relative tunnel into .worm/shared.
+  const slot0Link = await readlink(path.join(sb.projectRoot, ".env"));
+  assert.equal(slot0Link, ".worm/shared/.env");
 
-  const projectName = path.basename(sb.projectRoot);
-  const srcPath = path.join(sb.projectRoot, `${projectName}-uni0`);
+  await sb.worm(["universe", "add", "feature-a", "--skip-hook"]);
+  const root = await realpath(sb.projectRoot);
+  const sibLink = await readlink(path.join(siblingPath(root, 1), ".env"));
+  assert.match(sibLink, /^\.\.\/.+\/\.worm\/shared\/\.env$/);
+});
 
-  const anchor = await readlink(path.join(srcPath, "node_modules"));
-  assert.equal(
-    anchor,
-    "../.worm/universes/uni-0/node_modules",
-    "anchor should be a relative symlink up to .worm/"
+test("worm sync reconciles links and prunes removed shared_paths via the manifest", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+
+  const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
+  t.after(() => rm(templateDir, { recursive: true, force: true }));
+  await writeFile(
+    path.join(templateDir, "config.json"),
+    JSON.stringify({ shared_paths: [".env"], hooks: {} })
   );
 
-  const sharedEnv = await readlink(path.join(srcPath, ".env"));
-  assert.equal(sharedEnv, "../.worm/shared/.env");
+  await sb.worm(["init", "--template", templateDir]);
+  await stat(path.join(sb.projectRoot, ".env")); // link present
 
-  const srcStat = await stat(srcPath);
-  assert.ok(srcStat.isDirectory());
-});
+  // Drop .env from the config, then sync — the managed link should be pruned.
+  const name = path.basename(sb.projectRoot);
+  const cfgPath = path.join(sb.wormHome, "multiverses", name, "config.json");
+  await writeFile(cfgPath, JSON.stringify({ shared_paths: [], hooks: {} }));
 
-test("default config has no anchors or shared_paths — warp creates no symlinks", async (t) => {
-  const sb = await createSandbox();
-  t.after(() => sb.cleanup());
-  await createBranch(sb.projectRoot, "feature-a");
-
-  await sb.worm(["init", "--universes", "1"]);
-  await sb.worm(["warp", "feature-a", "--skip-hook"]);
-
-  const projectName = path.basename(sb.projectRoot);
-  const srcPath = path.join(sb.projectRoot, `${projectName}-uni0`);
-
-  // No defaults → none of the historically-presumed dirs should appear.
-  for (const name of ["node_modules", ".venv", ".env", "CLAUDE.local.md", "SKILL.md"]) {
-    await assert.rejects(
-      stat(path.join(srcPath, name)),
-      /ENOENT/,
-      `expected no auto-symlinked "${name}" with the empty defaults`
-    );
-  }
-});
-
-test("status --json reflects slot states", async (t) => {
-  const sb = await createSandbox();
-  t.after(() => sb.cleanup());
-  await createBranch(sb.projectRoot, "feature-a");
-
-  await sb.worm(["init", "--universes", "2"]);
-  await sb.worm(["warp", "feature-a", "--skip-hook"]);
-
-  const r = await sb.worm(["status", "--json"]);
+  const r = await sb.worm(["sync"]);
   assert.equal(r.exitCode, 0, r.stderr);
-  const state = JSON.parse(r.stdout);
-  assert.equal(state.slots.length, 2);
-  assert.equal(state.slots[0].name, "uni-0");
-  assert.equal(state.slots[0].status, "ACTIVE");
-  assert.equal(state.slots[0].branch, "feature-a");
-  assert.equal(state.slots[1].name, "uni-1");
-  assert.equal(state.slots[1].status, "STABLE");
+  await assert.rejects(stat(path.join(sb.projectRoot, ".env")), /ENOENT/, "pruned link gone");
+
+  // Idempotent.
+  const r2 = await sb.worm(["sync"]);
+  assert.equal(r2.exitCode, 0, r2.stderr);
 });
 
-test("collapse frees slot, keeps anchors warm, worktree removed", async (t) => {
+test("universe add refuses a branch already checked out in a slot", async (t) => {
   const sb = await createSandbox();
   t.after(() => sb.cleanup());
   await createBranch(sb.projectRoot, "feature-a");
 
-  // Provide a template with an anchor so we can verify it survives collapse.
+  await sb.worm(["init"]);
+
+  // `main` is checked out in Slot 0 → adding it as a universe is refused.
+  const dupMain = await sb.worm(["universe", "add", "main", "--skip-hook"]);
+  assert.notEqual(dupMain.exitCode, 0);
+  assert.match(dupMain.stderr, /already checked out/);
+
+  // After parking feature-a in a sibling, re-adding it is refused too.
+  await sb.worm(["universe", "add", "feature-a", "--skip-hook"]);
+  const dup = await sb.worm(["universe", "add", "feature-a", "--skip-hook"]);
+  assert.notEqual(dup.exitCode, 0);
+  assert.match(dup.stderr, /already checked out/);
+});
+
+test("universe rm: protects Slot 0, refuses dirty without --force, --force discards", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await createBranch(sb.projectRoot, "feature-a");
+
+  await sb.worm(["init"]);
+  await sb.worm(["universe", "add", "feature-a", "--skip-hook"]);
+  const root = await realpath(sb.projectRoot);
+  const sib = siblingPath(root, 1);
+
+  // Slot 0 is protected.
+  const protectMain = await sb.worm(["universe", "rm", "0"]);
+  assert.notEqual(protectMain.exitCode, 0);
+  assert.match(protectMain.stderr, /Refusing to remove Slot 0/);
+
+  // Make the sibling dirty.
+  await writeFile(path.join(sib, "scratch.txt"), "wip\n");
+  const refuse = await sb.worm(["universe", "rm", "1", "--skip-hook"]);
+  assert.notEqual(refuse.exitCode, 0);
+  assert.match(refuse.stderr, /uncommitted changes/);
+  assert.match(refuse.stderr, /scratch\.txt/);
+  await stat(sib); // still there
+
+  // --force removes it.
+  const ok = await sb.worm(["universe", "rm", "1", "--skip-hook", "--force"]);
+  assert.equal(ok.exitCode, 0, ok.stderr);
+  assert.match(ok.stderr, /Discarding 1 uncommitted change/);
+  await assert.rejects(stat(sib), /ENOENT/);
+
+  const state = JSON.parse((await sb.worm(["status", "--json"])).stdout);
+  assert.equal(state.slots.length, 1);
+});
+
+test("universe rm accepts a branch name as well as an index", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await createBranch(sb.projectRoot, "feature-a");
+
+  await sb.worm(["init"]);
+  await sb.worm(["universe", "add", "feature-a", "--skip-hook"]);
+
+  const r = await sb.worm(["universe", "rm", "feature-a", "--skip-hook"]);
+  assert.equal(r.exitCode, 0, r.stderr);
+  const state = JSON.parse((await sb.worm(["status", "--json"])).stdout);
+  assert.equal(state.slots.length, 1);
+});
+
+test("worm switch changes the current slot in place; refuses a branch held elsewhere", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await createBranch(sb.projectRoot, "feature-a");
+  await createBranch(sb.projectRoot, "feature-b");
+
+  await sb.worm(["init"]);
+
+  // Switch Slot 0 main → feature-a in place.
+  const r = await sb.worm(["switch", "feature-a", "--skip-hook"]);
+  assert.equal(r.exitCode, 0, r.stderr);
+  let state = JSON.parse((await sb.worm(["status", "--json"])).stdout);
+  assert.equal(state.slots[0].branch, "feature-a");
+
+  // Park feature-b in a sibling, then refuse to switch Slot 0 onto it.
+  await sb.worm(["universe", "add", "feature-b", "--skip-hook"]);
+  const blocked = await sb.worm(["switch", "feature-b", "--skip-hook"]);
+  assert.notEqual(blocked.exitCode, 0);
+  assert.match(blocked.stderr, /already checked out/);
+});
+
+test("on_create hook runs setup.sh with WORM_* env vars on universe add", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await createBranch(sb.projectRoot, "feature-a");
+
+  await sb.worm(["init"]);
+
+  const setupPath = path.join(sb.projectRoot, ".worm", "scripts", "setup.sh");
+  await writeFile(
+    setupPath,
+    `#!/usr/bin/env bash\necho "ROOT=$WORM_PROJECT_ROOT"\necho "SLOT=$WORM_SLOT"\necho "INDEX=$WORM_SLOT_INDEX"\necho "BRANCH=$WORM_BRANCH"\necho "WT=$WORM_WORKTREE"\n`
+  );
+  await chmod(setupPath, 0o755);
+
+  const r = await sb.worm(["universe", "add", "feature-a"]);
+  assert.equal(r.exitCode, 0, r.stderr);
+  const root = await realpath(sb.projectRoot);
+  assert.match(r.stdout, new RegExp(`ROOT=${escapeRegex(root)}`));
+  assert.match(r.stdout, /SLOT=uni-1/);
+  assert.match(r.stdout, /INDEX=1/);
+  assert.match(r.stdout, /BRANCH=feature-a/);
+  assert.match(r.stdout, new RegExp(`WT=${escapeRegex(siblingPath(root, 1))}`));
+});
+
+test("init --template <dir> seeds config + scripts (new schema)", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+
   const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
   t.after(() => rm(templateDir, { recursive: true, force: true }));
   await writeFile(
     path.join(templateDir, "config.json"),
     JSON.stringify({
-      universes_count: 1,
+      shared_paths: [".envrc"],
+      hooks: { on_create: "echo custom-template" },
+    })
+  );
+  await mkdir(path.join(templateDir, "scripts"), { recursive: true });
+  await writeFile(path.join(templateDir, "scripts", "setup.sh"), "#!/usr/bin/env bash\necho from-template\n");
+
+  const r = await sb.worm(["init", "--template", templateDir]);
+  assert.equal(r.exitCode, 0, r.stderr);
+
+  const config = JSON.parse(await readFile(path.join(sb.projectRoot, ".worm", "config.json"), "utf8"));
+  assert.deepEqual(config.shared_paths, [".envrc"]);
+  assert.equal(config.hooks.on_create, "echo custom-template");
+
+  const setup = await readFile(path.join(sb.projectRoot, ".worm", "scripts", "setup.sh"), "utf8");
+  assert.match(setup, /from-template/);
+});
+
+test("init --template <missing> errors with a hint", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+
+  const r = await sb.worm(["init", "--template", "/does/not/exist"]);
+  assert.notEqual(r.exitCode, 0);
+  assert.match(r.stderr, /Template directory not found/);
+});
+
+test("legacy config (universes_count / anchors / on_warp) is tolerated on load", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+
+  await sb.worm(["init"]);
+
+  // Simulate a pre-Strategy-3 profile config.
+  const name = path.basename(sb.projectRoot);
+  const cfgPath = path.join(sb.wormHome, "multiverses", name, "config.json");
+  await writeFile(
+    cfgPath,
+    JSON.stringify({
+      universes_count: 3,
       anchors: ["node_modules"],
       shared_paths: [],
-      hooks: {},
+      hooks: { on_warp: "echo hi", on_collapse: "echo bye" },
     })
   );
 
-  await sb.worm(["init", "--template", templateDir]);
-  await sb.worm(["warp", "feature-a", "--skip-hook"]);
-
-  const r = await sb.worm(["collapse", "feature-a", "--skip-hook"]);
+  // A command that loads config (sync) must not choke on the legacy shape.
+  const r = await sb.worm(["sync"]);
   assert.equal(r.exitCode, 0, r.stderr);
-
-  const anchor = await stat(
-    path.join(sb.projectRoot, ".worm", "universes", "uni-0", "node_modules")
-  );
-  assert.ok(anchor.isDirectory(), "node_modules anchor should survive collapse");
-
-  const projectName = path.basename(sb.projectRoot);
-  await assert.rejects(
-    stat(path.join(sb.projectRoot, `${projectName}-uni0`)),
-    /ENOENT/,
-    "top-level worktree dir should be removed by collapse"
-  );
-
-  const status = await sb.worm(["status", "--json"]);
-  const state = JSON.parse(status.stdout);
-  assert.equal(state.slots[0].status, "STABLE");
-});
-
-test("warp into freed slot reuses uni-0 (anchors stay hot)", async (t) => {
-  const sb = await createSandbox();
-  t.after(() => sb.cleanup());
-  await createBranch(sb.projectRoot, "feature-a");
-
-  await sb.worm(["init", "--universes", "2"]);
-  await sb.worm(["warp", "feature-a", "--skip-hook"]);
-  await sb.worm(["collapse", "feature-a", "--skip-hook"]);
-
-  const r = await sb.worm(["warp", "feature-a", "--skip-hook"]);
-  assert.equal(r.exitCode, 0, r.stderr);
-  assert.match(r.stdout, /uni-0/);
-});
-
-test("warp fails with helpful error when no slot is free", async (t) => {
-  const sb = await createSandbox();
-  t.after(() => sb.cleanup());
-  await createBranch(sb.projectRoot, "a");
-  await createBranch(sb.projectRoot, "b");
-  await createBranch(sb.projectRoot, "c");
-
-  await sb.worm(["init", "--universes", "2"]);
-  await sb.worm(["warp", "a", "--skip-hook"]);
-  await sb.worm(["warp", "b", "--skip-hook"]);
-
-  const r = await sb.worm(["warp", "c", "--skip-hook"]);
-  assert.notEqual(r.exitCode, 0);
-  assert.match(r.stderr, /No free universe slot/);
-  assert.match(r.stderr, /Collapse an active branch/);
-});
-
-test("warp refuses to mount the same branch twice", async (t) => {
-  const sb = await createSandbox();
-  t.after(() => sb.cleanup());
-  await createBranch(sb.projectRoot, "a");
-
-  await sb.worm(["init", "--universes", "2"]);
-  await sb.worm(["warp", "a", "--skip-hook"]);
-
-  const r = await sb.worm(["warp", "a", "--skip-hook"]);
-  assert.notEqual(r.exitCode, 0);
-  assert.match(r.stderr, /already active in slot uni-0/);
-});
-
-test("warp --create makes a new branch on the fly", async (t) => {
-  const sb = await createSandbox();
-  t.after(() => sb.cleanup());
-
-  await sb.worm(["init", "--universes", "1"]);
-
-  const r = await sb.worm(["warp", "brand-new", "--skip-hook", "--create"]);
-  assert.equal(r.exitCode, 0, r.stderr);
-});
-
-test("warp without --create fails clearly for unknown branch", async (t) => {
-  const sb = await createSandbox();
-  t.after(() => sb.cleanup());
-
-  await sb.worm(["init", "--universes", "1"]);
-
-  const r = await sb.worm(["warp", "ghost", "--skip-hook"]);
-  assert.notEqual(r.exitCode, 0);
-  assert.match(r.stderr, /does not exist/);
-  assert.match(r.stderr, /--create/);
 });
 
 test("WORM_HOME takes precedence over HOME", async (t) => {
@@ -312,144 +373,22 @@ test("WORM_HOME takes precedence over HOME", async (t) => {
   assert.equal(r.exitCode, 0, r.stderr);
 
   await stat(path.join(sb.wormHome, "multiverses"));
-  await assert.rejects(
-    stat(path.join(sb.projectRoot, "fake-home", ".worm")),
-    /ENOENT/
-  );
+  await assert.rejects(stat(path.join(sb.projectRoot, "fake-home", ".worm")), /ENOENT/);
 });
 
-test("worm init outside a container errors with a clone hint", async (t) => {
-  const sb = await createSandbox();
-  t.after(() => sb.cleanup());
-
-  const empty = await mkdtemp(path.join(tmpdir(), "worm-empty-"));
-  t.after(() => rm(empty, { recursive: true, force: true }));
-
-  const r = await sb.worm(["init"], { cwd: empty });
-  assert.notEqual(r.exitCode, 0);
-  assert.match(r.stderr, /Not inside a worm container/);
-  assert.match(r.stderr, /worm clone/);
-});
-
-test("commands walk up to find the container from any subdirectory", async (t) => {
-  const sb = await createSandbox();
-  t.after(() => sb.cleanup());
-
-  await sb.worm(["init", "--universes", "2"]);
-
-  // Deep subdirectory inside the container — not at the root, not in a worktree yet.
-  const deep = path.join(sb.projectRoot, ".worm", "universes", "uni-0");
-  const r = await sb.worm(["status", "--json"], { cwd: deep });
-  assert.equal(r.exitCode, 0, r.stderr);
-  const state = JSON.parse(r.stdout);
-  assert.equal(state.slots.length, 2);
-});
-
-test("default on_warp hook runs scripts/setup.sh with WORM_* env vars", async (t) => {
+test("commands resolve Slot 0 from inside a sibling worktree", async (t) => {
   const sb = await createSandbox();
   t.after(() => sb.cleanup());
   await createBranch(sb.projectRoot, "feature-a");
-  await createBranch(sb.projectRoot, "feature-b");
 
-  await sb.worm(["init", "--universes", "2"]);
+  await sb.worm(["init"]);
+  await sb.worm(["universe", "add", "feature-a", "--skip-hook"]);
 
-  // Overwrite the default setup.sh to print the env vars we care about.
-  const setupPath = path.join(sb.projectRoot, ".worm", "scripts", "setup.sh");
-  await writeFile(
-    setupPath,
-    `#!/usr/bin/env bash\necho "ROOT=$WORM_PROJECT_ROOT"\necho "SLOT=$WORM_SLOT"\necho "INDEX=$WORM_SLOT_INDEX"\necho "BRANCH=$WORM_BRANCH"\n`
-  );
-  await chmod(setupPath, 0o755);
-
-  const r1 = await sb.worm(["warp", "feature-a"]);
-  assert.equal(r1.exitCode, 0, r1.stderr);
-  // On macOS, tmpdir paths resolve through /private/var/..., so compare realpaths.
-  const resolvedRoot = await realpath(sb.projectRoot);
-  assert.match(r1.stdout, new RegExp(`ROOT=${escapeRegex(resolvedRoot)}`));
-  assert.match(r1.stdout, /SLOT=uni-0/);
-  assert.match(r1.stdout, /INDEX=0/);
-  assert.match(r1.stdout, /BRANCH=feature-a/);
-
-  // Index advances with the slot — uni-1 should see INDEX=1.
-  const r2 = await sb.worm(["warp", "feature-b"]);
-  assert.equal(r2.exitCode, 0, r2.stderr);
-  assert.match(r2.stdout, /SLOT=uni-1/);
-  assert.match(r2.stdout, /INDEX=1/);
-});
-
-test("init --template <dir> seeds from a custom template", async (t) => {
-  const sb = await createSandbox();
-  t.after(() => sb.cleanup());
-
-  const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
-  t.after(() => rm(templateDir, { recursive: true, force: true }));
-
-  await writeFile(
-    path.join(templateDir, "config.json"),
-    JSON.stringify({
-      universes_count: 4,
-      anchors: ["vendor"],
-      shared_paths: [".envrc"],
-      hooks: { on_warp: "echo custom-template" },
-    })
-  );
-  await mkdir(path.join(templateDir, "scripts"), { recursive: true });
-  await writeFile(
-    path.join(templateDir, "scripts", "setup.sh"),
-    "#!/usr/bin/env bash\necho from-template\n"
-  );
-
-  const r = await sb.worm(["init", "--template", templateDir]);
+  const root = await realpath(sb.projectRoot);
+  const r = await sb.worm(["status", "--json"], { cwd: siblingPath(root, 1) });
   assert.equal(r.exitCode, 0, r.stderr);
-
-  const configPath = path.join(sb.projectRoot, ".worm", "config.json");
-  const config = JSON.parse(await readFile(configPath, "utf8"));
-  assert.equal(config.universes_count, 4);
-  assert.deepEqual(config.anchors, ["vendor"]);
-  assert.equal(config.hooks.on_warp, "echo custom-template");
-
-  const setupContents = await readFile(
-    path.join(sb.projectRoot, ".worm", "scripts", "setup.sh"),
-    "utf8"
-  );
-  assert.match(setupContents, /from-template/);
-
-  for (const slot of ["uni-0", "uni-1", "uni-2", "uni-3"]) {
-    const s = await stat(path.join(sb.projectRoot, ".worm", "universes", slot));
-    assert.ok(s.isDirectory());
-  }
-});
-
-test("init --template <missing> errors with a hint", async (t) => {
-  const sb = await createSandbox();
-  t.after(() => sb.cleanup());
-
-  const r = await sb.worm(["init", "--template", "/does/not/exist"]);
-  assert.notEqual(r.exitCode, 0);
-  assert.match(r.stderr, /Template directory not found/);
-});
-
-test("warp refuses when branch is checked out in a non-worm worktree", async (t) => {
-  const sb = await createSandbox();
-  t.after(() => sb.cleanup());
-  await createBranch(sb.projectRoot, "feature-side");
-
-  await sb.worm(["init", "--universes", "2"]);
-
-  // Manually create a worktree OUTSIDE worm's universes claiming the branch.
-  const sidePath = await mkdtemp(path.join(tmpdir(), "worm-side-"));
-  await rm(sidePath, { recursive: true, force: true });
-  await execa("git", ["worktree", "add", sidePath, "feature-side"], { cwd: sb.projectRoot });
-  t.after(async () => {
-    await execa("git", ["worktree", "remove", "--force", sidePath], { cwd: sb.projectRoot }).catch(() => {});
-    await rm(sidePath, { recursive: true, force: true });
-  });
-
-  const r = await sb.worm(["warp", "feature-side", "--skip-hook"]);
-  assert.notEqual(r.exitCode, 0);
-  assert.match(r.stderr, /outside the multiverse/);
-  assert.match(r.stderr, new RegExp(escapeRegex(sidePath)));
-  assert.doesNotMatch(r.stderr, /fatal:/, "should not surface git's raw error");
+  const state = JSON.parse(r.stdout);
+  assert.equal(state.slots.length, 2);
 });
 
 test("worm path resolves by branch and by slot index", async (t) => {
@@ -457,34 +396,28 @@ test("worm path resolves by branch and by slot index", async (t) => {
   t.after(() => sb.cleanup());
   await createBranch(sb.projectRoot, "feature-a");
 
-  await sb.worm(["init", "--universes", "2"]);
-  await sb.worm(["warp", "feature-a", "--skip-hook"]);
+  await sb.worm(["init"]);
+  await sb.worm(["universe", "add", "feature-a", "--skip-hook"]);
 
-  // On macOS, process.cwd() inside the spawned CLI resolves /var/... → /private/var/...
-  const resolvedRoot = await realpath(sb.projectRoot);
-  const projectName = path.basename(sb.projectRoot);
-  const expected0 = path.join(resolvedRoot, `${projectName}-uni0`);
-  const expected1 = path.join(resolvedRoot, `${projectName}-uni1`);
+  const root = await realpath(sb.projectRoot);
 
-  // By branch (active warp).
   const byBranch = await sb.worm(["path", "feature-a"]);
   assert.equal(byBranch.exitCode, 0, byBranch.stderr);
-  assert.equal(byBranch.stdout.trim(), expected0);
+  assert.equal(byBranch.stdout.trim(), siblingPath(root, 1));
 
-  // By slot index (stable slot, no warp yet — path still resolves).
-  const bySlot = await sb.worm(["path", "1"]);
-  assert.equal(bySlot.exitCode, 0, bySlot.stderr);
-  assert.equal(bySlot.stdout.trim(), expected1);
+  const byIndex0 = await sb.worm(["path", "0"]);
+  assert.equal(byIndex0.stdout.trim(), root);
 
-  // Unknown branch errors with hint.
+  const byIndex1 = await sb.worm(["path", "1"]);
+  assert.equal(byIndex1.stdout.trim(), siblingPath(root, 1));
+
   const bad = await sb.worm(["path", "ghost-branch"]);
   assert.notEqual(bad.exitCode, 0);
-  assert.match(bad.stderr, /not warped/);
+  assert.match(bad.stderr, /No universe matches/);
 
-  // Out-of-range index errors.
   const oob = await sb.worm(["path", "99"]);
   assert.notEqual(oob.exitCode, 0);
-  assert.match(oob.stderr, /out of range/);
+  assert.match(oob.stderr, /No universe with index/);
 });
 
 test("worm completion emits per-shell scripts and rejects unknown shells", async (t) => {
@@ -495,15 +428,12 @@ test("worm completion emits per-shell scripts and rejects unknown shells", async
   assert.equal(bash.exitCode, 0, bash.stderr);
   assert.match(bash.stdout, /^_worm_complete\(\) \{/m);
   assert.match(bash.stdout, /complete -F _worm_complete worm/);
-  // Static command list is present.
-  assert.match(bash.stdout, /init clone warp/);
-  // Branch completion is wired up for the right subcommands.
+  assert.match(bash.stdout, /init clone universe/);
   assert.match(bash.stdout, /git for-each-ref/);
 
   const zsh = await sb.worm(["completion", "zsh"]);
   assert.equal(zsh.exitCode, 0, zsh.stderr);
   assert.match(zsh.stdout, /compdef _worm_complete worm/);
-  assert.match(zsh.stdout, /git for-each-ref/);
 
   const bad = await sb.worm(["completion", "fish"]);
   assert.notEqual(bad.exitCode, 0);
@@ -527,134 +457,47 @@ test("worm config round-trips through ~/.worm/config.json", async (t) => {
 
   await sb.worm(["init"]);
 
-  // Unset by default.
   const empty = await sb.worm(["config", "editor"]);
   assert.equal(empty.exitCode, 0, empty.stderr);
   assert.match(empty.stdout, /\(unset\)/);
 
-  // Set and read back.
   const set = await sb.worm(["config", "editor", "code"]);
   assert.equal(set.exitCode, 0, set.stderr);
 
-  const persisted = JSON.parse(
-    await readFile(path.join(sb.wormHome, "config.json"), "utf8")
-  );
+  const persisted = JSON.parse(await readFile(path.join(sb.wormHome, "config.json"), "utf8"));
   assert.equal(persisted.editor, "code");
 
   const get = await sb.worm(["config", "editor"]);
   assert.match(get.stdout, /^code$/m);
 
-  // Unknown key surfaces a friendly error.
   const bad = await sb.worm(["config", "made-up-key"]);
   assert.notEqual(bad.exitCode, 0);
   assert.match(bad.stderr, /Unknown config key/);
 });
 
-test("warp --open without editor configured errors with a hint", async (t) => {
+test("worm destroy --force removes siblings, .worm/, and the global profile; Slot 0 survives", async (t) => {
   const sb = await createSandbox();
   t.after(() => sb.cleanup());
   await createBranch(sb.projectRoot, "feature-a");
 
-  await sb.worm(["init", "--universes", "1"]);
+  await sb.worm(["init", "--name", "demo"]);
+  await sb.worm(["universe", "add", "feature-a", "--skip-hook"]);
 
-  const r = await sb.worm(["warp", "feature-a", "--skip-hook", "--open"]);
-  assert.notEqual(r.exitCode, 0);
-  assert.match(r.stderr, /No editor configured/);
-  assert.match(r.stderr, /worm config editor/);
-});
-
-test("warp --detach works even when the branch is checked out elsewhere", async (t) => {
-  const sb = await createSandbox();
-  t.after(() => sb.cleanup());
-  await createBranch(sb.projectRoot, "feature-busy");
-
-  await sb.worm(["init", "--universes", "1"]);
-
-  // Claim the branch in an external worktree first.
-  const sidePath = await mkdtemp(path.join(tmpdir(), "worm-side-"));
-  await rm(sidePath, { recursive: true, force: true });
-  await execa("git", ["worktree", "add", sidePath, "feature-busy"], { cwd: sb.projectRoot });
-  t.after(async () => {
-    await execa("git", ["worktree", "remove", "--force", sidePath], { cwd: sb.projectRoot }).catch(() => {});
-    await rm(sidePath, { recursive: true, force: true });
-  });
-
-  // Without --detach: refused (Item 4 behavior).
-  const fail = await sb.worm(["warp", "feature-busy", "--skip-hook"]);
-  assert.notEqual(fail.exitCode, 0);
-  assert.match(fail.stderr, /outside the multiverse/);
-
-  // With --detach: succeeds; slot is ACTIVE with no branch (detached HEAD).
-  const ok = await sb.worm(["warp", "feature-busy", "--skip-hook", "--detach"]);
-  assert.equal(ok.exitCode, 0, ok.stderr);
-
-  const status = await sb.worm(["status", "--json"]);
-  const state = JSON.parse(status.stdout);
-  assert.equal(state.slots[0].status, "ACTIVE");
-  // Detached worktree → branch is "(detached)" per universe.ts classifySlot.
-  assert.equal(state.slots[0].branch, "(detached)");
-});
-
-test("collapse refuses on uncommitted changes; --force discards them", async (t) => {
-  const sb = await createSandbox();
-  t.after(() => sb.cleanup());
-  await createBranch(sb.projectRoot, "feature-a");
-
-  await sb.worm(["init", "--universes", "1"]);
-  await sb.worm(["warp", "feature-a", "--skip-hook"]);
-
-  const projectName = path.basename(sb.projectRoot);
-  const worktreePath = path.join(sb.projectRoot, `${projectName}-uni0`);
-
-  // Drop an untracked file into the worktree to make it dirty.
-  await writeFile(path.join(worktreePath, "scratch.txt"), "uncommitted work\n");
-
-  // Without --force, collapse should refuse and surface the dirty file.
-  const fail = await sb.worm(["collapse", "feature-a", "--skip-hook"]);
-  assert.notEqual(fail.exitCode, 0);
-  assert.match(fail.stderr, /uncommitted changes/);
-  assert.match(fail.stderr, /scratch\.txt/);
-  assert.match(fail.stderr, /--force/);
-
-  // Worktree is still mounted after the refusal.
-  const stillThere = await stat(worktreePath);
-  assert.ok(stillThere.isDirectory());
-
-  // With --force, collapse succeeds and discards the worktree (and the file).
-  const ok = await sb.worm(["collapse", "feature-a", "--skip-hook", "--force"]);
-  assert.equal(ok.exitCode, 0, ok.stderr);
-  // logger.warn writes to stderr, so the discard notice lands there.
-  assert.match(ok.stderr, /Discarding 1 uncommitted change/);
-  await assert.rejects(stat(worktreePath), /ENOENT/);
-});
-
-test("worm destroy --force unbinds the project and cleans up everywhere", async (t) => {
-  const sb = await createSandbox();
-  t.after(() => sb.cleanup());
-  await createBranch(sb.projectRoot, "feature-a");
-
-  await sb.worm(["init", "--name", "demo", "--universes", "2"]);
-  await sb.worm(["warp", "feature-a", "--skip-hook"]);
-
-  // Drop an untracked file in the active worktree — destroy --force should still proceed.
-  const worktreePath = path.join(sb.projectRoot, "demo-uni0");
-  await writeFile(path.join(worktreePath, "scratch.txt"), "dirty\n");
+  const root = await realpath(sb.projectRoot);
+  const sib = siblingPath(root, 1);
+  await writeFile(path.join(sib, "scratch.txt"), "dirty\n");
 
   const r = await sb.worm(["destroy", "--force"]);
   assert.equal(r.exitCode, 0, r.stderr);
   assert.match(r.stdout, /multiverse is no more/);
 
-  // .worm/ gone.
   await assert.rejects(stat(path.join(sb.projectRoot, ".worm")), /ENOENT/);
+  await assert.rejects(stat(sib), /ENOENT/, "sibling worktree removed");
+  await assert.rejects(stat(path.join(sb.wormHome, "multiverses", "demo")), /ENOENT/);
 
-  // Top-level worktree dir gone.
-  await assert.rejects(stat(worktreePath), /ENOENT/);
-
-  // Global profile gone.
-  await assert.rejects(
-    stat(path.join(sb.wormHome, "multiverses", "demo")),
-    /ENOENT/
-  );
+  // Slot 0 itself (the repo + its .git) is untouched.
+  const gitStat = await stat(path.join(sb.projectRoot, ".git"));
+  assert.ok(gitStat.isDirectory(), "Slot 0's repo must survive destroy");
 });
 
 test("worm destroy without --force refuses in a non-interactive shell", async (t) => {
@@ -662,118 +505,21 @@ test("worm destroy without --force refuses in a non-interactive shell", async (t
   t.after(() => sb.cleanup());
 
   await sb.worm(["init"]);
-
-  // sb.worm runs the CLI via execa with no TTY — process.stdin.isTTY is false.
   const r = await sb.worm(["destroy"]);
   assert.notEqual(r.exitCode, 0);
   assert.match(r.stderr, /non-interactive/);
   assert.match(r.stderr, /--force/);
-
-  // Nothing should have been touched.
   await stat(path.join(sb.projectRoot, ".worm"));
 });
 
 test("worm destroy errors clearly when project isn't bound", async (t) => {
   const sb = await createSandbox();
   t.after(() => sb.cleanup());
-  // Note: NO `worm init` — so the project has no .worm/.
+  // No `worm init` — no .worm/.
 
   const r = await sb.worm(["destroy", "--force"]);
   assert.notEqual(r.exitCode, 0);
   assert.match(r.stderr, /not bound/);
-});
-
-test("worm collapse accepts a slot index as well as a branch name", async (t) => {
-  const sb = await createSandbox();
-  t.after(() => sb.cleanup());
-  await createBranch(sb.projectRoot, "feature-a");
-  await createBranch(sb.projectRoot, "feature-b");
-
-  await sb.worm(["init", "--universes", "2"]);
-  await sb.worm(["warp", "feature-a", "--skip-hook"]);
-  await sb.worm(["warp", "feature-b", "--skip-hook"]);
-
-  // Collapse by index — uni-0 was feature-a.
-  const r0 = await sb.worm(["collapse", "0", "--skip-hook"]);
-  assert.equal(r0.exitCode, 0, r0.stderr);
-
-  let state = JSON.parse((await sb.worm(["status", "--json"])).stdout);
-  assert.equal(state.slots[0].status, "STABLE");
-  assert.equal(state.slots[1].status, "ACTIVE");
-  assert.equal(state.slots[1].branch, "feature-b");
-
-  // Collapse by branch still works.
-  const r1 = await sb.worm(["collapse", "feature-b", "--skip-hook"]);
-  assert.equal(r1.exitCode, 0, r1.stderr);
-
-  state = JSON.parse((await sb.worm(["status", "--json"])).stdout);
-  assert.equal(state.slots[1].status, "STABLE");
-
-  // Collapsing a stable slot by index errors with a clear status.
-  const bad = await sb.worm(["collapse", "0", "--skip-hook"]);
-  assert.notEqual(bad.exitCode, 0);
-  assert.match(bad.stderr, /not active/);
-
-  // Out-of-range index errors.
-  const oob = await sb.worm(["collapse", "99", "--skip-hook"]);
-  assert.notEqual(oob.exitCode, 0);
-  assert.match(oob.stderr, /out of range/);
-});
-
-test("worm universes prints current count, grows the multiverse, and refuses to shrink past an active slot", async (t) => {
-  const sb = await createSandbox();
-  t.after(() => sb.cleanup());
-  await createBranch(sb.projectRoot, "feature-a");
-
-  await sb.worm(["init", "--universes", "2"]);
-
-  // Read: no arg → current count.
-  const read = await sb.worm(["universes"]);
-  assert.equal(read.exitCode, 0, read.stderr);
-  assert.equal(read.stdout.trim(), "2");
-
-  // Grow: 2 → 4 creates uni-2 and uni-3 directories.
-  const grow = await sb.worm(["universes", "4"]);
-  assert.equal(grow.exitCode, 0, grow.stderr);
-  assert.match(grow.stdout, /2 → 4 universes/);
-  for (const slot of ["uni-2", "uni-3"]) {
-    const s = await stat(path.join(sb.projectRoot, ".worm", "universes", slot));
-    assert.ok(s.isDirectory(), `${slot} should be created on grow`);
-  }
-  let state = JSON.parse((await sb.worm(["status", "--json"])).stdout);
-  assert.equal(state.slots.length, 4);
-
-  // Warp into uni-3 so shrinking past it is blocked.
-  await sb.worm(["warp", "feature-a", "--skip-hook"]);                  // uni-0
-  await sb.worm(["warp", "any-1", "--create", "--skip-hook"]);          // uni-1
-  await sb.worm(["warp", "any-2", "--create", "--skip-hook"]);          // uni-2
-  await sb.worm(["warp", "blocker", "--create", "--skip-hook"]);        // uni-3
-
-  // Shrink: 4 → 2 should refuse because uni-2 and uni-3 are active.
-  const shrinkFail = await sb.worm(["universes", "2"]);
-  assert.notEqual(shrinkFail.exitCode, 0);
-  assert.match(shrinkFail.stderr, /Cannot shrink/);
-  assert.match(shrinkFail.stderr, /blocker/);
-
-  // Collapse the two trailing slots, then shrink succeeds.
-  await sb.worm(["collapse", "3", "--skip-hook"]);
-  await sb.worm(["collapse", "2", "--skip-hook"]);
-  const shrinkOk = await sb.worm(["universes", "2"]);
-  assert.equal(shrinkOk.exitCode, 0, shrinkOk.stderr);
-  assert.match(shrinkOk.stdout, /4 ← 2 universes/);
-
-  state = JSON.parse((await sb.worm(["status", "--json"])).stdout);
-  assert.equal(state.slots.length, 2);
-
-  // Same-count is a no-op.
-  const noop = await sb.worm(["universes", "2"]);
-  assert.equal(noop.exitCode, 0, noop.stderr);
-  assert.match(noop.stdout, /nothing to do/);
-
-  // Junk input errors clearly.
-  const bad = await sb.worm(["universes", "abc"]);
-  assert.notEqual(bad.exitCode, 0);
-  assert.match(bad.stderr, /not a valid universe count/);
 });
 
 test("default scripts/setup.sh is created and executable", async (t) => {
@@ -783,9 +529,7 @@ test("default scripts/setup.sh is created and executable", async (t) => {
   await sb.worm(["init"]);
   const setupPath = path.join(sb.projectRoot, ".worm", "scripts", "setup.sh");
   const s = await stat(setupPath);
-  // Owner exec bit (0o100) should be set after our chmod 0o755.
   assert.ok((s.mode & 0o100) !== 0, "setup.sh should be executable by owner");
-
   const contents = await readFile(setupPath, "utf8");
   assert.match(contents, /^#!\/usr\/bin\/env bash/);
 });

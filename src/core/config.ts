@@ -7,13 +7,40 @@ import {
   localConfigFile,
 } from "./paths.js";
 
+/**
+ * Map a pre-Strategy-3 config onto the current schema so old projects keep
+ * loading. The schema is `.strict()`, so unknown legacy keys would otherwise
+ * hard-fail. We drop `universes_count`/`anchors`/`max_universes` (emergent pool,
+ * no anchors, no cap) and rename the lifecycle hooks.
+ */
+function normalizeLegacyConfig(raw: unknown): unknown {
+  if (!raw || typeof raw !== "object") return raw;
+  const obj: Record<string, unknown> = { ...(raw as Record<string, unknown>) };
+  delete obj.universes_count;
+  delete obj.anchors;
+  delete obj.max_universes;
+  if (obj.hooks && typeof obj.hooks === "object") {
+    const hooks: Record<string, unknown> = { ...(obj.hooks as Record<string, unknown>) };
+    if (hooks.on_warp !== undefined && hooks.on_create === undefined) {
+      hooks.on_create = hooks.on_warp;
+    }
+    if (hooks.on_collapse !== undefined && hooks.on_remove === undefined) {
+      hooks.on_remove = hooks.on_collapse;
+    }
+    delete hooks.on_warp;
+    delete hooks.on_collapse;
+    obj.hooks = hooks;
+  }
+  return obj;
+}
+
 export async function loadConfigFromPath(filePath: string): Promise<Config> {
   if (!(await pathExists(filePath))) {
     throw new WormError(`Config file not found: ${filePath}`, {
-      hint: "Run `worm init` and `worm register` to set up a profile.",
+      hint: "Run `worm init` to set up a profile.",
     });
   }
-  const raw = await readJson<unknown>(filePath);
+  const raw = normalizeLegacyConfig(await readJson<unknown>(filePath));
   const result = ConfigSchema.safeParse(raw);
   if (!result.success) {
     const issues = result.error.issues
@@ -24,7 +51,7 @@ export async function loadConfigFromPath(filePath: string): Promise<Config> {
   return result.data;
 }
 
-export async function loadGlobalConfig(projectName: string): Promise<Config> {
+export async function loadGlobalProjectConfig(projectName: string): Promise<Config> {
   return loadConfigFromPath(globalProjectConfig(projectName));
 }
 

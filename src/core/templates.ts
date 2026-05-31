@@ -17,13 +17,14 @@ import {
 } from "./paths.js";
 
 export const DEFAULT_SETUP_SCRIPT = `#!/usr/bin/env bash
-# Runs after \`worm warp\` from inside the worktree's src/.
+# Warm-up hook (on_create). Runs from inside a slot's worktree when it is
+# created via \`worm universe add\` and on \`worm switch\`.
 # Add your install/setup commands here, for example:
 #   npm install
 #   pip install -r requirements.txt
 #   bundle install
 #
-# Env: $WORM_PROJECT_ROOT, $WORM_SLOT, $WORM_SLOT_INDEX (0-based), $WORM_BRANCH
+# Env: $WORM_PROJECT_ROOT, $WORM_SLOT, $WORM_SLOT_INDEX (0-based), $WORM_BRANCH, $WORM_WORKTREE
 `;
 
 export interface ResolvedTemplate {
