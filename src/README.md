@@ -39,7 +39,7 @@ Domain primitives. Pure functions where possible; the only side effects are file
 |---|---|
 | `paths.ts` | **Single source of truth** for every path. `globalRoot()` honours `WORM_HOME`. `siblingWorktreeDir`/`SLOT_DIR_INFIX` define the `<repo>-<N>` layout; `managedLinksFile` the manifest location. |
 | `project.ts` | `findSlot0Root()` (via `git rev-parse --git-common-dir`) is the root resolver used by every command but `init`/`clone`, which use `gitToplevel()`. Retains a legacy `isBareCloneContainer` detector for a future `worm migrate`. |
-| `config.ts` | Load / save / validate `Config` via zod. `normalizeLegacyConfig` keeps pre-Strategy-3 profiles loadable. |
+| `config.ts` | Load / save / validate `Config` via zod (`.strict()`, parsed as-is — no legacy normalization). |
 | `templates.ts` | Seed `~/.worm/templates/default/` and resolve a template (override → global default → built-in) into a `Config` + `scripts/`. |
 | `git.ts` | Typed wrappers for `git worktree {add,remove,list,prune}`, `switchBranch`, `currentBranch`, branch lookups, `dirtyFiles`. Parses porcelain output. |
 | `symlinks.ts` | `ensureSymlink()` — idempotent, prefers relative paths, refuses to overwrite real files. |

@@ -450,79 +450,30 @@ test("init --template <missing> errors with a hint", async (t) => {
   assert.match(r.stderr, /Template directory not found/);
 });
 
-test("legacy config (universes_count / anchors / on_warp) is tolerated on load", async (t) => {
+test("config is strict: legacy keys are rejected, not silently migrated", async (t) => {
   const sb = await createSandbox();
   t.after(() => sb.cleanup());
-
   await sb.worm(["init"]);
 
-  // Simulate a pre-Strategy-3 profile config.
   const name = path.basename(sb.projectRoot);
   const cfgPath = path.join(sb.wormHome, "multiverses", name, "config.json");
+
+  // A pre-Strategy-3 / pre-recipes shape. With back-compat removed, loading this
+  // must fail loudly (single-user project — no legacy normalizer).
   await writeFile(
     cfgPath,
     JSON.stringify({
       universes_count: 3,
       anchors: ["node_modules"],
       shared_paths: [],
-      hooks: { on_warp: "echo hi", on_collapse: "echo bye" },
+      hooks: { on_warp: "echo hi" },
+      sandbox: { recipe: "docker" },
     })
   );
 
-  // A command that loads config (sync) must not choke on the legacy shape.
   const r = await sb.worm(["sync"]);
-  assert.equal(r.exitCode, 0, r.stderr);
-});
-
-test("legacy flat `sandbox` config migrates into the `recipes` map", async (t) => {
-  const sb = await createSandbox();
-  t.after(() => sb.cleanup());
-  await sb.worm(["init"]);
-
-  const name = path.basename(sb.projectRoot);
-  const cfgPath = path.join(sb.wormHome, "multiverses", name, "config.json");
-
-  // Pre-recipes profile: a flat `sandbox` object with the docker recipe + the
-  // dropped `promptShaping` flag.
-  await writeFile(
-    cfgPath,
-    JSON.stringify({
-      shared_paths: [],
-      hooks: {},
-      sandbox: { recipe: "docker", tools: ["jq"], promptShaping: true },
-    })
-  );
-
-  // sync loads via the legacy normalizer and materializes the sandbox recipe
-  // under the new path — proving recipe: "docker" → recipes.sandbox.
-  const r = await sb.worm(["sync"]);
-  assert.equal(r.exitCode, 0, r.stderr);
-  const dockerfile = await readFile(
-    path.join(sb.projectRoot, ".worm", "recipes", "sandbox", "Dockerfile"),
-    "utf8"
-  );
-  assert.match(dockerfile, /\bjq\b/);
-
-  // recipe: "none" → no sandbox recipe (disabled by absence).
-  await writeFile(
-    cfgPath,
-    JSON.stringify({ shared_paths: [], hooks: {}, sandbox: { recipe: "none" } })
-  );
-  const sb2 = await createSandbox();
-  t.after(() => sb2.cleanup());
-  await sb2.worm(["init"]);
-  const name2 = path.basename(sb2.projectRoot);
-  await writeFile(
-    path.join(sb2.wormHome, "multiverses", name2, "config.json"),
-    JSON.stringify({ shared_paths: [], hooks: {}, sandbox: { recipe: "none" } })
-  );
-  const r2 = await sb2.worm(["sync"]);
-  assert.equal(r2.exitCode, 0, r2.stderr);
-  await assert.rejects(
-    stat(path.join(sb2.projectRoot, ".worm", "recipes")),
-    /ENOENT/,
-    "recipe: none migrates to an empty recipes map → nothing materialized"
-  );
+  assert.notEqual(r.exitCode, 0, "strict schema must reject unknown legacy keys");
+  assert.match(r.stderr, /Invalid config/);
 });
 
 test("WORM_HOME takes precedence over HOME", async (t) => {

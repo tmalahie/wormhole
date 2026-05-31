@@ -119,13 +119,12 @@ const ConfigSchema = z.object({
 flat `sandbox` object (folded into `recipes.sandbox`), and `promptShaping` (never wired; a future
 recipe). The old `recipe: "none"` sentinel is gone — disabled = key absent.
 
-**Backward-compat (critical):** the schema is `.strict()`, so existing configs that still carry
-`anchors` / `universes_count` / `on_warp` / `on_collapse` / a flat `sandbox` object will *fail to
-load*. `normalizeLegacyConfig` (`core/config.ts`) **tolerates-and-migrates**: strips the dead pool
-keys, maps `on_warp→on_create` / `on_collapse→on_remove`, and folds `sandbox:{recipe:"docker",…}` →
-`recipes.sandbox` (recipe `"none"` → empty map). Do not let `.strict()` hard-error on a pre-migration
-config. (Note: **template** configs are parsed *without* this normalizer, so a template must already
-use the current schema.)
+**No back-compat (single-user tool):** the schema is `.strict()` and configs are parsed **as-is** —
+there is no legacy normalizer. An unknown or renamed key (`anchors` / `universes_count` / `on_warp` /
+`on_collapse` / a flat `sandbox` object) is a hard `Invalid config` error. When the schema changes,
+migrate the on-disk profiles (`~/.worm/multiverses/<name>/config.json`) and the template in the same
+change rather than carrying a shim. (The earlier `normalizeLegacyConfig` shim was removed once the
+profiles were migrated.)
 
 ## 5. The `sync` convergence algorithm
 

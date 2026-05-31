@@ -72,11 +72,11 @@ Keep that in mind when reviewing changes: a "clever" addition that breaks idempo
 - The default `on_create` invokes `bash "$WORM_PROJECT_ROOT/.worm/scripts/setup.sh"`. Users edit `setup.sh` rather than the JSON config. Don't change the hook-command default without also updating the seeded `setup.sh` template.
 
 ### Config
-- `ConfigSchema` (`src/types.ts`) is `.strict()`. The per-project loader (`core/config.ts`) runs `normalizeLegacyConfig` first, which drops pre-Strategy-3 keys (`universes_count`, `anchors`, `max_universes`) and renames `on_warp`/`on_collapse` → `on_create`/`on_remove`, so old profiles keep loading. Add the same handling for any future schema change that would break existing configs.
+- `ConfigSchema` (`src/types.ts`) is `.strict()` and there is **no legacy normalization** — `core/config.ts` parses configs as-is, so an unknown or renamed key is a hard `Invalid config` error. This is a single-user tool; when you change the schema, migrate the on-disk profiles under `~/.worm/multiverses/<name>/config.json` (and the template) in the same change rather than adding a back-compat shim. The config shape: `{ shared_paths, hooks: { on_create?, on_remove? }, recipes: { <name>: <recipe-config> } }`.
 
 ### Templates
 - `~/.worm/templates/default/` is seeded on first global init by [src/core/templates.ts](src/core/templates.ts). Each new multiverse is bootstrapped from a template (CLI `--template <dir>` > global default > built-in `DEFAULT_CONFIG`).
-- After bootstrap each multiverse owns its files — templates are **copied**, never symlinked. Editing the template later won't affect existing projects. If you need to update an existing project, edit `~/.worm/multiverses/<name>/` directly. (Note: template configs are parsed with `ConfigSchema` directly, NOT through `normalizeLegacyConfig` — a template must use the current schema.)
+- After bootstrap each multiverse owns its files — templates are **copied**, never symlinked. Editing the template later won't affect existing projects. If you need to update an existing project, edit `~/.worm/multiverses/<name>/` directly. (Template configs are parsed with `ConfigSchema` directly — like every config now — so a template must use the current schema.)
 
 ## Don'ts
 
