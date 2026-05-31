@@ -15,8 +15,8 @@ import {
   worktreeAdd,
   worktreeRemove,
 } from "../core/git.js";
-import { localSandboxDir, siblingWorktreeDir } from "../core/paths.js";
-import { applySlotWiring, materializeSandbox } from "../core/sandbox.js";
+import { siblingWorktreeDir } from "../core/paths.js";
+import { applyRecipeWiring, materializeRecipes } from "../core/recipes.js";
 import { hookEnv, runHook } from "../core/hooks.js";
 import {
   readManifest,
@@ -92,11 +92,11 @@ export async function runUniverseAdd(
     }
   }
 
-  // Provision sandbox artifacts (idempotent) and wire this slot (no-op for recipe none).
+  // Provision recipe artifacts (idempotent) and wire this slot (no-op when none enabled).
   const projectName = await readProjectName(root);
-  await materializeSandbox(localSandboxDir(root), projectName, config.sandbox);
-  if (await applySlotWiring(root, projectName, { name: String(index), path: target }, config.sandbox)) {
-    logger.step("⚡ wired sandbox hooks");
+  await materializeRecipes(root, projectName, config.recipes);
+  if (await applyRecipeWiring(root, projectName, { name: String(index), path: target }, config.recipes)) {
+    logger.step("⚡ wired recipe hooks");
   }
 
   logger.success(`Universe ${index} is live on ${logger.bold(branch)}.`);

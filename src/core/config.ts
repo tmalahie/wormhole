@@ -11,7 +11,8 @@ import {
  * Map a pre-Strategy-3 config onto the current schema so old projects keep
  * loading. The schema is `.strict()`, so unknown legacy keys would otherwise
  * hard-fail. We drop `universes_count`/`anchors`/`max_universes` (emergent pool,
- * no anchors, no cap) and rename the lifecycle hooks.
+ * no anchors, no cap), rename the lifecycle hooks, and fold the old flat
+ * `sandbox` object into the keyed `recipes` map.
  */
 function normalizeLegacyConfig(raw: unknown): unknown {
   if (!raw || typeof raw !== "object") return raw;
@@ -31,6 +32,22 @@ function normalizeLegacyConfig(raw: unknown): unknown {
     delete hooks.on_collapse;
     obj.hooks = hooks;
   }
+  // Fold the pre-recipes `sandbox: { recipe: "none"|"docker", ... }` object into
+  // `recipes`. recipe "none" (or absent) → no sandbox recipe; "docker" → an
+  // enabled `recipes.sandbox` entry. The dropped `promptShaping` flag (never
+  // wired) is shed here. Only run if `recipes` isn't already present.
+  if (obj.sandbox && typeof obj.sandbox === "object" && obj.recipes === undefined) {
+    const sb: Record<string, unknown> = { ...(obj.sandbox as Record<string, unknown>) };
+    const recipe = sb.recipe;
+    delete sb.recipe;
+    delete sb.promptShaping;
+    const recipes: Record<string, unknown> = {};
+    if (recipe === "docker") {
+      recipes.sandbox = { backend: "docker", ...sb };
+    }
+    obj.recipes = recipes;
+  }
+  delete obj.sandbox;
   return obj;
 }
 

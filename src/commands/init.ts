@@ -23,13 +23,12 @@ import {
   globalSharedDir,
   localConfigFile,
   localRoot,
-  localSandboxDir,
   localScriptsDir,
   localSharedDir,
   localSharedFile,
 } from "../core/paths.js";
 import { ensureSymlink } from "../core/symlinks.js";
-import { applySlotWiring, materializeSandbox } from "../core/sandbox.js";
+import { applyRecipeWiring, materializeRecipes } from "../core/recipes.js";
 import { currentBranch } from "../core/git.js";
 import { hookEnv, runHook } from "../core/hooks.js";
 import { run } from "../utils/exec.js";
@@ -125,15 +124,11 @@ export async function bindProject(
   await reconcileSlotLinks(projectRoot, projectRoot, config.shared_paths, manifest);
   await writeManifest(projectRoot, manifest);
 
-  // Materialize the sandbox recipe (a no-op when recipe === "none").
-  const sandboxFiles = await materializeSandbox(
-    localSandboxDir(projectRoot),
-    projectName,
-    config.sandbox
-  );
-  for (const file of sandboxFiles) logger.step(`📦 sandbox/${file}`);
-  if (await applySlotWiring(projectRoot, projectName, { name: "main", path: projectRoot }, config.sandbox)) {
-    logger.step("⚡ wired sandbox hooks for Slot 0");
+  // Materialize enabled recipes' artifacts (a no-op when none are enabled).
+  const recipeFiles = await materializeRecipes(projectRoot, projectName, config.recipes);
+  for (const file of recipeFiles) logger.step(`📦 recipes/${file}`);
+  if (await applyRecipeWiring(projectRoot, projectName, { name: "main", path: projectRoot }, config.recipes)) {
+    logger.step("⚡ wired recipe hooks for Slot 0");
   }
 
   // Warm up Slot 0 by firing on_create — `init` is the "create" event for the

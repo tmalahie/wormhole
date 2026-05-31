@@ -58,7 +58,7 @@ Cross-cutting helpers. No domain knowledge here.
 | `exec.ts` | `run` (no throw), `runOrThrow` (throws `WormError` with stderr), `runShell` (for hooks). |
 
 ### `types.ts`
-Shared types and the canonical `ConfigSchema` (zod) + `DEFAULT_CONFIG` + `SandboxSchema`. Everything that touches config imports from here.
+Shared types and the canonical `ConfigSchema` (zod) + `DEFAULT_CONFIG` + `RecipesSchema` / `SandboxRecipeSchema`. Everything that touches config imports from here.
 
 ## Key invariants
 

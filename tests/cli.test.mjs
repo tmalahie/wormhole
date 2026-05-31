@@ -191,34 +191,35 @@ test("worm sync reconciles links and prunes removed shared_paths via the manifes
   assert.equal(r2.exitCode, 0, r2.stderr);
 });
 
-test("sandbox recipe: 'none' provisions nothing; 'docker' generates Dockerfile + compose", async (t) => {
-  // Default recipe is "none" → no sandbox dir.
+test("recipes: empty provisions nothing; sandbox generates Dockerfile + compose", async (t) => {
+  // Default recipes are empty → no recipes dir.
   const sbNone = await createSandbox();
   t.after(() => sbNone.cleanup());
   await sbNone.worm(["init"]);
   await assert.rejects(
-    stat(path.join(sbNone.projectRoot, ".worm", "sandbox")),
+    stat(path.join(sbNone.projectRoot, ".worm", "recipes")),
     /ENOENT/,
-    "the 'none' recipe writes nothing"
+    "no enabled recipe → nothing written"
   );
 
-  // A docker recipe generates artifacts under .worm/sandbox/.
+  // An enabled sandbox recipe generates artifacts under .worm/recipes/sandbox/.
   const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
   t.after(() => rm(templateDir, { recursive: true, force: true }));
   await writeFile(
     path.join(templateDir, "config.json"),
-    JSON.stringify({ shared_paths: [], hooks: {}, sandbox: { recipe: "docker", tools: ["jq"] } })
+    JSON.stringify({ shared_paths: [], hooks: {}, recipes: { sandbox: { tools: ["jq"] } } })
   );
 
   const sb = await createSandbox();
   t.after(() => sb.cleanup());
   await sb.worm(["init", "--template", templateDir]);
 
-  const dockerfile = await readFile(path.join(sb.projectRoot, ".worm", "sandbox", "Dockerfile"), "utf8");
+  const sandboxDir = path.join(sb.projectRoot, ".worm", "recipes", "sandbox");
+  const dockerfile = await readFile(path.join(sandboxDir, "Dockerfile"), "utf8");
   assert.match(dockerfile, /^FROM node:22-bookworm/m);
   assert.match(dockerfile, /\bjq\b/);
 
-  const compose = await readFile(path.join(sb.projectRoot, ".worm", "sandbox", "compose.yml"), "utf8");
+  const compose = await readFile(path.join(sandboxDir, "compose.yml"), "utf8");
   const name = path.basename(sb.projectRoot);
   assert.match(compose, new RegExp(`name: ${escapeRegex(name)}-sandbox`));
   assert.match(compose, /\$\{SANDBOX_DIR/, "mount comes from $SANDBOX_DIR at run time");
@@ -230,7 +231,7 @@ test("sandbox wiring writes idempotent per-slot hooks into settings.local.json",
   t.after(() => rm(templateDir, { recursive: true, force: true }));
   await writeFile(
     path.join(templateDir, "config.json"),
-    JSON.stringify({ shared_paths: [], hooks: {}, sandbox: { recipe: "docker" } })
+    JSON.stringify({ shared_paths: [], hooks: {}, recipes: { sandbox: {} } })
   );
 
   const sb = await createSandbox();
@@ -239,18 +240,17 @@ test("sandbox wiring writes idempotent per-slot hooks into settings.local.json",
   await sb.worm(["init", "--template", templateDir]);
 
   const name = path.basename(sb.projectRoot);
+  const sandboxDir = path.join(sb.projectRoot, ".worm", "recipes", "sandbox");
   const readLocal = async (dir) =>
     JSON.parse(await readFile(path.join(dir, ".claude", "settings.local.json"), "utf8"));
 
   // Interceptor + policy generated — and the interceptor is valid JS (it's
   // embedded via String.raw and the suite otherwise never executes it).
-  const interceptor = path.join(sb.projectRoot, ".worm", "sandbox", "redirect-to-sandbox.js");
+  const interceptor = path.join(sandboxDir, "redirect-to-sandbox.js");
   await stat(interceptor);
   const check = await execa("node", ["--check", interceptor], { reject: false });
   assert.equal(check.exitCode, 0, `generated interceptor must be valid JS:\n${check.stderr}`);
-  const policy = JSON.parse(
-    await readFile(path.join(sb.projectRoot, ".worm", "sandbox", "sandbox-policy.json"), "utf8")
-  );
+  const policy = JSON.parse(await readFile(path.join(sandboxDir, "sandbox-policy.json"), "utf8"));
   assert.ok(Array.isArray(policy.neverSandbox));
 
   // Slot 0 wired in settings.local.json (the gitignored target).
@@ -472,6 +472,57 @@ test("legacy config (universes_count / anchors / on_warp) is tolerated on load",
   // A command that loads config (sync) must not choke on the legacy shape.
   const r = await sb.worm(["sync"]);
   assert.equal(r.exitCode, 0, r.stderr);
+});
+
+test("legacy flat `sandbox` config migrates into the `recipes` map", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init"]);
+
+  const name = path.basename(sb.projectRoot);
+  const cfgPath = path.join(sb.wormHome, "multiverses", name, "config.json");
+
+  // Pre-recipes profile: a flat `sandbox` object with the docker recipe + the
+  // dropped `promptShaping` flag.
+  await writeFile(
+    cfgPath,
+    JSON.stringify({
+      shared_paths: [],
+      hooks: {},
+      sandbox: { recipe: "docker", tools: ["jq"], promptShaping: true },
+    })
+  );
+
+  // sync loads via the legacy normalizer and materializes the sandbox recipe
+  // under the new path — proving recipe: "docker" → recipes.sandbox.
+  const r = await sb.worm(["sync"]);
+  assert.equal(r.exitCode, 0, r.stderr);
+  const dockerfile = await readFile(
+    path.join(sb.projectRoot, ".worm", "recipes", "sandbox", "Dockerfile"),
+    "utf8"
+  );
+  assert.match(dockerfile, /\bjq\b/);
+
+  // recipe: "none" → no sandbox recipe (disabled by absence).
+  await writeFile(
+    cfgPath,
+    JSON.stringify({ shared_paths: [], hooks: {}, sandbox: { recipe: "none" } })
+  );
+  const sb2 = await createSandbox();
+  t.after(() => sb2.cleanup());
+  await sb2.worm(["init"]);
+  const name2 = path.basename(sb2.projectRoot);
+  await writeFile(
+    path.join(sb2.wormHome, "multiverses", name2, "config.json"),
+    JSON.stringify({ shared_paths: [], hooks: {}, sandbox: { recipe: "none" } })
+  );
+  const r2 = await sb2.worm(["sync"]);
+  assert.equal(r2.exitCode, 0, r2.stderr);
+  await assert.rejects(
+    stat(path.join(sb2.projectRoot, ".worm", "recipes")),
+    /ENOENT/,
+    "recipe: none migrates to an empty recipes map → nothing materialized"
+  );
 });
 
 test("WORM_HOME takes precedence over HOME", async (t) => {

@@ -9,19 +9,29 @@ export const HooksSchema = z
   })
   .strict();
 
-export const SandboxSchema = z
+// --- Recipes: composable capabilities, keyed by name (provider-style). A
+// recipe is ENABLED iff its key is present in `recipes`; each value is validated
+// by that recipe's own schema. The engine in `core/recipes.ts` iterates the
+// enabled set to materialize artifacts and wire each slot's settings.local.json.
+
+export const SandboxRecipeSchema = z
   .object({
-    recipe: z.enum(["none", "docker"]).default("none"),
-    // The following only apply when recipe !== "none":
+    backend: z.enum(["docker"]).default("docker"),
     image: z.string().default("node:22-bookworm"),
     tools: z.array(z.string()).default([]),
     neverSandbox: z.array(z.string()).default(["node", "npm", "npx", "pnpm", "yarn"]),
     exemptDirs: z.array(z.string()).default([]),
-    promptShaping: z.boolean().default(false),
     autostart: z.boolean().default(true),
     autostop: z.boolean().default(false),
   })
   .strict();
+
+export const RecipesSchema = z
+  .object({
+    sandbox: SandboxRecipeSchema.optional(),
+  })
+  .strict()
+  .default({});
 
 export const ConfigSchema = z
   .object({
@@ -29,13 +39,14 @@ export const ConfigSchema = z
     // The pool is emergent — slots are born via `worm universe add <branch>`.
     shared_paths: z.array(z.string().min(1)).default([]),
     hooks: HooksSchema.default({}),
-    sandbox: SandboxSchema.default({}),
+    recipes: RecipesSchema,
   })
   .strict();
 
 export type Config = z.infer<typeof ConfigSchema>;
 export type Hooks = z.infer<typeof HooksSchema>;
-export type SandboxConfig = z.infer<typeof SandboxSchema>;
+export type RecipesConfig = z.infer<typeof RecipesSchema>;
+export type SandboxRecipeConfig = z.infer<typeof SandboxRecipeSchema>;
 
 export const DEFAULT_CONFIG: Config = ConfigSchema.parse({
   hooks: { on_create: 'bash "$WORM_PROJECT_ROOT/.worm/scripts/setup.sh"' },

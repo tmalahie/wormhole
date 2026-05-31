@@ -92,30 +92,40 @@ const HooksSchema = z.object({
   on_remove: z.string().optional(),   // was on_collapse — runs at slot removal
 }).strict();
 
-const SandboxSchema = z.object({
-  recipe:        z.enum(["none", "docker"]).default("none"),  // opt-in; default inherits NOTHING
-  // docker-recipe fields (ignored when recipe === "none"):
+// Recipes are composable capabilities, keyed by name (provider-style). A recipe
+// is ENABLED iff its key is present; each value is validated by its own schema.
+const SandboxRecipeSchema = z.object({
+  backend:       z.enum(["docker"]).default("docker"),        // future: more backends
+  image:         z.string().default("node:22-bookworm"),
   tools:         z.array(z.string()).default([]),             // apt packages → one RUN line
   neverSandbox:  z.array(z.string()).default(["node","npm","npx","pnpm","yarn"]),
   exemptDirs:    z.array(z.string()).default([]),
-  promptShaping: z.boolean().default(false),                  // block-prompt-forcing middleware
   autostart:     z.boolean().default(true),                   // SessionStart: docker compose up -d
   autostop:      z.boolean().default(false),                  // SessionEnd: docker compose down
 }).strict();
 
+const RecipesSchema = z.object({
+  sandbox:       SandboxRecipeSchema.optional(),              // present = enabled
+}).strict().default({});
+
 const ConfigSchema = z.object({
   shared_paths:  z.array(z.string()).default([]),             // the "wormholes"/tunnels into the Manifest
   hooks:         HooksSchema.default({}),
-  sandbox:       SandboxSchema.default({ recipe: "none" }),
+  recipes:       RecipesSchema,
 }).strict();   // pool size is fully emergent — no count, no cap
 ```
 
-**Removed:** `anchors` (legacy ephemeral-warmth concept), `universes_count` (pool is emergent).
+**Removed:** `anchors` (legacy ephemeral-warmth concept), `universes_count` (pool is emergent), the
+flat `sandbox` object (folded into `recipes.sandbox`), and `promptShaping` (never wired; a future
+recipe). The old `recipe: "none"` sentinel is gone — disabled = key absent.
 
 **Backward-compat (critical):** the schema is `.strict()`, so existing configs that still carry
-`anchors` / `universes_count` / `on_warp` / `on_collapse` will *fail to load*. The loader must
-**tolerate-and-migrate** legacy keys (strip + warn, mapping `on_warp→on_create`, `on_collapse→on_remove`),
-or `worm migrate` rewrites them. Do not let `.strict()` hard-error on a pre-migration config.
+`anchors` / `universes_count` / `on_warp` / `on_collapse` / a flat `sandbox` object will *fail to
+load*. `normalizeLegacyConfig` (`core/config.ts`) **tolerates-and-migrates**: strips the dead pool
+keys, maps `on_warp→on_create` / `on_collapse→on_remove`, and folds `sandbox:{recipe:"docker",…}` →
+`recipes.sandbox` (recipe `"none"` → empty map). Do not let `.strict()` hard-error on a pre-migration
+config. (Note: **template** configs are parsed *without* this normalizer, so a template must already
+use the current schema.)
 
 ## 5. The `sync` convergence algorithm
 
@@ -140,10 +150,10 @@ worm sync:
     mf[slot] = desired
   writeManagedLinks(root, mf)
 
-  if cfg.sandbox.recipe != "none":
-    recipe = loadRecipe(cfg.sandbox.recipe)
-    for slot in slots:                     recipe.provision(slot, cfg.sandbox)   # per-slot Dockerfile/compose
-    generateClaudeWiring(root, slots, cfg.sandbox)                              # per-slot .claude/settings.json hooks
+  for recipe in enabledRecipes(cfg.recipes):                                    # key present = enabled
+    materialize(recipe, root)                                                   # → .worm/recipes/<name>/
+  for slot in slots:
+    applyRecipeWiring(root, slot, cfg.recipes)        # merge all enabled recipes' hooks into slot's settings.local.json
 
   # invariants: never creates/removes a slot; never writes destructively to slot0
 ```
@@ -153,7 +163,19 @@ worm sync:
 - **Prune safety:** scoped to the manifest set + `isSymlink` guard → can't delete real user files or
   the structural `.worm/` wiring links.
 
-## 6. Sandbox recipe / middleware model
+## 6. Recipe engine (formerly "sandbox recipe / middleware model")
+
+> **Status (post-MVP):** the engine is now a **keyed-map recipe plugin model** in
+> `src/core/recipes.ts`. `recipes` is a map of `name → config`; a recipe is enabled iff its key is
+> present (no `none` sentinel). Each `Recipe` exposes `select` / `artifacts` / `wireSlot`; the engine
+> (`materializeRecipes`, `applyRecipeWiring`, `stripRecipeWiring`) iterates the enabled set. Artifacts
+> land under `.worm/recipes/<name>/`; per-slot hooks merge into `.claude/settings.local.json`, with
+> worm owning only entries whose command references the `.worm/recipes/` tree (so recipes compose and
+> strip independently). `sandbox` is the first built-in. **Planned next:** `syncPermissions` (port of
+> `sync-claude-settings.js` — union the `permissions` block across slots via SessionStart/End) and
+> `shareHistory` (lift the `~/.claude/projects` symlink out of `setup.sh`). The sketch below predates
+> this and is kept for historical context.
+
 
 Opt-in. Default `none` emits **no** hooks and **no** Docker, so open-source adopters inherit nothing.
 
@@ -270,14 +292,16 @@ The MVP shipped on `feat/strategy-3`: topology, commands, `sync`, docs/demo, and
 engine (provision + per-slot `.claude/settings.local.json` wiring). These are the known,
 deliberate gaps — none block daily use; each is an additive layer on a clean seam.
 
-1. **True recipe pluggability.** Lift `remediation()` and the session/transport command builder
-   onto the `SandboxRecipe` interface so a non-Docker backend (podman, firejail, bubblewrap,
-   remote VM) is a registry entry, not a rewrite. Today the Docker model leaks into
-   `slotHookBlock` (`docker compose … up -d`) and the interceptor's `docker exec …` remediation
-   string, so the registry is effectively `none` + `docker` only.
+1. **True recipe pluggability.** ✅ *Partly landed:* recipes are now a keyed-map plugin engine
+   (`core/recipes.ts`, §6) — `recipes` config is a `name → config` map, each recipe exposes
+   `select`/`artifacts`/`wireSlot`, and `settings.local.json` is a namespaced merge so multiple
+   recipes compose. **Still open:** the `sandbox` recipe's *backend* is hardcoded to Docker — its
+   `wireSlot` emits `docker compose … up -d` and the interceptor's `docker exec …` remediation
+   string. Lifting those behind a `backend` axis (podman, firejail, bubblewrap, remote VM) is the
+   remaining work; the `backend` enum is in the schema as the seam.
 
 2. **Multi-agent `AgentAdapter` axis (orthogonal to the sandbox recipe).** All Claude coupling is
-   isolated to `src/core/sandbox.ts`; the core (pool, tunnels, hooks, manifest) is already
+   isolated to `src/core/recipes.ts`; the core (pool, tunnels, hooks, manifest) is already
    agent-neutral. An `AgentAdapter` would own (a) where session/interceptor hooks are installed
    and (b) the deny-output format, so `recipe × adapter` compose. **Capability caveat:** the
    sandbox *redirect* depends on the agent exposing a pre-execution deny hook (Claude Code's

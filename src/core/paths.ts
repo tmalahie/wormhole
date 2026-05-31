@@ -9,7 +9,7 @@ export const MULTIVERSES_DIR_NAME = "multiverses";
 export const TEMPLATES_DIR_NAME = "templates";
 export const DEFAULT_TEMPLATE_NAME = "default";
 export const SCRIPTS_DIR_NAME = "scripts";
-export const SANDBOX_DIR_NAME = "sandbox";
+export const RECIPES_DIR_NAME = "recipes";
 export const SETUP_SCRIPT_NAME = "setup.sh";
 export const MANAGED_LINKS_FILE_NAME = ".managed-links.json";
 /** Joins the repo basename and slot index for sibling worktree dirs: `<repo>-<N>`. */
@@ -79,8 +79,14 @@ export function localScriptsDir(projectRoot: string): string {
   return path.join(localRoot(projectRoot), SCRIPTS_DIR_NAME);
 }
 
-export function localSandboxDir(projectRoot: string): string {
-  return path.join(localRoot(projectRoot), SANDBOX_DIR_NAME);
+/** Root for all recipe artifacts: `.worm/recipes/`. */
+export function localRecipesRoot(projectRoot: string): string {
+  return path.join(localRoot(projectRoot), RECIPES_DIR_NAME);
+}
+
+/** A single recipe's artifact dir: `.worm/recipes/<name>/`. */
+export function localRecipeDir(projectRoot: string, recipeName: string): string {
+  return path.join(localRecipesRoot(projectRoot), recipeName);
 }
 
 /**

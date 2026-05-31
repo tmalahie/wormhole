@@ -8,8 +8,7 @@ import {
   reconcileSlotLinks,
   writeManifest,
 } from "../core/links.js";
-import { applySlotWiring, materializeSandbox } from "../core/sandbox.js";
-import { localSandboxDir } from "../core/paths.js";
+import { applyRecipeWiring, materializeRecipes } from "../core/recipes.js";
 
 /**
  * Declarative reconciliation of the cognitive layer across every existing slot:
@@ -43,13 +42,14 @@ export async function runSync(): Promise<void> {
   }
   await writeManifest(root, manifest);
 
-  // Materialize the sandbox recipe (a no-op when recipe === "none"; non-clobbering).
+  // Materialize enabled recipes' artifacts (a no-op when none enabled; non-clobbering).
   const projectName = await readProjectName(root);
-  const sandboxFiles = await materializeSandbox(localSandboxDir(root), projectName, config.sandbox);
-  for (const file of sandboxFiles) logger.step(`📦 sandbox/${file}`);
+  const recipeFiles = await materializeRecipes(root, projectName, config.recipes);
+  for (const file of recipeFiles) logger.step(`📦 recipes/${file}`);
+  const anyEnabled = Object.keys(config.recipes).length > 0;
   for (const slot of slots) {
-    if (await applySlotWiring(root, projectName, slot, config.sandbox)) {
-      logger.step(`⚡ ${slot.name}: sandbox hooks ${config.sandbox.recipe === "none" ? "removed" : "wired"}`);
+    if (await applyRecipeWiring(root, projectName, slot, config.recipes)) {
+      logger.step(`⚡ ${slot.name}: recipe hooks ${anyEnabled ? "wired" : "removed"}`);
     }
   }
 

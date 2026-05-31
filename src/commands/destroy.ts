@@ -7,7 +7,7 @@ import { scanUniverses } from "../core/universe.js";
 import { pruneWorktrees, worktreeRemove } from "../core/git.js";
 import { globalProjectDir, localRoot } from "../core/paths.js";
 import { readManifest, stripSlotLinks } from "../core/links.js";
-import { stripSlotWiring } from "../core/sandbox.js";
+import { stripRecipeWiring } from "../core/recipes.js";
 
 export interface DestroyOptions {
   force?: boolean;
@@ -68,9 +68,9 @@ export async function runDestroy(options: DestroyOptions = {}): Promise<void> {
   }
   await pruneWorktrees(root);
 
-  // 2. Strip Slot 0's injected tunnels + sandbox hooks (but never remove Slot 0 itself).
+  // 2. Strip Slot 0's injected tunnels + recipe hooks (but never remove Slot 0 itself).
   await stripSlotLinks(root, manifest);
-  await stripSlotWiring(root, root);
+  await stripRecipeWiring(root, root);
 
   // 3. Remove local .worm/ state.
   await fs.rm(localRoot(root), { recursive: true, force: true });
