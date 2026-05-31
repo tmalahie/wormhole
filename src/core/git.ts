@@ -140,6 +140,53 @@ export async function pruneWorktrees(repoRoot: string): Promise<void> {
 }
 
 /**
+ * Switch the working tree at `repoRoot` to `branch` in place (no worktree
+ * add/remove). The Strategy 3 daily primitive: a permanent slot just changes
+ * branch. With { create:true } it creates the branch, tracking a remote of the
+ * same name when one exists.
+ */
+export async function switchBranch(
+  repoRoot: string,
+  branch: string,
+  options: { create?: boolean } = {}
+): Promise<void> {
+  const args = ["switch"];
+  if (await branchExists(repoRoot, branch)) {
+    args.push(branch);
+  } else {
+    if (!options.create) {
+      throw new WormError(`Branch "${branch}" does not exist.`, {
+        hint: `Pass --create to create it, or run \`git branch ${branch}\` first.`,
+      });
+    }
+    const remoteRef = await remoteBranchExists(repoRoot, branch);
+    // `git switch -c <branch> <remote-ref>` sets up tracking via autoSetupMerge.
+    if (remoteRef) args.push("-c", branch, remoteRef);
+    else args.push("-c", branch);
+  }
+  await runOrThrow(
+    "git",
+    args,
+    { cwd: repoRoot },
+    `Failed to switch to branch "${branch}" in ${repoRoot}`
+  );
+}
+
+/**
+ * Current branch name at `repoRoot`, or null when detached / on no branch.
+ */
+export async function currentBranch(repoRoot: string): Promise<string | null> {
+  const { stdout, exitCode } = await run(
+    "git",
+    ["rev-parse", "--abbrev-ref", "HEAD"],
+    { cwd: repoRoot }
+  );
+  if (exitCode !== 0) return null;
+  const name = stdout.trim();
+  return name === "HEAD" ? null : name;
+}
+
+/**
  * Returns porcelain status lines (modified + untracked) for the given worktree.
  * `--untracked-files=all` so nested untracked paths are listed individually
  * rather than collapsed into their parent directory.

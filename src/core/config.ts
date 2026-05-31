@@ -10,7 +10,7 @@ import {
 export async function loadConfigFromPath(filePath: string): Promise<Config> {
   if (!(await pathExists(filePath))) {
     throw new WormError(`Config file not found: ${filePath}`, {
-      hint: "Run `worm init` and `worm register` to set up a profile.",
+      hint: "Run `worm init` to set up a profile.",
     });
   }
   const raw = await readJson<unknown>(filePath);
@@ -24,7 +24,7 @@ export async function loadConfigFromPath(filePath: string): Promise<Config> {
   return result.data;
 }
 
-export async function loadGlobalConfig(projectName: string): Promise<Config> {
+export async function loadGlobalProjectConfig(projectName: string): Promise<Config> {
   return loadConfigFromPath(globalProjectConfig(projectName));
 }
 

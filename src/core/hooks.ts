@@ -1,6 +1,6 @@
 import { runShell } from "../utils/exec.js";
 import { logger } from "../utils/logger.js";
-import { slotIndex } from "./paths.js";
+import type { UniverseSlot } from "../types.js";
 
 export interface HookResult {
   ran: boolean;
@@ -14,16 +14,21 @@ export interface HookContext {
   env?: NodeJS.ProcessEnv;
 }
 
+/**
+ * Environment exposed to user hooks (on_create / on_remove). Build it here —
+ * never inline the object at the call site. WORM_SLOT_INDEX is 0 for Slot 0.
+ */
 export function hookEnv(
-  projectRoot: string,
-  slot: string,
+  slot0Root: string,
+  slot: UniverseSlot,
   branch: string
 ): NodeJS.ProcessEnv {
   return {
-    WORM_PROJECT_ROOT: projectRoot,
-    WORM_SLOT: slot,
-    WORM_SLOT_INDEX: String(slotIndex(slot)),
+    WORM_PROJECT_ROOT: slot0Root,
+    WORM_SLOT: slot.name,
+    WORM_SLOT_INDEX: String(slot.index),
     WORM_BRANCH: branch,
+    WORM_WORKTREE: slot.path,
   };
 }
 

@@ -3,16 +3,14 @@ import { logger } from "../utils/logger.js";
 import { WormError } from "../utils/errors.js";
 import {
   ensureDir,
+  fs,
   pathExists,
   writeTextIfMissing,
 } from "../utils/fs.js";
-import {
-  deriveProjectName,
-  findContainerRoot,
-} from "../core/project.js";
+import { deriveProjectName, gitToplevel } from "../core/project.js";
 import {
   globalProfileExists,
-  loadGlobalConfig,
+  loadGlobalProjectConfig,
   saveGlobalConfig,
 } from "../core/config.js";
 import {
@@ -28,42 +26,50 @@ import {
   localScriptsDir,
   localSharedDir,
   localSharedFile,
-  localUniversesDir,
-  slotName,
-  slotPath,
 } from "../core/paths.js";
 import { ensureSymlink } from "../core/symlinks.js";
+import { applyRecipeWiring, materializeRecipes } from "../core/recipes.js";
+import { currentBranch } from "../core/git.js";
+import { hookEnv, runHook } from "../core/hooks.js";
 import { run } from "../utils/exec.js";
+import type { UniverseSlot } from "../types.js";
 import {
   materializeTemplateScripts,
   resolveTemplate,
   seedBuiltInDefaultTemplate,
   type ResolvedTemplate,
 } from "../core/templates.js";
+import { readManifest, reconcileSlotLinks, writeManifest } from "../core/links.js";
 
 export interface InitOptions {
   name?: string;
-  universes?: number;
   template?: string;
   force?: boolean;
+  skipHook?: boolean;
 }
 
 export async function runInit(options: InitOptions = {}): Promise<void> {
-  // findContainerRoot walks up looking for a bare-clone container — that's
-  // exactly the precondition for init, so the validation is implicit.
-  const projectRoot = await findContainerRoot();
-  await bindProject(projectRoot, options);
+  const root = await gitToplevel(process.cwd());
+  if (!root) {
+    throw new WormError("Not inside a git repository.", {
+      hint: "`git clone` a repo (or cd into one), then run `worm init`. Or use `worm clone <url>`.",
+    });
+  }
+  await bindProject(root, options);
 }
 
 /**
- * The "make this directory a worm-managed multiverse" core flow.
- * Shared between `worm init` (when called in an existing container) and
- * `worm clone` (which sets up the container first, then calls this).
+ * Bind a normal git clone as Slot 0 of a worm multiverse. Shared between
+ * `worm init` (current repo) and `worm clone` (freshly cloned repo).
  */
 export async function bindProject(
   projectRoot: string,
   options: InitOptions = {}
 ): Promise<void> {
+  // Canonicalise so every later resolution (git --git-common-dir, scanUniverses,
+  // manifest keys) agrees on one path even across /var → /private/var symlinks.
+  projectRoot = await fs.realpath(projectRoot);
+
   await ensureGlobalRoot();
 
   const template = await resolveTemplate(options.template);
@@ -81,7 +87,6 @@ export async function bindProject(
 
   await ensureDir(localRoot(projectRoot));
   await ensureDir(localSharedDir(projectRoot));
-  await ensureDir(localUniversesDir(projectRoot));
 
   await ensureSymlink(
     localConfigFile(projectRoot),
@@ -101,13 +106,6 @@ export async function bindProject(
     await provisionSharedPath(projectRoot, projectName, sharedPath);
   }
 
-  for (let i = 0; i < config.universes_count; i += 1) {
-    await ensureDir(slotPath(projectRoot, slotName(i)));
-  }
-  logger.step(
-    `🌌 carved ${config.universes_count} universe slot${config.universes_count === 1 ? "" : "s"}`
-  );
-
   const ignored = await writeTextIfMissing(
     path.join(localRoot(projectRoot), ".gitignore"),
     "*\n"
@@ -116,13 +114,74 @@ export async function bindProject(
     logger.step("📝 wrote .worm/.gitignore (self-contained)");
   }
 
+  // Slot 0 is a real working tree, so git would otherwise see .worm/ as
+  // untracked. Exclude it LOCALLY (.git/info/exclude, not the tracked
+  // .gitignore) so `git status` stays clean without touching the repo's files.
+  await ensureGitExclude(projectRoot, "/.worm/");
+
+  // Reconcile Slot 0's wormhole tunnels and seed the managed-link manifest.
+  const manifest = await readManifest(projectRoot);
+  await reconcileSlotLinks(projectRoot, projectRoot, config.shared_paths, manifest);
+  await writeManifest(projectRoot, manifest);
+
+  // Materialize enabled recipes' artifacts (a no-op when none are enabled).
+  const recipeFiles = await materializeRecipes(projectRoot, projectName, config.recipes);
+  for (const file of recipeFiles) logger.step(`📦 recipes/${file}`);
+  if (await applyRecipeWiring(projectRoot, projectName, { name: "main", path: projectRoot }, config.recipes)) {
+    logger.step("⚡ wired recipe hooks for Slot 0");
+  }
+
+  // Warm up Slot 0 by firing on_create — `init` is the "create" event for the
+  // primary slot. Same contract as `universe add`: non-fatal (the bind succeeds
+  // regardless) and skippable via --skip-hook for an already-warm checkout.
+  if (!options.skipHook && config.hooks.on_create) {
+    const branch = (await currentBranch(projectRoot)) ?? "";
+    const slot: UniverseSlot = {
+      index: 0,
+      name: "main",
+      isPrimary: true,
+      path: projectRoot,
+      status: "READY",
+      branch: branch || undefined,
+    };
+    const result = await runHook("on_create", config.hooks.on_create, {
+      cwd: projectRoot,
+      env: hookEnv(projectRoot, slot, branch),
+    });
+    if (result.ran && result.exitCode !== 0) {
+      logger.warn(
+        `on_create hook exited with code ${result.exitCode}. Slot 0 is bound but may not be fully warmed.`
+      );
+    }
+  }
+
   logger.success(
     existed
-      ? `Reused global profile; refreshed Multiverse layout for ${projectName}.`
-      : `${projectName} is now bound to the Multiverse.`
+      ? `Reused global profile; refreshed layout for ${projectName}.`
+      : `${projectName} is now bound to the Multiverse (Slot 0).`
   );
   logger.raw("");
-  logger.raw(`Inspect with ${logger.bold("worm status")}.`);
+  logger.raw(
+    `Add a parallel universe with ${logger.bold("worm universe add <branch>")}; inspect with ${logger.bold("worm status")}.`
+  );
+}
+
+async function ensureGitExclude(repoRoot: string, entry: string): Promise<void> {
+  const excludePath = path.join(repoRoot, ".git", "info", "exclude");
+  try {
+    let content = "";
+    try {
+      content = await fs.readFile(excludePath, "utf8");
+    } catch {
+      // no existing exclude file
+    }
+    if (content.split("\n").includes(entry)) return;
+    await ensureDir(path.dirname(excludePath));
+    const sep = content.length > 0 && !content.endsWith("\n") ? "\n" : "";
+    await fs.writeFile(excludePath, content + sep + entry + "\n", "utf8");
+  } catch {
+    // Non-fatal: a linked worktree's .git is a file, or perms — skip silently.
+  }
 }
 
 async function ensureGlobalRoot(): Promise<void> {
@@ -136,9 +195,8 @@ async function ensureGlobalRoot(): Promise<void> {
   await ensureDir(globalSharedDir());
   await seedBuiltInDefaultTemplate();
 
-  const rulesPath = path.join(globalSharedDir(), "global-rules.md");
   await writeTextIfMissing(
-    rulesPath,
+    path.join(globalSharedDir(), "global-rules.md"),
     "# Global rules\n\nInstructions applied to every wormhole-managed project.\n"
   );
 
@@ -175,22 +233,13 @@ async function prepareGlobalProfile(
   const projectDir = globalProjectDir(projectName);
   await ensureDir(projectDir);
 
-  let config = existed ? await loadGlobalConfig(projectName) : template.config;
-  if (options.universes !== undefined) {
-    if (existed && config.universes_count !== options.universes && !options.force) {
-      throw new WormError(
-        `Profile already exists with universes_count=${config.universes_count}. Refusing to change it.`,
-        { hint: "Pass --force to overwrite, or edit the config file manually." }
-      );
-    }
-    config = { ...config, universes_count: options.universes };
-  }
+  const config = existed ? await loadGlobalProjectConfig(projectName) : template.config;
 
-  // Only write the config if it doesn't exist yet, or if --force is given.
-  // This preserves user edits to ~/.worm/multiverses/<project>/config.json across re-runs.
+  // Only write the config if it doesn't exist yet, or if --force is given, to
+  // preserve user edits to ~/.worm/multiverses/<project>/config.json on re-run.
   const configPath = globalProjectConfig(projectName);
   const configExisted = await pathExists(configPath);
-  if (!configExisted || options.force || options.universes !== undefined) {
+  if (!configExisted || options.force) {
     await saveGlobalConfig(projectName, config);
   }
 

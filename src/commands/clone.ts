@@ -1,15 +1,15 @@
 import path from "node:path";
 import { logger } from "../utils/logger.js";
 import { WormError } from "../utils/errors.js";
-import { ensureDir, fs, pathExists } from "../utils/fs.js";
+import { fs, pathExists } from "../utils/fs.js";
 import { runOrThrow } from "../utils/exec.js";
-import { bindProject, type InitOptions } from "./init.js";
+import { bindProject } from "./init.js";
 
 export interface CloneOptions {
   name?: string;
-  universes?: number;
   template?: string;
   force?: boolean;
+  skipHook?: boolean;
 }
 
 export async function runClone(
@@ -23,72 +23,34 @@ export async function runClone(
     });
   }
 
-  const containerName =
-    target ?? deriveNameFromUrl(url);
-  const containerPath = path.isAbsolute(containerName)
-    ? containerName
-    : path.resolve(process.cwd(), containerName);
+  const name = target ?? deriveNameFromUrl(url);
+  const dest = path.isAbsolute(name) ? name : path.resolve(process.cwd(), name);
 
-  if (await pathExists(containerPath)) {
-    const entries = await fs.readdir(containerPath);
+  if (await pathExists(dest)) {
+    const entries = await fs.readdir(dest);
     if (entries.length > 0) {
-      throw new WormError(`${containerPath} already exists and is not empty.`, {
+      throw new WormError(`${dest} already exists and is not empty.`, {
         hint: "Pick a different path, or remove the existing directory first.",
       });
     }
   }
 
-  await ensureDir(containerPath);
+  // A plain (non-bare) clone: the checkout itself becomes Slot 0. Origin and
+  // remote-tracking refs are set up by git, so no refspec patching needed.
+  logger.info(`🪐 Cloning ${logger.bold(url)} into ${logger.bold(dest)}`);
+  await runOrThrow("git", ["clone", url, dest], {}, `git clone failed for ${url}`);
+  logger.step("📦 cloned (Slot 0)");
 
-  const barePath = path.join(containerPath, ".bare");
-  logger.info(`🪐 Cloning ${logger.bold(url)} into ${logger.bold(containerPath)}`);
-  await runOrThrow(
-    "git",
-    ["clone", "--bare", url, barePath],
-    {},
-    `git clone --bare failed for ${url}`
-  );
-  logger.step(`📦 bare clone at .bare/`);
-
-  // The `.git` pointer file turns the container into a "fake working tree" so
-  // git commands run from the container resolve to the bare clone. The worktrees
-  // worm creates as siblings will each have their own .git pointing back here.
-  await fs.writeFile(
-    path.join(containerPath, ".git"),
-    "gitdir: ./.bare\n",
-    "utf8"
-  );
-  logger.step(`🔗 wrote .git → ./.bare pointer`);
-
-  // `git clone --bare` doesn't set up the standard fetch refspec, so
-  // `refs/remotes/origin/*` stays empty and tools that diff against
-  // `origin/<branch>` fail. Configure it like a normal clone, then fetch
-  // to materialize the remote-tracking refs (fast — objects are local).
-  await runOrThrow(
-    "git",
-    ["-C", barePath, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"],
-    {},
-    "Failed to configure remote.origin.fetch"
-  );
-  await runOrThrow(
-    "git",
-    ["-C", barePath, "fetch", "--quiet", "origin"],
-    {},
-    "Failed to fetch origin after configuring refspec"
-  );
-  logger.step("🔗 wired refs/remotes/origin/* tracking refs");
-
-  const initOptions: InitOptions = {
+  await bindProject(dest, {
     name: options.name,
-    universes: options.universes,
     template: options.template,
     force: options.force,
-  };
-  await bindProject(containerPath, initOptions);
+    skipHook: options.skipHook,
+  });
 }
 
 /**
- * Best-effort derivation of a container directory name from a clone URL.
+ * Best-effort derivation of a directory name from a clone URL.
  * Mirrors `git clone <url>`'s default behavior.
  */
 export function deriveNameFromUrl(url: string): string {

@@ -1,19 +1,14 @@
 import { WormError } from "../utils/errors.js";
+import { SLOT_DIR_INFIX } from "../core/paths.js";
 
 /**
- * Emit a shell completion script for `worm`. Designed to be sourced from
- * the user's rc file:
+ * Emit a shell completion script for `worm`. Source from your rc file:
  *
  *   eval "$(worm completion zsh)"   # or bash
  *
- * The scripts complete:
- *   - Subcommand names (static list).
- *   - Branch names for `warp` (via `git for-each-ref`).
- *   - Currently-active branch names + slot indices for `collapse` / `cd` /
- *     `tp` / `path` (via `git worktree list --porcelain`). Listing only
- *     active refs keeps suggestions valid — a non-warped branch / free slot
- *     would error if completed.
- *   - Config keys for `config`.
+ * Completes subcommand names, branch names for `switch` (via `git for-each-ref`),
+ * and active branches + slot indices for `cd` / `tp` / `path` (via
+ * `git worktree list --porcelain`).
  */
 export function runCompletion(shell: string | undefined): void {
   if (!shell) {
@@ -38,10 +33,10 @@ export function runCompletion(shell: string | undefined): void {
 const COMMANDS = [
   "init",
   "clone",
-  "warp",
-  "collapse",
+  "universe",
+  "switch",
+  "sync",
   "status",
-  "universes",
   "cd",
   "tp",
   "path",
@@ -51,11 +46,10 @@ const COMMANDS = [
   "completion",
 ];
 
-// `warp` mounts a branch into a fresh slot — only branches are valid.
-const BRANCH_ONLY_COMMANDS = ["warp"];
-// `collapse`/`cd`/`tp`/`path` all flow through `worm path`'s resolver, which
-// accepts either a branch name or a 0-based slot index.
-const REF_COMMANDS = ["collapse", "cd", "tp", "path"];
+// `switch` moves the current slot onto a branch — only branch names are valid.
+const BRANCH_ONLY_COMMANDS = ["switch"];
+// `cd`/`tp`/`path` flow through `worm path`'s resolver: a branch or a slot index.
+const REF_COMMANDS = ["cd", "tp", "path"];
 const CONFIG_KEYS = ["editor"];
 
 const BASH = `# worm bash completion. Source with: eval "$(worm completion bash)"
@@ -79,7 +73,7 @@ _worm_complete() {
       local refs wtlist
       wtlist="$(git worktree list --porcelain 2>/dev/null)"
       refs="$(printf '%s\\n' "$wtlist" | sed -nE 's|^branch refs/heads/||p;')
-$(printf '%s\\n' "$wtlist" | sed -nE 's|^worktree .*-uni([0-9]+)$|\\1|p;')"
+$(printf '%s\\n' "$wtlist" | sed -nE 's|^worktree .*${SLOT_DIR_INFIX}([0-9]+)$|\\1|p;')"
       COMPREPLY=($(compgen -W "$refs" -- "$cur"))
       ;;
     config)
@@ -122,7 +116,7 @@ _worm_complete() {
       local _worm_wtlist
       _worm_wtlist="$(git worktree list --porcelain 2>/dev/null)"
       compadd -- \${(f)"$(printf '%s\\n' "$_worm_wtlist" | sed -nE 's|^branch refs/heads/||p;')"}
-      compadd -- \${(f)"$(printf '%s\\n' "$_worm_wtlist" | sed -nE 's|^worktree .*-uni([0-9]+)$|\\1|p;')"}
+      compadd -- \${(f)"$(printf '%s\\n' "$_worm_wtlist" | sed -nE 's|^worktree .*${SLOT_DIR_INFIX}([0-9]+)$|\\1|p;')"}
       ;;
     config)
       if (( CURRENT == 3 )); then

@@ -1,5 +1,5 @@
 import { execa } from "execa";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,11 +9,12 @@ export const WORM_BIN = path.resolve(HERE, "..", "dist", "cli.js");
 
 /**
  * Spin up an isolated sandbox:
- *   - A standalone seed repo (with `main` and one commit) so git operations have something to clone from.
- *   - A bare-clone worm container at `projectRoot` (the `.bare/` + `.git` pointer pattern).
+ *   - A standalone seed repo (with `main` and one commit) to clone from.
+ *   - A NORMAL clone at `projectRoot` — this is Slot 0 (Strategy 3: no bare container).
  *   - An empty WORM_HOME pointed nowhere near the real `~/.worm`.
  *
- * Returns `worm(args, opts?)` to invoke the CLI inside the container and `cleanup()` to tear everything down.
+ * Returns `worm(args, opts?)` to invoke the CLI and `cleanup()` to tear down,
+ * including any sibling pool worktrees (`<projectRoot>-uniN`).
  */
 export async function createSandbox() {
   const wormHome = await mkdtemp(path.join(tmpdir(), "worm-home-"));
@@ -21,7 +22,7 @@ export async function createSandbox() {
   await initSeedRepo(seedRepo);
 
   const projectRoot = await mkdtemp(path.join(tmpdir(), "worm-proj-"));
-  await buildBareCloneContainer(projectRoot, seedRepo);
+  await buildNormalClone(projectRoot, seedRepo);
 
   async function worm(args, opts = {}) {
     return execa("node", [WORM_BIN, ...args], {
@@ -37,6 +38,18 @@ export async function createSandbox() {
 
   async function cleanup() {
     await rm(wormHome, { recursive: true, force: true });
+    // Sibling pool worktrees live at <parent>/<base>-uniN.
+    const parent = path.dirname(projectRoot);
+    const base = path.basename(projectRoot);
+    try {
+      for (const entry of await readdir(parent)) {
+        if (entry.startsWith(`${base}-`)) {
+          await rm(path.join(parent, entry), { recursive: true, force: true });
+        }
+      }
+    } catch {
+      // parent vanished — nothing to sweep
+    }
     await rm(projectRoot, { recursive: true, force: true });
     await rm(seedRepo, { recursive: true, force: true });
   }
@@ -54,12 +67,11 @@ async function initSeedRepo(dir) {
   await execa("git", ["commit", "-q", "-m", "initial"], cwd);
 }
 
-async function buildBareCloneContainer(containerDir, seedRepo) {
-  await execa("git", ["clone", "--bare", "--quiet", seedRepo, path.join(containerDir, ".bare")]);
-  await writeFile(path.join(containerDir, ".git"), "gitdir: ./.bare\n");
-  // Set identity inside the bare clone so subsequent commits made via test helpers work.
-  await execa("git", ["config", "user.email", "test@example.com"], { cwd: containerDir });
-  await execa("git", ["config", "user.name", "Tester"], { cwd: containerDir });
+async function buildNormalClone(projectDir, seedRepo) {
+  // git clone into an existing empty directory is allowed.
+  await execa("git", ["clone", "--quiet", seedRepo, projectDir]);
+  await execa("git", ["config", "user.email", "test@example.com"], { cwd: projectDir });
+  await execa("git", ["config", "user.name", "Tester"], { cwd: projectDir });
 }
 
 export async function createBranch(repoRoot, name) {

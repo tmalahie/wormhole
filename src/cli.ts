@@ -3,22 +3,22 @@ import { logger } from "./utils/logger.js";
 import { isWormError } from "./utils/errors.js";
 import { runInit } from "./commands/init.js";
 import { runStatus } from "./commands/status.js";
-import { runWarp } from "./commands/warp.js";
-import { runCollapse } from "./commands/collapse.js";
 import { runConfig } from "./commands/config.js";
 import { runPath } from "./commands/path.js";
 import { runShellInit } from "./commands/shell-init.js";
 import { runDestroy } from "./commands/destroy.js";
 import { runClone } from "./commands/clone.js";
 import { runCompletion } from "./commands/completion.js";
-import { runUniverses } from "./commands/universes.js";
+import { runSync } from "./commands/sync.js";
+import { runSwitch } from "./commands/switch.js";
+import { runUniverseAdd, runUniverseRemove } from "./commands/universe.js";
 
 const program = new Command();
 
 program
   .name("worm")
   .description(
-    "Manage warm, parallel git worktree environments for AI coding agents."
+    "A permanent pool of warm git worktrees + a personal cognitive layer for AI coding agents."
   )
   .version("0.1.0")
   .showHelpAfterError("(run `worm --help` for usage)")
@@ -31,61 +31,72 @@ program
 
 program
   .command("clone <url> [path]")
-  .description("Clone a repo into a bare-clone worm container (the recommended entry point).")
+  .description("Clone a repo and bind it as Slot 0 (the recommended entry point).")
   .option("-n, --name <name>", "Override the multiverse name (default: derived from the URL).")
-  .option(
-    "-u, --universes <count>",
-    "Number of universe slots to provision.",
-    (val) => Number.parseInt(val, 10)
-  )
   .option("-t, --template <dir>", "Seed from a custom template directory.")
   .option("-f, --force", "Overwrite existing profile fields when they conflict.")
+  .option("--skip-hook", "Skip the on_create hook that warms up Slot 0.")
   .action(async (url: string, target: string | undefined, opts) => {
     await runClone(url, target, opts);
   });
 
 program
   .command("init")
-  .description("Bind an existing bare-clone container to a wormhole profile. Use `worm clone` to set up a new one.")
-  .option("-n, --name <name>", "Override the project name (default: basename of project root).")
-  .option(
-    "-u, --universes <count>",
-    "Number of universe slots to provision.",
-    (val) => Number.parseInt(val, 10)
-  )
-  .option(
-    "-t, --template <dir>",
-    "Seed from a custom template directory (config.json + optional scripts/)."
-  )
+  .description("Bind the current git clone as Slot 0 of a wormhole multiverse.")
+  .option("-n, --name <name>", "Override the project name (default: basename of the repo root).")
+  .option("-t, --template <dir>", "Seed from a custom template directory (config.json + optional scripts/).")
   .option("-f, --force", "Overwrite existing profile fields when they conflict.")
+  .option("--skip-hook", "Skip the on_create hook that warms up Slot 0.")
   .action(async (opts) => {
     await runInit(opts);
   });
 
+const universe = program
+  .command("universe")
+  .alias("uni")
+  .description("Manage the permanent universe pool (sibling worktrees).");
+
+universe
+  .command("add <branch>")
+  .description("Create a permanent universe on <branch> as a sibling worktree.")
+  .option("-c, --create", "Create the branch if it does not exist yet.")
+  .option("--skip-hook", "Skip the on_create hook.")
+  .action(async (branch: string, opts) => {
+    await runUniverseAdd(branch, opts);
+  });
+
+universe
+  .command("rm <ref>")
+  .alias("remove")
+  .description("Remove a sibling universe. `<ref>` is a slot index or a branch. Slot 0 is protected.")
+  .option("-f, --force", "Remove even with uncommitted changes.")
+  .option("--skip-hook", "Skip the on_remove hook.")
+  .action(async (ref: string, opts) => {
+    await runUniverseRemove(ref, opts);
+  });
+
 program
-  .command("universes [count]")
-  .description("Print or change the number of universe slots. `worm universes` prints; `worm universes <N>` resizes.")
-  .action(async (count: string | undefined) => {
-    await runUniverses(count);
+  .command("switch <branch>")
+  .description("Switch the current slot to <branch> in place and re-run the warm-up hook.")
+  .option("-c, --create", "Create the branch if it does not exist yet.")
+  .option("--skip-hook", "Skip the on_create hook.")
+  .action(async (branch: string, opts) => {
+    await runSwitch(branch, opts);
+  });
+
+program
+  .command("sync")
+  .description("Reconcile shared-path links across every slot (declarative, idempotent).")
+  .action(async () => {
+    await runSync();
   });
 
 program
   .command("status")
-  .description("Show the state of every universe slot.")
+  .description("Show every slot in the universe pool.")
   .option("--json", "Output as JSON.")
   .action(async (opts) => {
     await runStatus(opts);
-  });
-
-program
-  .command("warp <branch>")
-  .description("Mount a branch into the first available universe slot.")
-  .option("-c, --create", "Create the branch if it does not exist yet.")
-  .option("-d, --detach", "Check out in detached HEAD — does not claim the branch ref.")
-  .option("-o, --open", "Open the new worktree in the editor configured via `worm config editor`.")
-  .option("--skip-hook", "Skip the on_warp hook.")
-  .action(async (branch: string, opts) => {
-    await runWarp(branch, opts);
   });
 
 program
@@ -119,18 +130,9 @@ program
   });
 
 program
-  .command("collapse <ref>")
-  .description("Free a universe slot. `<ref>` can be a branch name or a 0-based slot index. Anchors stay warm.")
-  .option("-f, --force", "Remove the worktree even if it has uncommitted changes.")
-  .option("--skip-hook", "Skip the on_collapse hook.")
-  .action(async (ref: string, opts) => {
-    await runCollapse(ref, opts);
-  });
-
-program
   .command("destroy")
-  .description("Unbind this project from worm: collapse all warps, remove .worm/, root .gitignore entry, and the global profile.")
-  .option("-f, --force", "Skip the confirmation prompt and force-collapse dirty worktrees.")
+  .description("Unbind this project: remove sibling universes, .worm/, and the global profile. Slot 0 is left intact.")
+  .option("-f, --force", "Skip the confirmation prompt and force-remove dirty worktrees.")
   .action(async (opts) => {
     await runDestroy(opts);
   });

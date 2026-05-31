@@ -2,61 +2,55 @@ import readline from "node:readline";
 import { logger } from "../utils/logger.js";
 import { WormError } from "../utils/errors.js";
 import { fs, pathExists } from "../utils/fs.js";
-import {
-  findContainerRoot,
-  readProjectName,
-} from "../core/project.js";
-import { loadLocalConfig } from "../core/config.js";
+import { gitToplevel, readProjectName } from "../core/project.js";
 import { scanUniverses } from "../core/universe.js";
-import { pruneWorktrees } from "../core/git.js";
-import {
-  globalProjectDir,
-  localRoot,
-  slotName,
-  worktreeDir,
-} from "../core/paths.js";
-import { runCollapse } from "./collapse.js";
+import { pruneWorktrees, worktreeRemove } from "../core/git.js";
+import { globalProjectDir, localRoot } from "../core/paths.js";
+import { readManifest, stripSlotLinks } from "../core/links.js";
+import { stripRecipeWiring } from "../core/recipes.js";
 
 export interface DestroyOptions {
   force?: boolean;
 }
 
 export async function runDestroy(options: DestroyOptions = {}): Promise<void> {
-  const projectRoot = await findContainerRoot();
+  const root = await gitToplevel(process.cwd());
+  if (!root) {
+    throw new WormError("Not inside a git repository.", {
+      hint: "Run `worm destroy` from inside a worm-bound project.",
+    });
+  }
 
   let projectName: string;
   try {
-    projectName = await readProjectName(projectRoot);
+    projectName = await readProjectName(root);
   } catch {
     throw new WormError("This project is not bound to a wormhole multiverse.", {
       hint: "Nothing to destroy. If you have leftover .worm/ state, remove it manually.",
     });
   }
 
-  const config = await loadLocalConfig(projectRoot);
-  const slots = await scanUniverses(projectRoot, config);
-  const active = slots.filter((s) => s.status === "ACTIVE");
+  const slots = await scanUniverses(root);
+  const siblings = slots.filter((s) => !s.isPrimary);
   const globalProfile = globalProjectDir(projectName);
 
-  logger.info(
-    `💥 About to destroy the ${logger.bold(projectName)} multiverse:`
-  );
-  if (active.length > 0) {
-    logger.raw(`  • Force-collapse ${active.length} active universe${active.length === 1 ? "" : "s"}:`);
-    for (const s of active) {
-      logger.raw(`      - ${s.name}: ${s.branch ?? "(detached)"} at ${logger.dim(s.srcPath)}`);
+  logger.info(`💥 About to destroy the ${logger.bold(projectName)} multiverse:`);
+  if (siblings.length > 0) {
+    logger.raw(`  • Remove ${siblings.length} sibling universe${siblings.length === 1 ? "" : "s"}:`);
+    for (const s of siblings) {
+      logger.raw(`      - ${s.name}: ${s.branch ?? "(detached)"} at ${logger.dim(s.path)}`);
     }
   }
-  logger.raw(`  • Remove ${logger.dim(localRoot(projectRoot))}`);
+  logger.raw(`  • Remove ${logger.dim(localRoot(root))}`);
   logger.raw(`  • Remove ${logger.dim(globalProfile)}`);
+  logger.raw(`  • Slot 0 (${logger.dim(root)}) is left untouched.`);
   logger.raw("");
 
   if (!options.force) {
     if (!process.stdin.isTTY) {
-      throw new WormError(
-        "Refusing to destroy in a non-interactive shell.",
-        { hint: "Re-run with --force to skip the confirmation prompt." }
-      );
+      throw new WormError("Refusing to destroy in a non-interactive shell.", {
+        hint: "Re-run with --force to skip the confirmation prompt.",
+      });
     }
     const ok = await confirm("Proceed?");
     if (!ok) {
@@ -65,29 +59,22 @@ export async function runDestroy(options: DestroyOptions = {}): Promise<void> {
     }
   }
 
-  // 1. Collapse active warps (with --force so uncommitted changes don't block us).
-  for (const slot of active) {
-    if (slot.branch) {
-      await runCollapse(slot.branch, { force: true, skipHook: true });
-    } else {
-      // Detached worktree — no branch ref to feed runCollapse, do the bare git removal.
-      await fs.rm(slot.srcPath, { recursive: true, force: true });
-    }
-  }
+  const manifest = await readManifest(root);
 
-  // 2. Defensive sweep of any leftover top-level worktree dirs.
-  for (let i = 0; i < config.universes_count; i += 1) {
-    const wt = worktreeDir(projectRoot, projectName, slotName(i));
-    if (await pathExists(wt)) {
-      await fs.rm(wt, { recursive: true, force: true });
-    }
+  // 1. Remove sibling worktrees (force so uncommitted changes don't block).
+  for (const slot of siblings) {
+    await stripSlotLinks(slot.path, manifest);
+    await worktreeRemove(root, slot.path, { force: true });
   }
+  await pruneWorktrees(root);
 
-  await pruneWorktrees(projectRoot);
+  // 2. Strip Slot 0's injected tunnels + recipe hooks (but never remove Slot 0 itself).
+  await stripSlotLinks(root, manifest);
+  await stripRecipeWiring(root, root);
 
   // 3. Remove local .worm/ state.
-  await fs.rm(localRoot(projectRoot), { recursive: true, force: true });
-  logger.step(`🧹 removed ${logger.dim(localRoot(projectRoot))}`);
+  await fs.rm(localRoot(root), { recursive: true, force: true });
+  logger.step(`🧹 removed ${logger.dim(localRoot(root))}`);
 
   // 4. Remove the global profile.
   if (await pathExists(globalProfile)) {
