@@ -11,7 +11,7 @@ import {
 } from "../utils/fs.js";
 import { logger } from "../utils/logger.js";
 import { ensureSymlink } from "./symlinks.js";
-import { localRecipeDir, localRecipesRoot } from "./paths.js";
+import { localLogsDir, localRecipeDir, localRecipesRoot } from "./paths.js";
 import type {
   RecipesConfig,
   SandboxRecipeConfig,
@@ -87,6 +87,9 @@ const sandboxRecipe: Recipe<SandboxRecipeConfig> = {
     const script = path.join(dir, "redirect-to-sandbox.js");
     const container = `${projectName}-${slot.name}-sandbox`;
     const project = `${projectName}-${slot.name}`;
+    // The interceptor's stdout IS the permission decision, so it logs its own
+    // decisions to a file rather than being output-redirected.
+    const log = path.join(localLogsDir(slot0Root), `${container}.log`);
     const block: SettingsContribution = {
       PreToolUse: [
         {
@@ -96,27 +99,27 @@ const sandboxRecipe: Recipe<SandboxRecipeConfig> = {
       ],
     };
     if (cfg.autostart) {
-      block.SessionStart = [
-        {
-          hooks: [
-            {
-              type: "command",
-              command: `SANDBOX_DIR="${slot.path}" SANDBOX_CONTAINER="${container}" docker compose -p "${project}" -f "${compose}" up -d`,
-            },
-          ],
-        },
-      ];
+      const up = `SANDBOX_DIR="${slot.path}" SANDBOX_CONTAINER="${container}" docker compose -p "${project}" -f "${compose}" up -d`;
+      block.SessionStart = [{ hooks: [{ type: "command", command: logged(up, log, "up") }] }];
     }
     if (cfg.autostop) {
-      block.SessionEnd = [
-        {
-          hooks: [{ type: "command", command: `docker compose -p "${project}" -f "${compose}" down` }],
-        },
-      ];
+      const down = `docker compose -p "${project}" -f "${compose}" down`;
+      block.SessionEnd = [{ hooks: [{ type: "command", command: logged(down, log, "down") }] }];
     }
     return block;
   },
 };
+
+/**
+ * Wrap a hook command so its stdout+stderr append to `logFile` under a dated
+ * banner. POSIX-sh only (`{ …; } >>file 2>&1`), so it runs under whatever shell
+ * Claude invokes hooks with. `\n` survives to the generated JSON and printf
+ * turns it into a real newline at run time. The log dir is created by
+ * `materializeRecipes`, since the shell opens the `>>` redirect before the body.
+ */
+function logged(command: string, logFile: string, label: string): string {
+  return `{ printf '\\n=== %s ${label} ===\\n' "$(date '+%FT%T')"; ${command}; } >> "${logFile}" 2>&1`;
+}
 
 // --- the syncPermissions recipe ---------------------------------------------
 // Unions the `permissions` block of each slot's settings.local.json with a
@@ -206,7 +209,11 @@ export async function materializeRecipes(
   recipes: RecipesConfig
 ): Promise<string[]> {
   const written: string[] = [];
-  for (const { recipe, cfg } of enabledRecipes(recipes)) {
+  const enabled = enabledRecipes(recipes);
+  // Pre-create the log dir so the hooks' `>> .worm/logs/…` redirects don't fail
+  // (the shell opens the redirect before the command body runs).
+  if (enabled.length > 0) await ensureDir(localLogsDir(slot0Root));
+  for (const { recipe, cfg } of enabled) {
     const artifacts = recipe.artifacts?.(projectName, cfg) ?? [];
     if (artifacts.length === 0) continue;
     const dir = localRecipeDir(slot0Root, recipe.name);
@@ -423,8 +430,17 @@ const merged = mergePermissions(canon.permissions, local.permissions);
 if (Object.keys(merged).length === 0) process.exit(0); // nothing to sync yet
 
 // Merge-preserving: keep each file's other keys, sync only 'permissions'.
-writeIfChanged(worktreeFile, Object.assign({}, local, { permissions: merged }));
-writeIfChanged(canonicalFile, Object.assign({}, canon, { permissions: merged }));
+const wroteLocal = writeIfChanged(worktreeFile, Object.assign({}, local, { permissions: merged }));
+const wroteCanon = writeIfChanged(canonicalFile, Object.assign({}, canon, { permissions: merged }));
+if (wroteLocal || wroteCanon) {
+  try {
+    const logDir = path.join(__dirname, '..', '..', 'logs');
+    fs.mkdirSync(logDir, { recursive: true });
+    const n = Array.isArray(merged.allow) ? merged.allow.length : 0;
+    const line = '[' + new Date().toISOString() + '] synced ' + n + ' allow rules (' + worktreeFile + ')\n';
+    fs.appendFileSync(path.join(logDir, 'sync-permissions.log'), line);
+  } catch (e) { /* logging is best-effort */ }
+}
 `;
 
 // The interceptor is embedded via String.raw so its regex backslashes survive
@@ -451,6 +467,15 @@ let policy = { neverSandbox: ['node', 'npm', 'npx', 'pnpm', 'yarn'], exemptDirs:
 try {
   policy = JSON.parse(fs.readFileSync(path.join(__dirname, 'sandbox-policy.json'), 'utf8'));
 } catch (e) { /* fall back to defaults */ }
+
+function logDecision(decision, cmd) {
+  try {
+    const dir = path.join(__dirname, '..', '..', 'logs');
+    fs.mkdirSync(dir, { recursive: true });
+    const line = '[' + new Date().toISOString() + '] ' + decision + ' ' + cmd.replace(/\n/g, ' ') + '\n';
+    fs.appendFileSync(path.join(dir, containerName + '-redirect.log'), line);
+  } catch (e) { /* logging must never break the decision */ }
+}
 
 const FILE_OPS = new Set(['rm', 'rmdir', 'mv', 'cp', 'mkdir', 'touch', 'ln', 'chmod', 'chown', 'truncate', 'shred', 'install']);
 const INTERPRETERS = new Set(['bash', 'sh', 'zsh', 'python', 'python3', 'perl', 'ruby', 'php']);
@@ -515,7 +540,7 @@ process.stdin.on('end', () => {
   let command = '';
   try { command = (JSON.parse(input).tool_input || {}).command || ''; } catch (e) { allow(); }
   if (!command) allow();
-  if (shouldRedirect(command)) deny();
-  allow();
+  if (shouldRedirect(command)) { logDecision('DENY ', command); deny(); }
+  logDecision('allow', command); allow();
 });
 `;

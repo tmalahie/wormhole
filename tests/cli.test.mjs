@@ -440,6 +440,46 @@ test("shareHistory refuses to clobber a real history dir", async (t) => {
   assert.match(r.stderr + r.stdout, /real history dir/);
 });
 
+test("recipe hooks log to .worm/logs", async (t) => {
+  const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
+  t.after(() => rm(templateDir, { recursive: true, force: true }));
+  await writeFile(
+    path.join(templateDir, "config.json"),
+    JSON.stringify({ shared_paths: [], hooks: {}, recipes: { sandbox: {} } })
+  );
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init", "--template", templateDir]);
+
+  const root = await realpath(sb.projectRoot); // init canonicalizes via realpath
+  const name = path.basename(root);
+  const container = `${name}-main-sandbox`;
+  const logsDir = path.join(root, ".worm", "logs");
+
+  // init pre-creates the log dir so the docker `>>` redirect can't fail at runtime.
+  assert.equal((await stat(logsDir)).isDirectory(), true);
+
+  // SessionStart redirects docker output to a per-container log file.
+  const s0 = JSON.parse(
+    await readFile(path.join(root, ".claude", "settings.local.json"), "utf8")
+  );
+  const startCmd = s0.hooks.SessionStart[0].hooks[0].command;
+  assert.match(startCmd, /docker compose .* up -d/);
+  assert.ok(
+    startCmd.includes(`>> "${path.join(logsDir, `${container}.log`)}" 2>&1`),
+    `SessionStart must redirect to the container log:\n${startCmd}`
+  );
+
+  // The interceptor records its decisions to <container>-redirect.log.
+  const interceptor = path.join(root, ".worm", "recipes", "sandbox", "redirect-to-sandbox.js");
+  await execa("node", [interceptor, container, "/x/compose.yml"], {
+    input: JSON.stringify({ tool_input: { command: "rm -rf /tmp/zzz" } }),
+    reject: false,
+  });
+  const redirectLog = await readFile(path.join(logsDir, `${container}-redirect.log`), "utf8");
+  assert.match(redirectLog, /DENY .*rm -rf \/tmp\/zzz/);
+});
+
 test("universe add refuses a branch already checked out in a slot", async (t) => {
   const sb = await createSandbox();
   t.after(() => sb.cleanup());

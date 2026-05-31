@@ -173,8 +173,12 @@ worm sync:
 > only entries whose command references the `.worm/recipes/` tree (so recipes compose and strip
 > independently). **Built-ins:** `sandbox` (artifacts + PreToolUse/Session hooks), `syncPermissions`
 > (SessionStart/End hooks that merge-preservingly union the `permissions` block across slots), and
-> `shareHistory` (`onSlotCreate` symlink of each slot's `~/.claude/projects` dir to Slot 0's). The
-> sketch below predates this and is kept for historical context.
+> `shareHistory` (`onSlotCreate` symlink of each slot's `~/.claude/projects` dir to Slot 0's). Hooks
+> run silently inside Claude sessions, so they log to **`.worm/logs/`** (`<container>.log` for
+> `up`/`down`, `<container>-redirect.log` for interceptor decisions, `sync-permissions.log` for the
+> sync) — a fixed, discoverable location à la Terraform's `TF_LOG_PATH`. `materializeRecipes`
+> pre-creates the dir so the hooks' `>>` redirects can't fail. The sketch below predates this and is
+> kept for historical context.
 
 
 Opt-in. Default `none` emits **no** hooks and **no** Docker, so open-source adopters inherit nothing.
