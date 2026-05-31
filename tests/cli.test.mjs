@@ -294,9 +294,18 @@ test("syncPermissions recipe wires session hooks and a valid merge script", asyn
     await readFile(path.join(sb.projectRoot, ".claude", "settings.local.json"), "utf8")
   );
   assert.equal(s0.hooks.SessionStart.length, 1);
-  assert.match(s0.hooks.SessionStart[0].hooks[0].command, /sync-claude-settings\.js/);
+  const cmd = s0.hooks.SessionStart[0].hooks[0].command;
+  assert.match(cmd, /sync-claude-settings\.js/);
   assert.equal(s0.hooks.SessionEnd.length, 1);
   assert.match(s0.hooks.SessionEnd[0].hooks[0].command, /sync-claude-settings\.js/);
+
+  // Canonical store is the PERSISTENT global profile (committed in ~/.worm),
+  // not the ephemeral local .worm/recipes/ — so existing allowlists are pulled in.
+  const canonical = path.join(
+    sb.wormHome, "multiverses", path.basename(sb.projectRoot), ".claude", "settings.local.json"
+  );
+  assert.ok(cmd.includes(`"${canonical}"`), `canonical must be the global profile file:\n${cmd}`);
+  assert.doesNotMatch(cmd, /recipes\/syncPermissions\/permissions\.json/);
 });
 
 test("recipes compose: sandbox + syncPermissions share settings.local.json", async (t) => {

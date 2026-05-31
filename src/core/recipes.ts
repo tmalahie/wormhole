@@ -11,7 +11,7 @@ import {
 } from "../utils/fs.js";
 import { logger } from "../utils/logger.js";
 import { ensureSymlink } from "./symlinks.js";
-import { localLogsDir, localRecipeDir, localRecipesRoot } from "./paths.js";
+import { globalProjectFile, localLogsDir, localRecipeDir, localRecipesRoot } from "./paths.js";
 import type {
   RecipesConfig,
   SandboxRecipeConfig,
@@ -137,11 +137,14 @@ const syncPermissionsRecipe: Recipe<SyncPermissionsRecipeConfig> = {
       { relPath: "sync-claude-settings.js", content: SYNC_PERMISSIONS_SCRIPT, executable: true },
     ];
   },
-  wireSlot({ slot0Root }) {
+  wireSlot({ slot0Root, projectName }) {
     const dir = localRecipeDir(slot0Root, "syncPermissions");
     const script = path.join(dir, "sync-claude-settings.js");
-    // One canonical union store at Slot 0, shared by every slot.
-    const canonical = path.join(dir, "permissions.json");
+    // The canonical union store lives in the PERSISTENT global profile (in
+    // ~/.worm — committed, shared across slots, surviving re-clones), NOT the
+    // ephemeral local .worm/recipes/. It's also where a user's accumulated
+    // allowlist already lives, so existing permissions are pulled in on first run.
+    const canonical = globalProjectFile(projectName, path.join(".claude", "settings.local.json"));
     const command = `node "${script}" "${canonical}"`;
     const entry = { hooks: [{ type: "command", command }] };
     // Same bidirectional sync on both boundaries: pull on start, push on end.
