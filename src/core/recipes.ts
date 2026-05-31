@@ -495,7 +495,7 @@ function deny() {
     : '';
   const reason =
     'This command mutates the filesystem or runs an ad-hoc script on the host. ' +
-    'Run it inside the \'' + containerName + '\' docker sandbox instead, so its blast radius is ' +
+    'Run it inside the \'' + containerName + '\' docker sandbox instead (already up), so its blast radius is ' +
     'limited to the mounted worktree. Re-run it as (wrap your command in single quotes):\n' +
     '  docker exec ' + containerName + ' bash -lc \'<your original command>\'\n\n' +
     'The sandbox mounts ' + projectDir + ' read-write at the same absolute path.' +
