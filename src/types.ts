@@ -19,7 +19,10 @@ export const SandboxRecipeSchema = z
     backend: z.enum(["docker"]).default("docker"),
     image: z.string().default("node:22-bookworm"),
     tools: z.array(z.string()).default([]),
-    neverSandbox: z.array(z.string()).default(["node", "npm", "npx", "pnpm", "yarn"]),
+    // node is intentionally NOT exempt: `node <script>` runs arbitrary code, so
+    // it's sandboxed (see the interceptor). npm/npx/pnpm/yarn stay exempt — they
+    // rely on host-built native node_modules.
+    neverSandbox: z.array(z.string()).default(["npm", "npx", "pnpm", "yarn"]),
     exemptDirs: z.array(z.string()).default([]),
     autostart: z.boolean().default(true),
     autostop: z.boolean().default(false),

@@ -480,6 +480,39 @@ test("recipe hooks log to .worm/logs", async (t) => {
   assert.match(redirectLog, /DENY .*rm -rf \/tmp\/zzz/);
 });
 
+test("sandbox interceptor: node code runs are sandboxed; npm and node --check are not", async (t) => {
+  const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
+  t.after(() => rm(templateDir, { recursive: true, force: true }));
+  await writeFile(
+    path.join(templateDir, "config.json"),
+    JSON.stringify({ shared_paths: [], hooks: {}, recipes: { sandbox: {} } })
+  );
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init", "--template", templateDir]);
+
+  const sandboxDir = path.join(sb.projectRoot, ".worm", "recipes", "sandbox");
+  const interceptor = path.join(sandboxDir, "redirect-to-sandbox.js");
+  const decide = async (command) => {
+    const r = await execa("node", [interceptor, "c", "/x/compose.yml"], {
+      input: JSON.stringify({ tool_input: { command } }),
+      reject: false,
+    });
+    return r.stdout.includes('"permissionDecision":"deny"') ? "deny" : "allow";
+  };
+
+  assert.equal(await decide("node scripts/test.js"), "deny", "node <script> runs arbitrary code");
+  assert.equal(await decide("node --check scripts/test.js"), "allow", "syntax check executes nothing");
+  assert.equal(await decide("node --version"), "allow");
+  assert.equal(await decide("npm install"), "allow", "npm stays exempt (host node_modules)");
+  assert.equal(await decide("rm -rf /tmp/x"), "deny");
+
+  // The generated policy no longer exempts node.
+  const policy = JSON.parse(await readFile(path.join(sandboxDir, "sandbox-policy.json"), "utf8"));
+  assert.ok(!policy.neverSandbox.includes("node"), "node dropped from neverSandbox default");
+  assert.ok(policy.neverSandbox.includes("npm"), "npm still exempt");
+});
+
 test("universe add refuses a branch already checked out in a slot", async (t) => {
   const sb = await createSandbox();
   t.after(() => sb.cleanup());

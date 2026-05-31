@@ -463,7 +463,7 @@ const containerName = process.argv[2] || 'sandbox';
 const composePath = process.argv[3] || '';
 const projectDir = process.env.CLAUDE_PROJECT_DIR || process.cwd();
 
-let policy = { neverSandbox: ['node', 'npm', 'npx', 'pnpm', 'yarn'], exemptDirs: [] };
+let policy = { neverSandbox: ['npm', 'npx', 'pnpm', 'yarn'], exemptDirs: [] };
 try {
   policy = JSON.parse(fs.readFileSync(path.join(__dirname, 'sandbox-policy.json'), 'utf8'));
 } catch (e) { /* fall back to defaults */ }
@@ -526,6 +526,13 @@ function shouldRedirect(command) {
     if (!firstToken) continue;
     const program = baseName(firstToken);
     if (NODE_TOOLS.has(program)) continue;
+    // node executes arbitrary code (a script, -e/-p, or stdin), so sandbox it
+    // unless neverSandbox exempts it (handled above) — except pure inspection
+    // flags that don't run user code.
+    if (program === 'node') {
+      if (/\s--(?:version|check|help)\b|\s-v\b/.test(' ' + segment)) continue;
+      return true;
+    }
     if (INTERPRETERS.has(program) && READONLY_CHECK.test(segment)) continue;
     if (FILE_OPS.has(program)) return true;
     if (/^(?:\.{1,2}\/|\/)?[^\s]*\.(?:sh|bash|zsh|py|rb|pl|php)$/.test(firstToken)) return true;
