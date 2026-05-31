@@ -29,7 +29,7 @@ import {
   localSharedFile,
 } from "../core/paths.js";
 import { ensureSymlink } from "../core/symlinks.js";
-import { materializeSandbox } from "../core/sandbox.js";
+import { applySlotWiring, materializeSandbox } from "../core/sandbox.js";
 import { run } from "../utils/exec.js";
 import {
   materializeTemplateScripts,
@@ -128,6 +128,9 @@ export async function bindProject(
     config.sandbox
   );
   for (const file of sandboxFiles) logger.step(`📦 sandbox/${file}`);
+  if (await applySlotWiring(projectRoot, projectName, { name: "main", path: projectRoot }, config.sandbox)) {
+    logger.step("⚡ wired sandbox hooks for Slot 0");
+  }
 
   logger.success(
     existed

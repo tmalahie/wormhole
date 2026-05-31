@@ -1,6 +1,6 @@
 import { logger } from "../utils/logger.js";
 import { WormError } from "../utils/errors.js";
-import { findSlot0Root } from "../core/project.js";
+import { findSlot0Root, readProjectName } from "../core/project.js";
 import { loadLocalConfig } from "../core/config.js";
 import {
   findSlotByBranch,
@@ -15,7 +15,8 @@ import {
   worktreeAdd,
   worktreeRemove,
 } from "../core/git.js";
-import { siblingWorktreeDir } from "../core/paths.js";
+import { localSandboxDir, siblingWorktreeDir } from "../core/paths.js";
+import { applySlotWiring, materializeSandbox } from "../core/sandbox.js";
 import { hookEnv, runHook } from "../core/hooks.js";
 import {
   readManifest,
@@ -89,6 +90,13 @@ export async function runUniverseAdd(
         `on_create hook exited with code ${result.exitCode}. The worktree exists but may not be fully warmed.`
       );
     }
+  }
+
+  // Provision sandbox artifacts (idempotent) and wire this slot (no-op for recipe none).
+  const projectName = await readProjectName(root);
+  await materializeSandbox(localSandboxDir(root), projectName, config.sandbox);
+  if (await applySlotWiring(root, projectName, { name: String(index), path: target }, config.sandbox)) {
+    logger.step("⚡ wired sandbox hooks");
   }
 
   logger.success(`Universe ${index} is live on ${logger.bold(branch)}.`);

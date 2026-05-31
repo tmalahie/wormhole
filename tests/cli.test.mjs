@@ -225,6 +225,54 @@ test("sandbox recipe: 'none' provisions nothing; 'docker' generates Dockerfile +
   assert.doesNotMatch(compose, /\/Users\//, "no hardcoded home path leaks into the generated compose");
 });
 
+test("sandbox wiring writes idempotent per-slot hooks into settings.local.json", async (t) => {
+  const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
+  t.after(() => rm(templateDir, { recursive: true, force: true }));
+  await writeFile(
+    path.join(templateDir, "config.json"),
+    JSON.stringify({ shared_paths: [], hooks: {}, sandbox: { recipe: "docker" } })
+  );
+
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await createBranch(sb.projectRoot, "feature-a");
+  await sb.worm(["init", "--template", templateDir]);
+
+  const name = path.basename(sb.projectRoot);
+  const readLocal = async (dir) =>
+    JSON.parse(await readFile(path.join(dir, ".claude", "settings.local.json"), "utf8"));
+
+  // Interceptor + policy generated — and the interceptor is valid JS (it's
+  // embedded via String.raw and the suite otherwise never executes it).
+  const interceptor = path.join(sb.projectRoot, ".worm", "sandbox", "redirect-to-sandbox.js");
+  await stat(interceptor);
+  const check = await execa("node", ["--check", interceptor], { reject: false });
+  assert.equal(check.exitCode, 0, `generated interceptor must be valid JS:\n${check.stderr}`);
+  const policy = JSON.parse(
+    await readFile(path.join(sb.projectRoot, ".worm", "sandbox", "sandbox-policy.json"), "utf8")
+  );
+  assert.ok(Array.isArray(policy.neverSandbox));
+
+  // Slot 0 wired in settings.local.json (the gitignored target).
+  const s0 = await readLocal(sb.projectRoot);
+  assert.equal(s0.hooks.PreToolUse.length, 1);
+  assert.equal(s0.hooks.PreToolUse[0].matcher, "Bash");
+  assert.match(s0.hooks.PreToolUse[0].hooks[0].command, new RegExp(`${escapeRegex(name)}-main-sandbox`));
+  assert.match(s0.hooks.PreToolUse[0].hooks[0].command, /redirect-to-sandbox\.js/);
+  assert.ok(Array.isArray(s0.hooks.SessionStart), "autostart default → SessionStart present");
+
+  // A new universe gets its own container name in its own settings.local.json.
+  await sb.worm(["universe", "add", "feature-a", "--skip-hook"]);
+  const root = await realpath(sb.projectRoot);
+  const s1 = await readLocal(siblingPath(root, 1));
+  assert.match(s1.hooks.PreToolUse[0].hooks[0].command, new RegExp(`${escapeRegex(name)}-1-sandbox`));
+
+  // Idempotent: a re-sync must not duplicate Slot 0's hook entry.
+  await sb.worm(["sync"]);
+  const s0b = await readLocal(sb.projectRoot);
+  assert.equal(s0b.hooks.PreToolUse.length, 1, "re-sync must not duplicate worm hooks");
+});
+
 test("universe add refuses a branch already checked out in a slot", async (t) => {
   const sb = await createSandbox();
   t.after(() => sb.cleanup());

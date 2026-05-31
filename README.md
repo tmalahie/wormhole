@@ -116,7 +116,7 @@ Edit the file (or pre-seed a `--template <dir>`) to add what your project needs.
 
 - **`shared_paths`** — files tunnelled from `.worm/shared/` into every slot. If a matching file exists at `~/.worm/multiverses/<project>/<path>`, it's symlinked there; otherwise an empty local placeholder is created on first `init`. Common entries: `.env`, `CLAUDE.local.md`, `.mcp.json`. Run `worm sync` after changing this list.
 - **`hooks`** — `on_create` runs inside a slot when it's created (`universe add`) and on `switch`; `on_remove` runs before a slot is removed. The default `on_create` invokes `.worm/scripts/setup.sh` — drop your install commands there (`npm install`, `pip install -r requirements.txt`, …) instead of editing the JSON. A non-zero `on_create` warns but doesn't abort; a non-zero `on_remove` aborts the removal unless `--force`.
-- **`sandbox`** — opt-in command-sandboxing recipe (default `none`). The recipe engine is under development; see [docs/strategy-3-spec.md](docs/strategy-3-spec.md).
+- **`sandbox`** — opt-in command sandbox (default `none`). With `recipe: "docker"`, `init`/`sync`/`universe add` generate a per-project `.worm/sandbox/` (a Dockerfile from `image` + `tools`, a compose file, and a `redirect-to-sandbox.js` interceptor) and wire each slot's `.claude/settings.local.json` so the slot's container auto-starts (`autostart`) and filesystem-mutating commands are redirected into it (mounted at the same path via `$SANDBOX_DIR`). Other fields: `neverSandbox`, `exemptDirs`, `autostop`. (`promptShaping` is reserved — not yet wired.) See [docs/strategy-3-spec.md](docs/strategy-3-spec.md) §6.
 
 ### Hook environment
 

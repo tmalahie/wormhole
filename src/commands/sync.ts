@@ -8,7 +8,7 @@ import {
   reconcileSlotLinks,
   writeManifest,
 } from "../core/links.js";
-import { materializeSandbox } from "../core/sandbox.js";
+import { applySlotWiring, materializeSandbox } from "../core/sandbox.js";
 import { localSandboxDir } from "../core/paths.js";
 
 /**
@@ -47,6 +47,11 @@ export async function runSync(): Promise<void> {
   const projectName = await readProjectName(root);
   const sandboxFiles = await materializeSandbox(localSandboxDir(root), projectName, config.sandbox);
   for (const file of sandboxFiles) logger.step(`📦 sandbox/${file}`);
+  for (const slot of slots) {
+    if (await applySlotWiring(root, projectName, slot, config.sandbox)) {
+      logger.step(`⚡ ${slot.name}: sandbox hooks ${config.sandbox.recipe === "none" ? "removed" : "wired"}`);
+    }
+  }
 
   logger.success(
     `Synced ${slots.length} universe${slots.length === 1 ? "" : "s"} — ${created} linked, ${pruned} pruned.`
