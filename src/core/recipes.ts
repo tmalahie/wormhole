@@ -488,7 +488,9 @@ const SCRIPT_TOKEN = /(?:^|[\s='"(])((?:\.{1,2}\/|\/)?[^\s'"()]*\.(?:sh|bash|zsh
 const READONLY_CHECK = /\bphp\s+-l\b/;
 
 const exemptNames = ['worm', 'claude'].concat(policy.exemptDirs || []);
-const EXCLUDED_DIR = new RegExp('(?:^|[\\s=\'"~])\\.?~?/?[^\\s\'"]*/\\.(?:' + exemptNames.join('|') + ')/');
+// Matches a path token whose component is .worm/ .claude/ (or a configured
+// exempt dir), in any form: bare ./relative, ~/-rooted, or absolute.
+const EXCLUDED_DIR = new RegExp('(?:^|[\\s=\'"(])(?:[^\\s\'"]*/)?\\.(?:' + exemptNames.join('|') + ')/');
 
 function allow() { process.exit(0); }
 
@@ -516,14 +518,54 @@ function deny() {
 
 function baseName(token) { const parts = token.split('/'); return parts[parts.length - 1]; }
 
+// Blank the INTERIOR of single/double-quoted spans (preserving length and the
+// quote chars), so shell operators and file-op words inside string literals —
+// commit messages, --body text, jq filters — can't be misread as command
+// boundaries or programs. Positions are preserved so callers can slice raw.
+function maskQuotedSpans(s) {
+  let out = '';
+  let quote = null;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (quote !== null) {
+      if (ch === quote) { quote = null; out += ch; } else { out += ' '; }
+    } else if (ch === '"' || ch === "'") {
+      quote = ch; out += ch;
+    } else {
+      out += ch;
+    }
+  }
+  return out;
+}
+
+// Split on unquoted ; && || and newlines: find the operators in the masked
+// string (quoted ones are blanked, so ignored), then slice the RAW command at
+// those offsets. Analysing the raw segment keeps quoted script PATHS visible to
+// SCRIPT_TOKEN while never splitting inside a quote.
+function splitRespectingQuotes(command) {
+  const masked = maskQuotedSpans(command);
+  const re = /\n|;|&&|\|\|/g;
+  const out = [];
+  let last = 0;
+  let m;
+  while ((m = re.exec(masked)) !== null) {
+    out.push(command.slice(last, m.index));
+    last = m.index + m[0].length;
+  }
+  out.push(command.slice(last));
+  return out;
+}
+
 function shouldRedirect(command) {
   if (/#bypass-hook\s*$/.test(command)) return false;
   if (/^\s*(?:sudo\s+)?docker(?:\s|-compose\b|$)/.test(command)) return false;
-  if (EXCLUDED_DIR.test(command)) return false;
-  const segments = command.split(/\n|;|&&|\|\|/);
-  for (let segment of segments) {
+  for (let segment of splitRespectingQuotes(command)) {
     segment = segment.trim();
     if (!segment) continue;
+    // Exempt a segment that runs a script under an exempt dir (.worm/.claude/…).
+    // Per-SEGMENT (not whole-command) so one exempt clause can't shield a sibling
+    // file-op; masked so a quoted path can't spuriously exempt one either.
+    if (EXCLUDED_DIR.test(maskQuotedSpans(segment))) continue;
     segment = segment.replace(/^(?:\w+=(?:'[^']*'|"[^"]*"|\S+)\s+)*/, '').replace(/^sudo\s+/, '');
     const firstToken = segment.split(/\s+/)[0] || '';
     if (!firstToken) continue;

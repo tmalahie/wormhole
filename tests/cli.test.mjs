@@ -516,6 +516,21 @@ test("sandbox interceptor: node code runs are sandboxed; npm and node --check ar
   assert.equal(await decide("npm install"), "allow", "npm stays exempt (host node_modules)");
   assert.equal(await decide("rm -rf /tmp/x"), "deny");
 
+  // Operators / file-op words INSIDE quotes must not be misread as command
+  // boundaries — commit messages, --body text, echo, etc. (regression).
+  assert.equal(await decide('git commit -m "oops; rm cruft"'), "allow", "; inside a quote is not a split");
+  assert.equal(await decide('echo "a || cp b"'), "allow", "|| inside a quote is not a split");
+  assert.equal(await decide('gh pr comment --body "see; rm note"'), "allow");
+  assert.equal(await decide('git commit -m "fix .worm/x bug"'), "allow", "quoted .worm path is just text");
+  // …but real, unquoted operators still expose the trailing file-op.
+  assert.equal(await decide("git status && rm -rf build"), "deny", "unquoted && still splits");
+  assert.equal(await decide('echo hi; rm -rf build'), "deny", "unquoted ; still splits");
+  // Dir-exemption is per-segment: it can't shield a sibling file-op.
+  assert.equal(await decide("bash .worm/scripts/x.sh"), "allow", "scripts under .worm stay on host");
+  assert.equal(await decide("cat .worm/x && rm -rf build"), "deny", "exempt clause can't shield the rm");
+  // Quoted script PATHS are still caught (raw segment keeps them visible).
+  assert.equal(await decide('bash "deploy.sh"'), "deny", "quoted script path still sandboxed");
+
   // The generated policy no longer exempts node.
   const policy = JSON.parse(await readFile(path.join(sandboxDir, "sandbox-policy.json"), "utf8"));
   assert.ok(!policy.neverSandbox.includes("node"), "node dropped from neverSandbox default");
