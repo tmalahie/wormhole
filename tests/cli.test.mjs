@@ -273,6 +273,119 @@ test("sandbox wiring writes idempotent per-slot hooks into settings.local.json",
   assert.equal(s0b.hooks.PreToolUse.length, 1, "re-sync must not duplicate worm hooks");
 });
 
+test("syncPermissions recipe wires session hooks and a valid merge script", async (t) => {
+  const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
+  t.after(() => rm(templateDir, { recursive: true, force: true }));
+  await writeFile(
+    path.join(templateDir, "config.json"),
+    JSON.stringify({ shared_paths: [], hooks: {}, recipes: { syncPermissions: {} } })
+  );
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init", "--template", templateDir]);
+
+  const script = path.join(
+    sb.projectRoot, ".worm", "recipes", "syncPermissions", "sync-claude-settings.js"
+  );
+  const check = await execa("node", ["--check", script], { reject: false });
+  assert.equal(check.exitCode, 0, `generated sync script must be valid JS:\n${check.stderr}`);
+
+  const s0 = JSON.parse(
+    await readFile(path.join(sb.projectRoot, ".claude", "settings.local.json"), "utf8")
+  );
+  assert.equal(s0.hooks.SessionStart.length, 1);
+  assert.match(s0.hooks.SessionStart[0].hooks[0].command, /sync-claude-settings\.js/);
+  assert.equal(s0.hooks.SessionEnd.length, 1);
+  assert.match(s0.hooks.SessionEnd[0].hooks[0].command, /sync-claude-settings\.js/);
+});
+
+test("recipes compose: sandbox + syncPermissions share settings.local.json", async (t) => {
+  const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
+  t.after(() => rm(templateDir, { recursive: true, force: true }));
+  await writeFile(
+    path.join(templateDir, "config.json"),
+    JSON.stringify({ shared_paths: [], hooks: {}, recipes: { sandbox: {}, syncPermissions: {} } })
+  );
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init", "--template", templateDir]);
+
+  const readLocal = async () =>
+    JSON.parse(await readFile(path.join(sb.projectRoot, ".claude", "settings.local.json"), "utf8"));
+
+  const s0 = await readLocal();
+  // PreToolUse: sandbox only.
+  assert.equal(s0.hooks.PreToolUse.length, 1);
+  assert.match(s0.hooks.PreToolUse[0].hooks[0].command, /redirect-to-sandbox\.js/);
+  // SessionStart: BOTH recipes coexist (container up + permission sync).
+  assert.equal(s0.hooks.SessionStart.length, 2, "both recipes contribute SessionStart");
+  const startCmds = s0.hooks.SessionStart.map((e) => e.hooks[0].command).join("\n");
+  assert.match(startCmds, /docker compose .* up -d/);
+  assert.match(startCmds, /sync-claude-settings\.js/);
+  // SessionEnd: syncPermissions (autostop default off → no sandbox down).
+  assert.equal(s0.hooks.SessionEnd.length, 1);
+  assert.match(s0.hooks.SessionEnd[0].hooks[0].command, /sync-claude-settings\.js/);
+
+  // Idempotent: re-sync must not duplicate either recipe's entries.
+  await sb.worm(["sync"]);
+  const s0b = await readLocal();
+  assert.equal(s0b.hooks.SessionStart.length, 2, "re-sync must not duplicate");
+  assert.equal(s0b.hooks.PreToolUse.length, 1);
+});
+
+test("syncPermissions script unions permissions while preserving other keys", async (t) => {
+  const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
+  t.after(() => rm(templateDir, { recursive: true, force: true }));
+  await writeFile(
+    path.join(templateDir, "config.json"),
+    JSON.stringify({ shared_paths: [], hooks: {}, recipes: { syncPermissions: {} } })
+  );
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init", "--template", templateDir]);
+
+  const recipeDir = path.join(sb.projectRoot, ".worm", "recipes", "syncPermissions");
+  const script = path.join(recipeDir, "sync-claude-settings.js");
+  const canonical = path.join(recipeDir, "permissions.json");
+
+  // Canonical store already holds one allow rule…
+  await writeFile(canonical, JSON.stringify({ permissions: { allow: ["Bash(ls:*)"] } }));
+  // …and this slot has a DIFFERENT rule plus a hooks block (another recipe's).
+  const localFile = path.join(sb.projectRoot, ".claude", "settings.local.json");
+  await mkdir(path.dirname(localFile), { recursive: true });
+  await writeFile(
+    localFile,
+    JSON.stringify({
+      hooks: { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "echo keep-me" }] }] },
+      permissions: { allow: ["Bash(git status:*)"] },
+    })
+  );
+
+  const run = await execa("node", [script, canonical], {
+    cwd: sb.projectRoot,
+    env: { ...process.env, CLAUDE_PROJECT_DIR: sb.projectRoot },
+    reject: false,
+  });
+  assert.equal(run.exitCode, 0, run.stderr);
+
+  const merged = JSON.parse(await readFile(localFile, "utf8"));
+  assert.deepEqual(
+    new Set(merged.permissions.allow),
+    new Set(["Bash(ls:*)", "Bash(git status:*)"]),
+    "permissions unioned across slot + canonical"
+  );
+  assert.equal(
+    merged.hooks.PreToolUse[0].hooks[0].command,
+    "echo keep-me",
+    "another recipe's hooks block is preserved, not clobbered"
+  );
+  const canonAfter = JSON.parse(await readFile(canonical, "utf8"));
+  assert.deepEqual(
+    new Set(canonAfter.permissions.allow),
+    new Set(["Bash(ls:*)", "Bash(git status:*)"])
+  );
+});
+
 test("universe add refuses a branch already checked out in a slot", async (t) => {
   const sb = await createSandbox();
   t.after(() => sb.cleanup());

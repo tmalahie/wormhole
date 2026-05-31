@@ -26,9 +26,13 @@ export const SandboxRecipeSchema = z
   })
   .strict();
 
+// syncPermissions has no options yet — presence of the key is the whole signal.
+export const SyncPermissionsRecipeSchema = z.object({}).strict();
+
 export const RecipesSchema = z
   .object({
     sandbox: SandboxRecipeSchema.optional(),
+    syncPermissions: SyncPermissionsRecipeSchema.optional(),
   })
   .strict()
   .default({});
@@ -47,6 +51,7 @@ export type Config = z.infer<typeof ConfigSchema>;
 export type Hooks = z.infer<typeof HooksSchema>;
 export type RecipesConfig = z.infer<typeof RecipesSchema>;
 export type SandboxRecipeConfig = z.infer<typeof SandboxRecipeSchema>;
+export type SyncPermissionsRecipeConfig = z.infer<typeof SyncPermissionsRecipeSchema>;
 
 export const DEFAULT_CONFIG: Config = ConfigSchema.parse({
   hooks: { on_create: 'bash "$WORM_PROJECT_ROOT/.worm/scripts/setup.sh"' },
