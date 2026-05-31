@@ -11,6 +11,8 @@ export const DEFAULT_TEMPLATE_NAME = "default";
 export const SCRIPTS_DIR_NAME = "scripts";
 export const SETUP_SCRIPT_NAME = "setup.sh";
 export const MANAGED_LINKS_FILE_NAME = ".managed-links.json";
+/** Joins the repo basename and slot index for sibling worktree dirs: `<repo>-<N>`. */
+export const SLOT_DIR_INFIX = "-";
 
 export function globalRoot(): string {
   const override = process.env.WORM_HOME;
@@ -94,5 +96,5 @@ export function managedLinksFile(slot0Root: string): string {
 export function siblingWorktreeDir(slot0Root: string, index: number): string {
   const parent = path.dirname(slot0Root);
   const base = path.basename(slot0Root);
-  return path.join(parent, `${base}-uni${index}`);
+  return path.join(parent, `${base}${SLOT_DIR_INFIX}${index}`);
 }

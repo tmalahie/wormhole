@@ -1,6 +1,7 @@
 import path from "node:path";
 import { WormError } from "../utils/errors.js";
 import type { UniverseSlot } from "../types.js";
+import { SLOT_DIR_INFIX } from "./paths.js";
 import { listWorktrees, type WorktreeEntry } from "./git.js";
 
 /**
@@ -20,7 +21,7 @@ export async function scanUniverses(slot0Root: string): Promise<UniverseSlot[]> 
     if (index === null) continue;
     slots.push({
       index,
-      name: index === 0 ? "main" : `uni-${index}`,
+      name: index === 0 ? "main" : String(index),
       isPrimary: index === 0,
       path: path.resolve(wt.path),
       status: "READY",
@@ -42,7 +43,7 @@ function slotIndexForPath(
   if (resolved === path.resolve(slot0Root)) return 0;
   if (path.resolve(path.dirname(resolved)) !== path.resolve(parent)) return null;
   const name = path.basename(resolved);
-  const prefix = `${base}-uni`;
+  const prefix = `${base}${SLOT_DIR_INFIX}`;
   if (!name.startsWith(prefix)) return null;
   const rest = name.slice(prefix.length);
   return /^\d+$/.test(rest) ? Number.parseInt(rest, 10) : null;

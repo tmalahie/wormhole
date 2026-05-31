@@ -46,7 +46,7 @@ export async function runSwitch(
   );
   if (elsewhere) {
     throw new WormError(
-      `Branch "${branch}" is already checked out in ${universeLabel(elsewhere)} (${elsewhere.name}).`,
+      `Branch "${branch}" is already checked out in ${universeLabel(elsewhere)}.`,
       { hint: `git refuses two worktrees on one branch. cd ${elsewhere.path}` }
     );
   }

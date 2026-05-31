@@ -35,13 +35,14 @@ so Slot 0's git never sees them as untracked directories.
 │   ├── .git/                 ← standard git dir (the common dir for all slots)
 │   └── .worm/                ← Manifest local wiring + config.json + .managed-links.json
 │                               (no universes/ anchors dir — anchors removed)
-├── my-project-uni1/         ← permanent linked worktree (sibling of Slot 0, not nested)
-└── my-project-uni2/         ← permanent linked worktree
+├── my-project-1/            ← permanent linked worktree (sibling of Slot 0, not nested)
+└── my-project-2/            ← permanent linked worktree
 ```
 
 - **No `.bare`, no pointer file, no `uni0`.** Slot 0 *is* the main checkout; sibling indices start at 1.
 - **`.worm/` always lives at Slot 0.** Sibling worktrees reach it through git (`--git-common-dir`), never by guessing `../`.
-- **Layout decision:** true siblings (chosen) over nesting `<proj>-uniN/` inside Slot 0 + a `.git/info/exclude` entry. Siblings keep `git status` in Slot 0 clean and match the conventional `git worktree add ../…` layout.
+- **Layout decision:** true siblings (chosen) over nesting `<proj>-N/` inside Slot 0 + a `.git/info/exclude` entry. Siblings keep `git status` in Slot 0 clean and match the conventional `git worktree add ../…` layout.
+- **Naming:** sibling dirs are `<repo>-<N>` (no `uni` token), centralised on the `SLOT_DIR_INFIX` constant in `paths.ts`. Slot display names are `main` / `<N>`.
 
 **Root resolution (replaces `findContainerRoot`/`isBareCloneContainer`):**
 

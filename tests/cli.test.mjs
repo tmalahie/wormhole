@@ -11,9 +11,9 @@ function escapeRegex(str) {
   return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-// Sibling pool worktree for slot N lives at `<root>-uniN`.
+// Sibling pool worktree for slot N lives at `<root>-N`.
 function siblingPath(root, n) {
-  return `${root}-uni${n}`;
+  return `${root}-${n}`;
 }
 
 test("first `worm init` lazily provisions the global root", async (t) => {
@@ -134,7 +134,7 @@ test("worm universe add creates a sibling worktree; status shows the pool", asyn
   assert.equal(state.slots[0].isPrimary, true);
   assert.equal(state.slots[0].branch, "main");
   assert.equal(state.slots[1].index, 1);
-  assert.equal(state.slots[1].name, "uni-1");
+  assert.equal(state.slots[1].name, "1");
   assert.equal(state.slots[1].branch, "feature-a");
   assert.equal(state.slots[1].path, sib);
 });
@@ -296,7 +296,7 @@ test("on_create hook runs setup.sh with WORM_* env vars on universe add", async 
   assert.equal(r.exitCode, 0, r.stderr);
   const root = await realpath(sb.projectRoot);
   assert.match(r.stdout, new RegExp(`ROOT=${escapeRegex(root)}`));
-  assert.match(r.stdout, /SLOT=uni-1/);
+  assert.match(r.stdout, /SLOT=1/);
   assert.match(r.stdout, /INDEX=1/);
   assert.match(r.stdout, /BRANCH=feature-a/);
   assert.match(r.stdout, new RegExp(`WT=${escapeRegex(siblingPath(root, 1))}`));

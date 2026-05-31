@@ -43,7 +43,7 @@ export async function createSandbox() {
     const base = path.basename(projectRoot);
     try {
       for (const entry of await readdir(parent)) {
-        if (entry.startsWith(`${base}-uni`)) {
+        if (entry.startsWith(`${base}-`)) {
           await rm(path.join(parent, entry), { recursive: true, force: true });
         }
       }

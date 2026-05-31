@@ -52,7 +52,7 @@ export async function runUniverseAdd(
   const already = findSlotByBranch(slots, branch);
   if (already) {
     throw new WormError(
-      `Branch "${branch}" is already checked out in ${universeLabel(already)} (${already.name}).`,
+      `Branch "${branch}" is already checked out in ${universeLabel(already)}.`,
       { hint: `Open it at ${already.path}` }
     );
   }
@@ -74,7 +74,7 @@ export async function runUniverseAdd(
   if (!options.skipHook && config.hooks.on_create) {
     const slot: UniverseSlot = {
       index,
-      name: `uni-${index}`,
+      name: String(index),
       isPrimary: false,
       path: target,
       status: "READY",
@@ -122,7 +122,7 @@ export async function runUniverseRemove(
     const preview = dirty.slice(0, 5).map((line) => `    ${line}`).join("\n");
     const tail = dirty.length > 5 ? `\n    … and ${dirty.length - 5} more` : "";
     throw new WormError(
-      `${universeLabel(slot)} (${slot.name}) has uncommitted changes in ${slot.path}:\n${preview}${tail}`,
+      `${universeLabel(slot)} has uncommitted changes in ${slot.path}:\n${preview}${tail}`,
       {
         hint: "Commit or push them from the worktree, or pass --force to discard them (changes will be lost).",
       }
@@ -134,9 +134,7 @@ export async function runUniverseRemove(
     );
   }
 
-  logger.info(
-    `💫 Collapsing ${logger.bold(universeLabel(slot))} (${slot.name})`
-  );
+  logger.info(`💫 Collapsing ${logger.bold(universeLabel(slot))}`);
 
   if (!options.skipHook && config.hooks.on_remove) {
     const result = await runHook("on_remove", config.hooks.on_remove, {

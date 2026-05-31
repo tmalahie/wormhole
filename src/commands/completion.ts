@@ -1,4 +1,5 @@
 import { WormError } from "../utils/errors.js";
+import { SLOT_DIR_INFIX } from "../core/paths.js";
 
 /**
  * Emit a shell completion script for `worm`. Source from your rc file:
@@ -72,7 +73,7 @@ _worm_complete() {
       local refs wtlist
       wtlist="$(git worktree list --porcelain 2>/dev/null)"
       refs="$(printf '%s\\n' "$wtlist" | sed -nE 's|^branch refs/heads/||p;')
-$(printf '%s\\n' "$wtlist" | sed -nE 's|^worktree .*-uni([0-9]+)$|\\1|p;')"
+$(printf '%s\\n' "$wtlist" | sed -nE 's|^worktree .*${SLOT_DIR_INFIX}([0-9]+)$|\\1|p;')"
       COMPREPLY=($(compgen -W "$refs" -- "$cur"))
       ;;
     config)
@@ -115,7 +116,7 @@ _worm_complete() {
       local _worm_wtlist
       _worm_wtlist="$(git worktree list --porcelain 2>/dev/null)"
       compadd -- \${(f)"$(printf '%s\\n' "$_worm_wtlist" | sed -nE 's|^branch refs/heads/||p;')"}
-      compadd -- \${(f)"$(printf '%s\\n' "$_worm_wtlist" | sed -nE 's|^worktree .*-uni([0-9]+)$|\\1|p;')"}
+      compadd -- \${(f)"$(printf '%s\\n' "$_worm_wtlist" | sed -nE 's|^worktree .*${SLOT_DIR_INFIX}([0-9]+)$|\\1|p;')"}
       ;;
     config)
       if (( CURRENT == 3 )); then
