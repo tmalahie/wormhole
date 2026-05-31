@@ -1,6 +1,6 @@
 import path from "node:path";
 import { logger } from "../utils/logger.js";
-import { findSlot0Root } from "../core/project.js";
+import { findSlot0Root, readProjectName } from "../core/project.js";
 import { loadLocalConfig } from "../core/config.js";
 import { scanUniverses } from "../core/universe.js";
 import {
@@ -8,6 +8,8 @@ import {
   reconcileSlotLinks,
   writeManifest,
 } from "../core/links.js";
+import { materializeSandbox } from "../core/sandbox.js";
+import { localSandboxDir } from "../core/paths.js";
 
 /**
  * Declarative reconciliation of the cognitive layer across every existing slot:
@@ -40,6 +42,11 @@ export async function runSync(): Promise<void> {
     if (!live.has(key)) delete manifest[key];
   }
   await writeManifest(root, manifest);
+
+  // Materialize the sandbox recipe (a no-op when recipe === "none"; non-clobbering).
+  const projectName = await readProjectName(root);
+  const sandboxFiles = await materializeSandbox(localSandboxDir(root), projectName, config.sandbox);
+  for (const file of sandboxFiles) logger.step(`📦 sandbox/${file}`);
 
   logger.success(
     `Synced ${slots.length} universe${slots.length === 1 ? "" : "s"} — ${created} linked, ${pruned} pruned.`

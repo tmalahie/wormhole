@@ -191,6 +191,40 @@ test("worm sync reconciles links and prunes removed shared_paths via the manifes
   assert.equal(r2.exitCode, 0, r2.stderr);
 });
 
+test("sandbox recipe: 'none' provisions nothing; 'docker' generates Dockerfile + compose", async (t) => {
+  // Default recipe is "none" → no sandbox dir.
+  const sbNone = await createSandbox();
+  t.after(() => sbNone.cleanup());
+  await sbNone.worm(["init"]);
+  await assert.rejects(
+    stat(path.join(sbNone.projectRoot, ".worm", "sandbox")),
+    /ENOENT/,
+    "the 'none' recipe writes nothing"
+  );
+
+  // A docker recipe generates artifacts under .worm/sandbox/.
+  const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
+  t.after(() => rm(templateDir, { recursive: true, force: true }));
+  await writeFile(
+    path.join(templateDir, "config.json"),
+    JSON.stringify({ shared_paths: [], hooks: {}, sandbox: { recipe: "docker", tools: ["jq"] } })
+  );
+
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init", "--template", templateDir]);
+
+  const dockerfile = await readFile(path.join(sb.projectRoot, ".worm", "sandbox", "Dockerfile"), "utf8");
+  assert.match(dockerfile, /^FROM node:22-bookworm/m);
+  assert.match(dockerfile, /\bjq\b/);
+
+  const compose = await readFile(path.join(sb.projectRoot, ".worm", "sandbox", "compose.yml"), "utf8");
+  const name = path.basename(sb.projectRoot);
+  assert.match(compose, new RegExp(`name: ${escapeRegex(name)}-sandbox`));
+  assert.match(compose, /\$\{SANDBOX_DIR/, "mount comes from $SANDBOX_DIR at run time");
+  assert.doesNotMatch(compose, /\/Users\//, "no hardcoded home path leaks into the generated compose");
+});
+
 test("universe add refuses a branch already checked out in a slot", async (t) => {
   const sb = await createSandbox();
   t.after(() => sb.cleanup());

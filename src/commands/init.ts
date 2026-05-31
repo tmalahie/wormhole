@@ -23,11 +23,13 @@ import {
   globalSharedDir,
   localConfigFile,
   localRoot,
+  localSandboxDir,
   localScriptsDir,
   localSharedDir,
   localSharedFile,
 } from "../core/paths.js";
 import { ensureSymlink } from "../core/symlinks.js";
+import { materializeSandbox } from "../core/sandbox.js";
 import { run } from "../utils/exec.js";
 import {
   materializeTemplateScripts,
@@ -118,6 +120,14 @@ export async function bindProject(
   const manifest = await readManifest(projectRoot);
   await reconcileSlotLinks(projectRoot, projectRoot, config.shared_paths, manifest);
   await writeManifest(projectRoot, manifest);
+
+  // Materialize the sandbox recipe (a no-op when recipe === "none").
+  const sandboxFiles = await materializeSandbox(
+    localSandboxDir(projectRoot),
+    projectName,
+    config.sandbox
+  );
+  for (const file of sandboxFiles) logger.step(`📦 sandbox/${file}`);
 
   logger.success(
     existed

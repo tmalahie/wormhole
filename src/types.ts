@@ -13,6 +13,7 @@ export const SandboxSchema = z
   .object({
     recipe: z.enum(["none", "docker"]).default("none"),
     // The following only apply when recipe !== "none":
+    image: z.string().default("node:22-bookworm"),
     tools: z.array(z.string()).default([]),
     neverSandbox: z.array(z.string()).default(["node", "npm", "npx", "pnpm", "yarn"]),
     exemptDirs: z.array(z.string()).default([]),
