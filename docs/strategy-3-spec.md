@@ -16,7 +16,7 @@ Three axes were previously conflated; we resolve each:
 | Axis | Old | New |
 |---|---|---|
 | **Repo shape** | bare clone (`.git`→`./.bare`) | **normal clone** (`.git` dir); no bare container |
-| **Tree count** | N ephemeral worktrees | **permanent pool**; Slot 0 = primary working tree, siblings = `uni1..uniN` |
+| **Tree count** | N ephemeral worktrees | **permanent pool**; Slot 0 = primary working tree, siblings = `<repo>-1..<repo>-N` |
 | **Slot lifecycle** | spawn-on-warp / teardown-on-collapse | **branch-switch in place**; slots are permanent |
 
 Permanent slots are "warm" as a steady state — `node_modules`/build state simply persists per slot.
@@ -73,7 +73,7 @@ there is no `universes_count` driver; you add a slot when you want one.
 
 | Command | Behaviour |
 |---|---|
-| `worm init` | Bind Slot 0 (the current normal clone). Provision `.worm/`, structural links, default sandbox recipe (`none`), empty managed-links manifest. Then warm Slot 0 by firing `on_create` (non-fatal, `--skip-hook` to opt out) — `init` is the "create" event for the primary slot. Idempotent. No `--universes`. |
+| `worm init` | Bind Slot 0 (the current normal clone). Provision `.worm/`, structural links, no recipes enabled by default (`recipes: {}`), empty managed-links manifest. Then warm Slot 0 by firing `on_create` (non-fatal, `--skip-hook` to opt out) — `init` is the "create" event for the primary slot. Idempotent. No `--universes`. |
 | `worm universe add <branch>` | Create a permanent sibling worktree on `<branch>` (`-c`/`--track` if it doesn't exist). Refuse if the branch is already in a slot. Run `on_create` hook once, then `sync` the new slot. |
 | `worm universe rm <slot>` | Remove a slot. **Refuse if `slot == 0`**; refuse if dirty/untracked unless `--force`. Run `on_remove`, strip managed links, `git worktree remove` + prune. |
 | `worm switch <branch>` | In the current slot: `git switch [-c] <branch>` + re-run `on_create` (warm-up). Optional sugar over plain `git switch`. |
@@ -162,60 +162,72 @@ worm sync:
 - **Prune safety:** scoped to the manifest set + `isSymlink` guard → can't delete real user files or
   the structural `.worm/` wiring links.
 
-## 6. Recipe engine (formerly "sandbox recipe / middleware model")
+## 6. Recipe engine
 
-> **Status (post-MVP):** the engine is now a **keyed-map recipe plugin model** in
-> `src/core/recipes.ts`. `recipes` is a map of `name → config`; a recipe is enabled iff its key is
-> present (no `none` sentinel). Each `Recipe` exposes `select` / `artifacts` / `wireSlot`; the engine
-> (`materializeRecipes`, `applyRecipeWiring`, `stripRecipeWiring`) iterates the enabled set. A `Recipe`
-> may also expose `onSlotCreate` for imperative per-slot setup. Artifacts land under
-> `.worm/recipes/<name>/`; per-slot hooks merge into `.claude/settings.local.json`, with worm owning
-> only entries whose command references the `.worm/recipes/` tree (so recipes compose and strip
-> independently). **Built-ins:** `sandbox` (artifacts + PreToolUse/Session hooks), `syncPermissions`
-> (SessionStart/End hooks that merge-preservingly union the `permissions` block across slots), and
-> `shareHistory` (`onSlotCreate` symlink of each slot's `~/.claude/projects` dir to Slot 0's). Hooks
-> run silently inside Claude sessions, so they log to **`.worm/logs/`** (`<container>.log` for
-> `up`/`down`, `<container>-redirect.log` for interceptor decisions, `sync-permissions.log` for the
-> sync) — a fixed, discoverable location à la Terraform's `TF_LOG_PATH`. `materializeRecipes`
-> pre-creates the dir so the hooks' `>>` redirects can't fail. The sketch below predates this and is
-> kept for historical context.
+The cognitive layer is delivered by **recipes**: composable capabilities keyed by name in
+`config.recipes` (provider-style, à la Terraform providers). A recipe is **enabled iff its key is
+present** — there is no on/off field and no `none` sentinel — and each value is validated by that
+recipe's own zod schema. Open-source adopters inherit nothing: the default config has `recipes: {}`.
 
-
-Opt-in. Default `none` emits **no** hooks and **no** Docker, so open-source adopters inherit nothing.
-
-**Registry** (`src/core/sandbox/recipes/`): built-ins `none`, `docker`. A recipe exposes:
+### The `Recipe` contract (`src/core/recipes.ts`)
 
 ```ts
-interface SandboxRecipe {
-  classifyCommand(cmd: string, ctx: SlotCtx): "allow" | "redirect" | "deny";  // policy as data, not hardcoded Sets
-  remediation(cmd: string, ctx: SlotCtx): string;                              // transport: docker exec | podman | bubblewrap | …
-  provision(slot: Slot, cfg: SandboxConfig): { dockerfile: string; compose: string };
+interface Recipe<C> {
+  name: string;
+  select(recipes: RecipesConfig): C | undefined;          // its config slice, or undefined = disabled
+  artifacts?(projectName: string, cfg: C): RecipeArtifact[];        // files under .worm/recipes/<name>/
+  wireSlot?(ctx: RecipeWireContext, cfg: C): SettingsContribution;  // hook entries for settings.local.json
+  onSlotCreate?(ctx: RecipeWireContext, cfg: C): Promise<void>;     // imperative per-slot setup
 }
 ```
 
-The current `redirect-to-sandbox.js` (already well-factored) becomes the body of the `docker`
-recipe, with `FILE_OPS`/`INTERPRETERS`/`neverSandbox`/`exemptDirs` read from `cfg.sandbox` instead of
-hardcoded constants, and `bash -lc` remediation moved behind `remediation()`.
+All three hooks are optional — a recipe implements only what it needs. The engine exposes three
+functions, called by `init` / `clone` / `universe add` / `sync` / `destroy`:
 
-**Per-slot, not per-project** (parallel agents must not share a mount):
-- Container/image/compose-project name derive from the slot: `<project>-uniN-sandbox`.
-- Mount = that slot's worktree path (not a single `WORM_PROJECT_ROOT`).
-- `provision()` and the wiring generator are **slot-aware**.
+- **`materializeRecipes`** — writes each enabled recipe's `artifacts()` under `.worm/recipes/<name>/`,
+  non-clobbering (`writeTextIfMissing`), so once generated the files are the user's to edit. Returns
+  `<name>/<relPath>` of what it wrote. Also pre-creates `.worm/logs/`.
+- **`applyRecipeWiring`** — for one slot: runs each enabled recipe's `onSlotCreate`, then merges their
+  `wireSlot` contributions into that slot's `.claude/settings.local.json`.
+- **`stripRecipeWiring`** — removes all worm-managed hooks from a slot (used on `destroy`).
 
-**Auto-lifecycle (no manual `docker start`):** `worm` *generates* per-slot `.claude/settings.json`
-hook blocks during `sync`/`universe add`:
-- `SessionStart` → `docker compose -p <project>-uniN up -d` (idempotent; opening the slot's
-  editor/Claude session starts its container).
-- `SessionEnd` → `down` iff `autostop` (default off = leave warm).
-- `PreToolUse(Bash)` → `redirect-to-sandbox` (+ `block-prompt-forcing` iff `promptShaping`).
+### Composition — the settings.local.json merge
 
-This replaces the hand-copied per-multiverse wiring with one generated source of truth (paths.ts).
+Multiple recipes share one `settings.local.json`, so the merge must be **namespaced**: worm owns only
+the hook entries whose command references the `.worm/recipes/` tree. On every run it strips its
+previous entries and re-adds the current set, reconciling across **any** hook event (not a hardcoded
+list) and leaving the user's own hooks — and other recipes' entries — untouched. This is what lets
+`sandbox` (PreToolUse + SessionStart/End) and `syncPermissions` (SessionStart/End) coexist; the
+`syncPermissions` script is itself merge-preserving (it rewrites only the `permissions` block).
 
-**Status — shipped in the MVP, with deltas from the sketch above (see §13.1):**
-- Recipes live in a single module `src/core/sandbox.ts` (not `sandbox/recipes/`); the registry is `none` + `docker`.
-- The `SandboxRecipe` interface is `artifacts()` only. `classifyCommand` is **data**, not a method — the policy (`neverSandbox`/`exemptDirs`) is written to `.worm/sandbox/sandbox-policy.json` and read by a fixed interceptor. `remediation` and the container lifecycle are **hardcoded to Docker** in the wiring, not behind methods.
-- Wiring lands in each slot's **`.claude/settings.local.json`** (gitignored), not `settings.json` — worm never dirties a tracked repo. The merge is idempotent and only touches entries whose command references `.worm/sandbox/`.
-- Artifacts: `Dockerfile`, `compose.yml`, `redirect-to-sandbox.js`, `sandbox-policy.json`. `promptShaping` is reserved in the schema but **not wired** yet.
+### Built-in recipes
+
+| recipe | config | shape | what it does |
+|---|---|---|---|
+| `sandbox` | `{ backend, image, tools, neverSandbox, exemptDirs, autostart, autostop }` | artifacts + `wireSlot` | Per-slot Docker sandbox. Artifacts: `Dockerfile`, `compose.yml`, `redirect-to-sandbox.js`, `sandbox-policy.json`. Wires `PreToolUse(Bash)` → the interceptor (redirects fs-mutating commands into the container), `SessionStart` → `compose up -d` (`autostart`), `SessionEnd` → `down` (`autostop`). Policy (`neverSandbox`/`exemptDirs`) is **data** in `sandbox-policy.json`, read by a fixed interceptor. |
+| `syncPermissions` | `{}` | artifacts + `wireSlot` | `SessionStart`/`SessionEnd` hooks run a script that **merge-preservingly** unions the `permissions` block of the slot's settings.local.json with a canonical store (`.worm/recipes/syncPermissions/permissions.json`) shared across slots. |
+| `shareHistory` | `{}` | `onSlotCreate` only | Symlinks each sibling slot's Claude history dir (`~/.claude/projects/<slot-slug>`) to Slot 0's canonical one. Idempotent; refuses to clobber a real history dir (warns). |
+
+**Per-slot, not per-project** (parallel agents must not share a sandbox mount): the `sandbox` recipe
+derives the container/compose-project name from the slot — `<project>-<slot>-sandbox` /
+`<project>-<slot>` — and mounts *that slot's* worktree via `$SANDBOX_DIR`, set per slot in the wiring.
+So Slot 0 → `mkpc-main-sandbox`, sibling 1 → `mkpc-1-sandbox`, each isolated.
+
+### Logging
+
+Recipe hooks run silently inside Claude sessions, so they log to **`.worm/logs/`** (a fixed,
+discoverable location, à la Terraform's `TF_LOG_PATH`): `<container>.log` for the container's
+`up`/`down` output (including the first image build), `<container>-redirect.log` for the interceptor's
+allow/deny decisions, and `sync-permissions.log` for the permission sync. The interceptor logs to a
+file rather than being output-redirected, because its stdout *is* the permission decision Claude
+reads. `.worm/` is gitignored, so logs stay local.
+
+### Remaining gap
+
+The `sandbox` recipe's *backend* is hardcoded to Docker — `wireSlot` emits `docker compose …` and the
+interceptor's remediation string is `docker exec …`. The `backend` enum (`"docker"` today) is the
+seam for podman/firejail/bubblewrap/remote-VM later; lifting the transport behind it is the open work
+in §13.1.
 
 ## 7. Code-level refactor map
 
@@ -232,7 +244,7 @@ This replaces the hand-copied per-multiverse wiring with one generated source of
 | `src/commands/switch.ts` (new) | `git switch` + re-run `on_create`. |
 | `src/commands/sync.ts` (new) | §5 algorithm. |
 | `src/commands/destroy.ts` | Slot-0 guard; never `rm -rf` the primary. |
-| `src/commands/completion.ts` | Stop grepping `-uniN` from worktree porcelain; drive from `worm status --json`. |
+| `src/commands/completion.ts` | Stop grepping `-<N>` from worktree porcelain; drive from `worm status --json`. |
 | `src/core/hooks.ts` | Rename env consumers; `WORM_SLOT`/`WORM_SLOT_INDEX` sentinels for Slot 0; export `WORM_WORKTREE`/`WORM_SANDBOX_CONTAINER`/`WORM_SANDBOX_COMPOSE`. Guard `slotIndex` NaN. |
 | `src/types.ts` | §4 schema. |
 | `tests/cli.test.mjs` | Rewrite layout fixtures (no `.bare`, no `-uni0`, Slot 0 = clone root). Authoritative — change in lockstep. |
