@@ -167,13 +167,14 @@ worm sync:
 > **Status (post-MVP):** the engine is now a **keyed-map recipe plugin model** in
 > `src/core/recipes.ts`. `recipes` is a map of `name → config`; a recipe is enabled iff its key is
 > present (no `none` sentinel). Each `Recipe` exposes `select` / `artifacts` / `wireSlot`; the engine
-> (`materializeRecipes`, `applyRecipeWiring`, `stripRecipeWiring`) iterates the enabled set. Artifacts
-> land under `.worm/recipes/<name>/`; per-slot hooks merge into `.claude/settings.local.json`, with
-> worm owning only entries whose command references the `.worm/recipes/` tree (so recipes compose and
-> strip independently). `sandbox` is the first built-in. **Planned next:** `syncPermissions` (port of
-> `sync-claude-settings.js` — union the `permissions` block across slots via SessionStart/End) and
-> `shareHistory` (lift the `~/.claude/projects` symlink out of `setup.sh`). The sketch below predates
-> this and is kept for historical context.
+> (`materializeRecipes`, `applyRecipeWiring`, `stripRecipeWiring`) iterates the enabled set. A `Recipe`
+> may also expose `onSlotCreate` for imperative per-slot setup. Artifacts land under
+> `.worm/recipes/<name>/`; per-slot hooks merge into `.claude/settings.local.json`, with worm owning
+> only entries whose command references the `.worm/recipes/` tree (so recipes compose and strip
+> independently). **Built-ins:** `sandbox` (artifacts + PreToolUse/Session hooks), `syncPermissions`
+> (SessionStart/End hooks that merge-preservingly union the `permissions` block across slots), and
+> `shareHistory` (`onSlotCreate` symlink of each slot's `~/.claude/projects` dir to Slot 0's). The
+> sketch below predates this and is kept for historical context.
 
 
 Opt-in. Default `none` emits **no** hooks and **no** Docker, so open-source adopters inherit nothing.

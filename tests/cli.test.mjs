@@ -386,6 +386,60 @@ test("syncPermissions script unions permissions while preserving other keys", as
   );
 });
 
+const claudeSlug = (p) => p.replace(/[/.]/g, "-");
+
+test("shareHistory recipe links a sibling's Claude history to Slot 0's", async (t) => {
+  const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
+  t.after(() => rm(templateDir, { recursive: true, force: true }));
+  await writeFile(
+    path.join(templateDir, "config.json"),
+    JSON.stringify({ shared_paths: [], hooks: {}, recipes: { shareHistory: {} } })
+  );
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await createBranch(sb.projectRoot, "feature-a");
+  await sb.worm(["init", "--template", templateDir]); // HOME=wormHome in the harness
+
+  const root = await realpath(sb.projectRoot);
+  const projectsDir = path.join(sb.wormHome, ".claude", "projects");
+
+  // Slot 0 is the canonical store — worm must not create a self-symlink for it.
+  await assert.rejects(
+    stat(path.join(projectsDir, claudeSlug(root))),
+    /ENOENT/,
+    "Slot 0 is not self-linked"
+  );
+
+  // A sibling's history dir becomes a relative symlink to Slot 0's slug.
+  await sb.worm(["universe", "add", "feature-a", "--skip-hook"]);
+  const link = path.join(projectsDir, claudeSlug(siblingPath(root, 1)));
+  assert.equal(await readlink(link), claudeSlug(root), "relative symlink → Slot 0 slug");
+});
+
+test("shareHistory refuses to clobber a real history dir", async (t) => {
+  const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
+  t.after(() => rm(templateDir, { recursive: true, force: true }));
+  await writeFile(
+    path.join(templateDir, "config.json"),
+    JSON.stringify({ shared_paths: [], hooks: {}, recipes: { shareHistory: {} } })
+  );
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await createBranch(sb.projectRoot, "feature-b");
+  await sb.worm(["init", "--template", templateDir]);
+
+  const root = await realpath(sb.projectRoot);
+  const realDir = path.join(sb.wormHome, ".claude", "projects", claudeSlug(siblingPath(root, 1)));
+  await mkdir(realDir, { recursive: true });
+  await writeFile(path.join(realDir, "session.jsonl"), "{}\n");
+
+  const r = await sb.worm(["universe", "add", "feature-b", "--skip-hook"]);
+  assert.equal(r.exitCode, 0, "real dir is a warning, not a fatal error");
+  // The real dir and its contents survive untouched.
+  await stat(path.join(realDir, "session.jsonl"));
+  assert.match(r.stderr + r.stdout, /real history dir/);
+});
+
 test("universe add refuses a branch already checked out in a slot", async (t) => {
   const sb = await createSandbox();
   t.after(() => sb.cleanup());

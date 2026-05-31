@@ -1,16 +1,21 @@
+import os from "node:os";
 import path from "node:path";
 import {
   ensureDir,
   fs,
+  isSymlink,
   pathExists,
   readJson,
   writeJson,
   writeTextIfMissing,
 } from "../utils/fs.js";
+import { logger } from "../utils/logger.js";
+import { ensureSymlink } from "./symlinks.js";
 import { localRecipeDir, localRecipesRoot } from "./paths.js";
 import type {
   RecipesConfig,
   SandboxRecipeConfig,
+  ShareHistoryRecipeConfig,
   SyncPermissionsRecipeConfig,
 } from "../types.js";
 
@@ -51,9 +56,11 @@ export interface Recipe<C = unknown> {
   /** This recipe's config slice, or undefined when it's disabled. */
   select(recipes: RecipesConfig): C | undefined;
   /** Files to write under `.worm/recipes/<name>/`. */
-  artifacts(projectName: string, cfg: C): RecipeArtifact[];
+  artifacts?(projectName: string, cfg: C): RecipeArtifact[];
   /** Hook entries to merge into a slot's settings.local.json. */
-  wireSlot(ctx: RecipeWireContext, cfg: C): SettingsContribution;
+  wireSlot?(ctx: RecipeWireContext, cfg: C): SettingsContribution;
+  /** Imperative per-slot setup (idempotent), run when a slot is wired. */
+  onSlotCreate?(ctx: RecipeWireContext, cfg: C): Promise<void>;
 }
 
 // --- the sandbox recipe (currently the only built-in) -----------------------
@@ -139,7 +146,42 @@ const syncPermissionsRecipe: Recipe<SyncPermissionsRecipeConfig> = {
   },
 };
 
-const REGISTRY: Recipe<any>[] = [sandboxRecipe, syncPermissionsRecipe];
+// --- the shareHistory recipe -------------------------------------------------
+// Symlinks each sibling slot's Claude history dir to Slot 0's canonical one, so
+// every slot shares one conversation history. Purely imperative (onSlotCreate)
+// — no artifacts, no settings hooks. (Lifts the `ln -sfn` block that used to
+// live in projects' setup.sh into a first-class recipe.)
+
+/** Claude's project-history slug: the absolute path with `/` and `.` → `-`. */
+function claudeSlug(absPath: string): string {
+  return path.resolve(absPath).replace(/[/.]/g, "-");
+}
+
+const shareHistoryRecipe: Recipe<ShareHistoryRecipeConfig> = {
+  name: "shareHistory",
+  select: (recipes) => recipes.shareHistory,
+  async onSlotCreate({ slot, slot0Root }) {
+    const projectsDir = path.join(os.homedir(), ".claude", "projects");
+    const canonicalSlug = claudeSlug(slot0Root);
+    const slotSlug = claudeSlug(slot.path);
+    if (slotSlug === canonicalSlug) return; // Slot 0 *is* the canonical store.
+
+    const linkPath = path.join(projectsDir, slotSlug);
+    if ((await pathExists(linkPath)) && !(await isSymlink(linkPath))) {
+      logger.warn(
+        `${slot.name}: ${linkPath} is a real history dir — merge it into ${canonicalSlug}/ by hand; skipping.`
+      );
+      return;
+    }
+    const res = await ensureSymlink(linkPath, path.join(projectsDir, canonicalSlug), {
+      relative: true,
+      type: "dir",
+    });
+    if (res.created) logger.step(`🔗 ${slot.name}: Claude history → ${canonicalSlug}`);
+  },
+};
+
+const REGISTRY: Recipe<any>[] = [sandboxRecipe, syncPermissionsRecipe, shareHistoryRecipe];
 
 function enabledRecipes(recipes: RecipesConfig): Array<{ recipe: Recipe<any>; cfg: unknown }> {
   const out: Array<{ recipe: Recipe<any>; cfg: unknown }> = [];
@@ -165,7 +207,7 @@ export async function materializeRecipes(
 ): Promise<string[]> {
   const written: string[] = [];
   for (const { recipe, cfg } of enabledRecipes(recipes)) {
-    const artifacts = recipe.artifacts(projectName, cfg);
+    const artifacts = recipe.artifacts?.(projectName, cfg) ?? [];
     if (artifacts.length === 0) continue;
     const dir = localRecipeDir(slot0Root, recipe.name);
     await ensureDir(dir);
@@ -189,9 +231,13 @@ export async function applyRecipeWiring(
   slot: WiringSlot,
   recipes: RecipesConfig
 ): Promise<boolean> {
+  const ctx: RecipeWireContext = { slot0Root, projectName, slot };
   const install: SettingsContribution = {};
   for (const { recipe, cfg } of enabledRecipes(recipes)) {
-    const contribution = recipe.wireSlot({ slot0Root, projectName, slot }, cfg);
+    // Imperative per-slot setup (e.g. shareHistory's symlink) runs first.
+    if (recipe.onSlotCreate) await recipe.onSlotCreate(ctx, cfg);
+    const contribution = recipe.wireSlot?.(ctx, cfg);
+    if (!contribution) continue;
     for (const [event, entries] of Object.entries(contribution)) {
       if (!entries || entries.length === 0) continue;
       (install[event] ??= []).push(...entries);
