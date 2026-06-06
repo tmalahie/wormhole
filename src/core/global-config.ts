@@ -2,6 +2,7 @@ import { z } from "zod";
 import { WormError } from "../utils/errors.js";
 import { pathExists, readJson, writeJson } from "../utils/fs.js";
 import { globalConfigFile } from "./paths.js";
+import { StoreSchema } from "../types.js";
 
 /**
  * Machine-level worm settings stored in ~/.worm/config.json. Distinct from
@@ -17,6 +18,8 @@ export const GlobalConfigSchema = z
     // points into the personal repo). Edited in this JSON directly — not via
     // `worm config`, which only sets scalar string keys.
     shared_paths: z.array(z.string().min(1)).optional(),
+    // Machine-wide named stores any project's `shared_paths` can pull from.
+    stores: z.record(z.string(), StoreSchema).optional(),
   })
   .strict();
 

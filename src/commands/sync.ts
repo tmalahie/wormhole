@@ -9,6 +9,7 @@ import {
   writeManifest,
 } from "../core/links.js";
 import { applyRecipeWiring, materializeRecipes } from "../core/recipes.js";
+import { resolveStoreLinks } from "../core/stores.js";
 import { ensureLocalLayout, removeLegacyShared } from "../core/layout.js";
 import { loadGlobalConfig } from "../core/global-config.js";
 import {
@@ -44,17 +45,22 @@ export async function runSync(options: SyncOptions = {}): Promise<void> {
   await ensureLocalLayout(root, projectName);
   const slots = await scanUniverses(root);
   const manifest = await readManifest(projectName);
+  // Resolve shared_paths to concrete sources once (clones any missing store).
+  const links = await resolveStoreLinks(config, projectName);
 
   let created = 0;
   let pruned = 0;
   for (const slot of slots) {
-    const res = await reconcileSlotLinks(projectName, slot.path, config.shared_paths, manifest);
+    const res = await reconcileSlotLinks(slot.path, links, manifest);
     created += res.created.length;
     pruned += res.pruned.length;
     for (const rel of res.created) logger.step(`🔗 ${slot.name}: linked ${rel}`);
     for (const rel of res.pruned) logger.step(`🧹 ${slot.name}: pruned ${rel}`);
     for (const rel of res.skipped) {
       logger.warn(`${slot.name}: ${rel} is a real file, not a managed link — left as-is.`);
+    }
+    for (const rel of res.missing) {
+      logger.warn(`${slot.name}: ${rel} — store source not found yet; not linked.`);
     }
   }
 

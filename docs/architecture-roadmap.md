@@ -84,7 +84,15 @@ automatic (Decision-1 + recipes-roadmap spine reinforce each other).
 survives a slot-0 reclone, and keyed by absolute slot path so it stays correct. `migrateManifestToProfile`
 moves a pre-consolidation local manifest on the next init/sync (profile copy wins if both exist).
 
-## Decision 2 — named stores (external + team resources) ✅
+## Decision 2 — named stores (external + team resources) — ✅ SHIPPED 2026-06-06
+
+**Status: SHIPPED.** `shared_paths` entries are now `string | { path, store? }` (bare = profile store);
+projects/global declare `stores: { <name>: { root, url? } }`. [core/stores.ts](../src/core/stores.ts)
+`resolveStoreLinks` maps each entry to a concrete source (profile → `profile/<tail>`, sprouted; named →
+`<storeRoot>/<tail>`, never fabricated), resolving each store once and **cloning a missing root from its
+`url`** (clean `WormError` if absent and no url). `reconcileSlotLinks` now consumes the resolved
+`{tail, source, sprout}` list. Project `stores` override same-named global ones. Fully backward compatible
+— existing string `shared_paths` are unchanged.
 
 **Decided (Q3):** a `stores` map plus per-entry `{ path, store }`. The **profile is the default store**;
 external/team repos and the global shared dir are **named stores**. (Rejected: docker-volume
@@ -172,12 +180,14 @@ adopts your existing manual links idempotently (a correct symlink is a no-op).
    (slot links are absolute, one hop); old projects migrate in place ([core/layout.ts](../src/core/layout.ts)).
 5. **Named stores** (Decision 2) — external/team repos as link sources. Now the natural next step: the
    link source is already a single profile path, so generalizing it to a chosen store is a focused change.
-6. **Templating + versioning** for the small bucket-3 set (recipes-roadmap §3/§6).
+   **✅ DONE (2026-06-06)** — [core/stores.ts](../src/core/stores.ts); see Decision 2.
+6. **Templating + versioning** for the small bucket-3 set (recipes-roadmap §3/§6). ← the last open item.
 
 ## Open cross-cutting questions
 
-- **Where stores are declared.** Likely: global stores in `~/.worm/config.json`, project stores in the
-  profile; a project `shared_paths` entry can reference either. Needs a resolution order.
+- ~~**Where stores are declared.**~~ **Resolved:** global stores in `~/.worm/config.json`, project
+  stores in the project config; a `shared_paths` entry can reference either, with **project stores
+  overriding** same-named global ones (`resolveStoreLinks` merges global-then-project).
 - **Trust.** With inverted dispatch, third-party recipe **code runs in worm's dispatcher process on the
   hot path** — the sandbox/trust model is an open question (recipes-roadmap §1).
 - **Failure semantics on the hot path.** The dispatcher gates every Bash command, so: absolute-path

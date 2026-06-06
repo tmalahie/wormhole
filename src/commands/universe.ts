@@ -17,6 +17,7 @@ import {
 } from "../core/git.js";
 import { siblingWorktreeDir } from "../core/paths.js";
 import { applyRecipeWiring, materializeRecipes } from "../core/recipes.js";
+import { resolveStoreLinks } from "../core/stores.js";
 import { ensureLocalLayout } from "../core/layout.js";
 import { hookEnv, runHook } from "../core/hooks.js";
 import {
@@ -72,7 +73,8 @@ export async function runUniverseAdd(
   const projectName = await readProjectName(root);
   await ensureLocalLayout(root, projectName);
   const manifest = await readManifest(projectName);
-  await reconcileSlotLinks(projectName, target, config.shared_paths, manifest);
+  const links = await resolveStoreLinks(config, projectName);
+  await reconcileSlotLinks(target, links, manifest);
   await writeManifest(projectName, manifest);
 
   if (!options.skipHook && config.hooks.on_create) {

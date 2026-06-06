@@ -1,6 +1,6 @@
 import path from "node:path";
 import { ensureSymlink } from "./symlinks.js";
-import { globalProjectFile, managedLinksFile } from "./paths.js";
+import { managedLinksFile } from "./paths.js";
 import {
   ensureDir,
   fs,
@@ -10,6 +10,7 @@ import {
   writeJson,
   writeTextIfMissing,
 } from "../utils/fs.js";
+import type { ResolvedLink } from "./stores.js";
 
 /** Map of resolved slot path → relative link paths worm created in that slot. */
 export type LinkManifest = Record<string, string[]>;
@@ -19,6 +20,8 @@ export interface ReconcileResult {
   pruned: string[];
   /** Links that were expected but are now real files (deref'd by a tool) — left untouched. */
   skipped: string[];
+  /** External-store tails whose source doesn't exist yet — not linked this run. */
+  missing: string[];
 }
 
 export async function readManifest(projectName: string): Promise<LinkManifest> {
@@ -39,17 +42,18 @@ export async function writeManifest(
 }
 
 /**
- * Reconcile one slot's wormhole tunnels (shared_paths) against `desired`,
- * mutating `manifest` in place. Each tail is linked DIRECTLY at the profile
- * source (`~/.worm/multiverses/<name>/<rel>`, absolute — the `.worm/shared`
- * two-hop is gone), sprouting an empty profile source when missing. Prunes links
- * it previously managed that are no longer desired, and refuses to touch a path
- * that has become a real file. The caller persists the manifest.
+ * Reconcile one slot's wormhole tunnels against `desired` (already resolved to
+ * concrete sources by `resolveStoreLinks`), mutating `manifest` in place. Each
+ * tail is linked DIRECTLY at its source (absolute — the `.worm/shared` two-hop
+ * is gone): a profile source is sprouted empty when missing; an external-store
+ * source that doesn't exist yet is skipped (reported as `missing`, not
+ * fabricated). Prunes links it previously managed that are no longer desired,
+ * and refuses to touch a path that has become a real file. Caller persists the
+ * manifest.
  */
 export async function reconcileSlotLinks(
-  projectName: string,
   slotPath: string,
-  desired: string[],
+  desired: ResolvedLink[],
   manifest: LinkManifest
 ): Promise<ReconcileResult> {
   const key = path.resolve(slotPath);
@@ -57,21 +61,29 @@ export async function reconcileSlotLinks(
   const created: string[] = [];
   const pruned: string[] = [];
   const skipped: string[] = [];
+  const missing: string[] = [];
 
-  for (const rel of desired) {
-    const target = globalProjectFile(projectName, rel);
-    // Sprout an empty profile source so the slot link never dangles.
-    if (!(await pathExists(target))) {
-      await ensureDir(path.dirname(target));
-      await writeTextIfMissing(target, "");
+  for (const link of desired) {
+    let sourceExists = await pathExists(link.source);
+    // Sprout an empty profile source so the slot link never dangles; never
+    // fabricate a file inside an external store.
+    if (!sourceExists && link.sprout) {
+      await ensureDir(path.dirname(link.source));
+      await writeTextIfMissing(link.source, "");
+      sourceExists = true;
     }
-    const linkPath = path.join(slotPath, rel);
-    const res = await ensureSymlink(linkPath, target, { relative: false });
-    if (res.created) created.push(rel);
+    if (!sourceExists) {
+      missing.push(link.tail);
+      continue;
+    }
+    const linkPath = path.join(slotPath, link.tail);
+    const res = await ensureSymlink(linkPath, link.source, { relative: false });
+    if (res.created) created.push(link.tail);
   }
 
+  const desiredTails = desired.map((d) => d.tail);
   for (const rel of previous) {
-    if (desired.includes(rel)) continue;
+    if (desiredTails.includes(rel)) continue;
     const linkPath = path.join(slotPath, rel);
     if (await isSymlink(linkPath)) {
       await fs.unlink(linkPath);
@@ -81,8 +93,8 @@ export async function reconcileSlotLinks(
     }
   }
 
-  manifest[key] = [...desired];
-  return { created, pruned, skipped };
+  manifest[key] = desiredTails;
+  return { created, pruned, skipped, missing };
 }
 
 /**

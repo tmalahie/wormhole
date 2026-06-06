@@ -37,6 +37,7 @@ import {
   type ResolvedTemplate,
 } from "../core/templates.js";
 import { readManifest, reconcileSlotLinks, writeManifest } from "../core/links.js";
+import { resolveStoreLinks } from "../core/stores.js";
 import { ensureLocalLayout, removeLegacyShared } from "../core/layout.js";
 
 export interface InitOptions {
@@ -118,7 +119,8 @@ export async function bindProject(
   // Reconcile Slot 0's wormhole tunnels (links straight into the profile) and
   // seed the manifest, then sweep any stale .worm/shared left by the old two-hop.
   const manifest = await readManifest(projectName);
-  await reconcileSlotLinks(projectName, projectRoot, config.shared_paths, manifest);
+  const links = await resolveStoreLinks(config, projectName);
+  await reconcileSlotLinks(projectRoot, links, manifest);
   await writeManifest(projectName, manifest);
   await removeLegacyShared(projectRoot);
 

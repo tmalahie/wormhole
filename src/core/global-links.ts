@@ -82,7 +82,7 @@ export async function reconcileGlobalLinks(
   }
 
   manifest[key] = [...desired];
-  return { created, pruned, skipped };
+  return { created, pruned, skipped, missing: [] }; // global sources are always sprouted
 }
 
 /**

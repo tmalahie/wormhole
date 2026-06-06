@@ -1164,3 +1164,118 @@ test("consolidation migrates an old-layout project (recipes/logs/manifest/shared
   // Stale .worm/shared swept.
   await assert.rejects(stat(path.join(proj, ".worm", "shared")), /ENOENT/, ".worm/shared removed");
 });
+
+test("shared_paths can pull a tail from a named external store; edits land in that repo", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  const teamRepo = await mkdtemp(path.join(tmpdir(), "worm-team-"));
+  t.after(() => rm(teamRepo, { recursive: true, force: true }));
+  await mkdir(path.join(teamRepo, ".claude", "docs"), { recursive: true });
+  await writeFile(path.join(teamRepo, ".claude", "docs", "guide.md"), "TEAM\n");
+
+  const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
+  t.after(() => rm(templateDir, { recursive: true, force: true }));
+  await writeFile(
+    path.join(templateDir, "config.json"),
+    JSON.stringify({
+      shared_paths: [".env", { path: ".claude/docs", store: "team" }],
+      stores: { team: { root: teamRepo } },
+      hooks: {},
+    })
+  );
+  await sb.worm(["init", "--template", templateDir]);
+
+  // .claude/docs links into the EXTERNAL store; .env still comes from the profile.
+  const docsLink = path.join(sb.projectRoot, ".claude", "docs");
+  assert.equal(await realpath(docsLink), await realpath(path.join(teamRepo, ".claude", "docs")));
+  assert.equal(await readFile(path.join(docsLink, "guide.md"), "utf8"), "TEAM\n");
+  assert.match(await readlink(path.join(sb.projectRoot, ".env")), /multiverses\/.+\/\.env$/);
+
+  // Editing through the slot lands in the team repo (intended — two repos wired).
+  await writeFile(path.join(docsLink, "new.md"), "added\n");
+  assert.equal(await readFile(path.join(teamRepo, ".claude", "docs", "new.md"), "utf8"), "added\n");
+});
+
+test("a store with a url is cloned on demand when its root is missing", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  // A source git repo to serve as the store's url.
+  const src = await mkdtemp(path.join(tmpdir(), "worm-store-src-"));
+  t.after(() => rm(src, { recursive: true, force: true }));
+  await execa("git", ["init", "-q", "-b", "main"], { cwd: src });
+  await execa("git", ["config", "user.email", "t@e.com"], { cwd: src });
+  await execa("git", ["config", "user.name", "T"], { cwd: src });
+  await mkdir(path.join(src, "docs"), { recursive: true });
+  await writeFile(path.join(src, "docs", "team.md"), "CLONED\n");
+  await execa("git", ["add", "."], { cwd: src });
+  await execa("git", ["commit", "-q", "-m", "init"], { cwd: src });
+
+  const dstParent = await mkdtemp(path.join(tmpdir(), "worm-store-dst-"));
+  t.after(() => rm(dstParent, { recursive: true, force: true }));
+  const root = path.join(dstParent, "team"); // does not exist yet
+
+  const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
+  t.after(() => rm(templateDir, { recursive: true, force: true }));
+  await writeFile(
+    path.join(templateDir, "config.json"),
+    JSON.stringify({ shared_paths: [{ path: "docs", store: "team" }], stores: { team: { url: src, root } }, hooks: {} })
+  );
+  const r = await sb.worm(["init", "--template", templateDir]);
+  assert.equal(r.exitCode, 0, r.stderr);
+  assert.match(r.stdout + r.stderr, /cloning/i);
+
+  await stat(path.join(root, ".git")); // store was cloned to its root
+  assert.equal(await readFile(path.join(sb.projectRoot, "docs", "team.md"), "utf8"), "CLONED\n");
+});
+
+test("a store whose root is missing and has no url errors cleanly", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
+  t.after(() => rm(templateDir, { recursive: true, force: true }));
+  await writeFile(
+    path.join(templateDir, "config.json"),
+    JSON.stringify({ shared_paths: [{ path: "docs", store: "team" }], stores: { team: { root: "/no/such/worm/store/root" } }, hooks: {} })
+  );
+  const r = await sb.worm(["init", "--template", templateDir]);
+  assert.notEqual(r.exitCode, 0);
+  assert.match(r.stderr, /root not found/i);
+  assert.match(r.stderr, /add a "url"/);
+});
+
+test("referencing an undeclared store errors cleanly", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
+  t.after(() => rm(templateDir, { recursive: true, force: true }));
+  await writeFile(
+    path.join(templateDir, "config.json"),
+    JSON.stringify({ shared_paths: [{ path: "docs", store: "ghost" }], hooks: {} })
+  );
+  const r = await sb.worm(["init", "--template", templateDir]);
+  assert.notEqual(r.exitCode, 0);
+  assert.match(r.stderr, /Unknown store "ghost"/);
+});
+
+test("a project can reference a store declared in the global config", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  const ext = await mkdtemp(path.join(tmpdir(), "worm-gstore-"));
+  t.after(() => rm(ext, { recursive: true, force: true }));
+  await mkdir(path.join(ext, "shared"), { recursive: true });
+  await writeFile(path.join(ext, "shared", "f.md"), "G\n");
+
+  await sb.worm(["init"]); // provisions ~/.worm
+  // Global config declares the store; the project references it.
+  await writeFile(path.join(sb.wormHome, "config.json"), JSON.stringify({ stores: { org: { root: ext } } }));
+  const profileCfg = path.join(sb.wormHome, "multiverses", path.basename(sb.projectRoot), "config.json");
+  await writeFile(profileCfg, JSON.stringify({ shared_paths: [{ path: "shared", store: "org" }], hooks: {} }));
+
+  const r = await sb.worm(["sync"]);
+  assert.equal(r.exitCode, 0, r.stderr);
+  assert.equal(
+    await realpath(path.join(sb.projectRoot, "shared")),
+    await realpath(path.join(ext, "shared")),
+    "linked from the GLOBAL store"
+  );
+});

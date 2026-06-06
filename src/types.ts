@@ -42,17 +42,41 @@ export const RecipesSchema = z
   .strict()
   .default({});
 
+// A "store" is a source of shared files. A shared_path with no `store` comes
+// from the project PROFILE (the default store); one with a `store` comes from
+// that named store's root. `url` lets worm clone the store on demand if its
+// `root` is missing — so e.g. team docs can live in a separate git repo.
+export const StoreSchema = z
+  .object({
+    root: z.string().min(1),
+    url: z.string().min(1).optional(),
+  })
+  .strict();
+
+// A shared_path is either a bare tail (profile store) or `{ path, store }`
+// pulling that tail from a named store. `store` is optional → defaults to profile.
+export const SharedPathSchema = z.union([
+  z.string().min(1),
+  z.object({ path: z.string().min(1), store: z.string().min(1).optional() }).strict(),
+]);
+
 export const ConfigSchema = z
   .object({
-    // The "wormhole tunnels": files symlinked from each slot back into the Manifest.
-    // The pool is emergent — slots are born via `worm universe add <branch>`.
-    shared_paths: z.array(z.string().min(1)).default([]),
+    // The "wormhole tunnels": files symlinked from each slot back into a store
+    // (the profile by default). The pool is emergent — slots are born via
+    // `worm universe add <branch>`.
+    shared_paths: z.array(SharedPathSchema).default([]),
+    // Named external stores referenceable by `shared_paths` (project stores
+    // override same-named global ones in ~/.worm/config.json).
+    stores: z.record(z.string(), StoreSchema).default({}),
     hooks: HooksSchema.default({}),
     recipes: RecipesSchema,
   })
   .strict();
 
 export type Config = z.infer<typeof ConfigSchema>;
+export type StoreConfig = z.infer<typeof StoreSchema>;
+export type SharedPathConfig = z.infer<typeof SharedPathSchema>;
 export type Hooks = z.infer<typeof HooksSchema>;
 export type RecipesConfig = z.infer<typeof RecipesSchema>;
 export type SandboxRecipeConfig = z.infer<typeof SandboxRecipeSchema>;

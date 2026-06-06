@@ -45,7 +45,8 @@ Domain primitives. Pure functions where possible; the only side effects are file
 | `templates.ts` | Seed `~/.worm/templates/default/` and resolve a template (override → global default → built-in) into a `Config` + `scripts/`. |
 | `git.ts` | Typed wrappers for `git worktree {add,remove,list,prune}`, `switchBranch`, `currentBranch`, branch lookups, `dirtyFiles`. Parses porcelain output. |
 | `symlinks.ts` | `ensureSymlink()` — idempotent, prefers relative paths, refuses to overwrite real files. |
-| `links.ts` | The managed-link manifest (in the profile): `reconcileSlotLinks` (links each slot's tails straight at the profile source, absolute; sprouts a missing source; create/prune, deref-guarded) and `stripSlotLinks` (before worktree removal). |
+| `links.ts` | The managed-link manifest (in the profile): `reconcileSlotLinks` (links each slot's tails straight at their resolved source, absolute; sprouts a missing profile source, skips a missing external one; create/prune, deref-guarded) and `stripSlotLinks` (before worktree removal). |
+| `stores.ts` | `resolveStoreLinks` maps `shared_paths` to concrete sources: bare/`{path}` → the profile store; `{path, store}` → that named store's `root` (project `stores` override global `~/.worm/config.json` ones), cloning a missing root from its `url` on demand. |
 | `global-links.ts` | HOME-scope analogue of `links.ts`: `reconcileGlobalLinks` links `~/<tail>` → `~/.worm/shared/<tail>` for `worm sync --global`, with its own manifest (`~/.worm/.managed-links.json`). |
 | `hooks.ts` | Runs `on_create`/`on_remove` with inherited stdio and `WORM_*` env (`hookEnv`). |
 | `universe.ts` | `scanUniverses()` builds the slot list from `git worktree list` (Slot 0 + matched siblings); `resolveSlotRef` / `findSlotByBranch` / `nextFreeIndex` / `universeLabel`. |
@@ -61,7 +62,7 @@ Cross-cutting helpers. No domain knowledge here.
 | `exec.ts` | `run` (no throw), `runOrThrow` (throws `WormError` with stderr), `runShell` (for hooks). |
 
 ### `types.ts`
-Shared types and the canonical `ConfigSchema` (zod) + `DEFAULT_CONFIG` + `RecipesSchema` / `SandboxRecipeSchema`. Everything that touches config imports from here.
+Shared types and the canonical `ConfigSchema` (zod) + `DEFAULT_CONFIG` + `RecipesSchema` / `SandboxRecipeSchema` + `StoreSchema` / `SharedPathSchema` (the `string | {path, store}` union). Everything that touches config imports from here.
 
 ## Key invariants
 
