@@ -88,8 +88,9 @@ program
 program
   .command("sync")
   .description("Reconcile shared-path links across every slot (declarative, idempotent).")
-  .action(async () => {
-    await runSync();
+  .option("--global", "Reconcile HOME-scope links (~/.worm/config.json shared_paths) instead of the project.")
+  .action(async (opts) => {
+    await runSync(opts);
   });
 
 program

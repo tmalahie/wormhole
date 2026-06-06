@@ -985,3 +985,104 @@ test("default scripts/setup.sh is created and executable", async (t) => {
   const contents = await readFile(setupPath, "utf8");
   assert.match(contents, /^#!\/usr\/bin\/env bash/);
 });
+
+test("worm sync --global links HOME-scope shared paths (existing + sprouted) and is idempotent", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init"]); // provisions ~/.worm
+
+  // Two global tails: one with an existing source, one to be sprouted.
+  await writeFile(
+    path.join(sb.wormHome, "config.json"),
+    JSON.stringify({ editor: "code", shared_paths: [".claude/commands", ".claude/skills"] })
+  );
+  await mkdir(path.join(sb.wormHome, "shared", ".claude", "commands"), { recursive: true });
+  await writeFile(path.join(sb.wormHome, "shared", ".claude", "commands", "x.md"), "hi\n");
+
+  const r = await sb.worm(["sync", "--global"]);
+  assert.equal(r.exitCode, 0, r.stderr);
+
+  // ~/.claude/commands → ~/.worm/shared/.claude/commands (absolute symlink).
+  const cmdsLink = path.join(sb.wormHome, ".claude", "commands");
+  assert.ok(path.isAbsolute(await readlink(cmdsLink)), "global links are absolute");
+  assert.equal(
+    await realpath(cmdsLink),
+    await realpath(path.join(sb.wormHome, "shared", ".claude", "commands"))
+  );
+
+  // The missing source was sprouted as an empty dir, then linked.
+  assert.equal(
+    (await stat(path.join(sb.wormHome, "shared", ".claude", "skills"))).isDirectory(),
+    true,
+    "missing global source is sprouted"
+  );
+  assert.equal(
+    await realpath(path.join(sb.wormHome, ".claude", "skills")),
+    await realpath(path.join(sb.wormHome, "shared", ".claude", "skills"))
+  );
+
+  // Manifest records both tails and is gitignored out of the personal repo.
+  const manifest = JSON.parse(await readFile(path.join(sb.wormHome, ".managed-links.json"), "utf8"));
+  assert.deepEqual(Object.values(manifest)[0], [".claude/commands", ".claude/skills"]);
+  assert.match(await readFile(path.join(sb.wormHome, ".gitignore"), "utf8"), /\.managed-links\.json/);
+
+  // Idempotent.
+  const r2 = await sb.worm(["sync", "--global"]);
+  assert.equal(r2.exitCode, 0, r2.stderr);
+});
+
+test("worm sync --global prunes a tail removed from the global config", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init"]);
+  await writeFile(
+    path.join(sb.wormHome, "config.json"),
+    JSON.stringify({ shared_paths: [".claude/commands", ".claude/skills"] })
+  );
+  await sb.worm(["sync", "--global"]);
+  await readlink(path.join(sb.wormHome, ".claude", "skills")); // exists before
+
+  // Drop skills, re-sync.
+  await writeFile(
+    path.join(sb.wormHome, "config.json"),
+    JSON.stringify({ shared_paths: [".claude/commands"] })
+  );
+  await sb.worm(["sync", "--global"]);
+
+  await assert.rejects(readlink(path.join(sb.wormHome, ".claude", "skills")), /ENOENT/, "pruned");
+  await readlink(path.join(sb.wormHome, ".claude", "commands")); // still linked
+  const manifest = JSON.parse(await readFile(path.join(sb.wormHome, ".managed-links.json"), "utf8"));
+  assert.deepEqual(Object.values(manifest)[0], [".claude/commands"]);
+});
+
+test("worm sync --global refuses to clobber a real path (warns, leaves it)", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init"]);
+
+  // A REAL ~/.claude/commands dir already exists (not a worm-managed symlink).
+  await mkdir(path.join(sb.wormHome, ".claude", "commands"), { recursive: true });
+  await writeFile(path.join(sb.wormHome, ".claude", "commands", "mine.md"), "keep\n");
+  await writeFile(
+    path.join(sb.wormHome, "config.json"),
+    JSON.stringify({ shared_paths: [".claude/commands"] })
+  );
+
+  const r = await sb.worm(["sync", "--global"]);
+  assert.equal(r.exitCode, 0, "a real path is a warning, not fatal");
+  assert.match(r.stdout + r.stderr, /real path/);
+  // Still a real dir (not a symlink), and its contents survive.
+  await assert.rejects(readlink(path.join(sb.wormHome, ".claude", "commands")), "left as a real dir");
+  await stat(path.join(sb.wormHome, ".claude", "commands", "mine.md"));
+});
+
+test("worm sync --global is a no-op with a hint when nothing is configured", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init"]);
+
+  const r = await sb.worm(["sync", "--global"]);
+  assert.equal(r.exitCode, 0, r.stderr);
+  assert.match(r.stdout + r.stderr, /No global shared_paths/i);
+  await assert.rejects(stat(path.join(sb.wormHome, ".managed-links.json")), /ENOENT/, "no manifest fabricated");
+});

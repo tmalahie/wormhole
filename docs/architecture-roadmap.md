@@ -107,11 +107,19 @@ external/team repos and the global shared dir are **named stores**. (Rejected: d
   2. Editing a linked external path writes into **that repo's** working tree. This is *intended* (edit
      in place, commit in the team repo) — but worm is now wiring two git repos together; say so in docs.
 
-## Decision 3 — global (home-scope) setups [the manual `~/.claude` symlinks] ✅
+## Decision 3 — global (home-scope) setups [the manual `~/.claude` symlinks] — ✅ SHIPPED 2026-06-06
 
 Same primitive at **`HOME` scope** with the **global-shared store** (`~/.worm/shared/`). This replaces
 the symlinks you currently make by hand: `~/.claude/{commands,skills,scheduled-tasks}` →
 `~/.worm/shared/.claude/…`.
+
+**Status: SHIPPED.** `worm sync --global` ([src/commands/sync.ts](../src/commands/sync.ts) →
+[core/global-links.ts](../src/core/global-links.ts)) reconciles `~/<tail>` → `~/.worm/shared/<tail>` for
+each tail in the global config's `shared_paths` (added to `GlobalConfigSchema`). Open questions resolved:
+**dedicated `worm sync --global`** (kept project `sync` focused); global manifest at
+**`~/.worm/.managed-links.json`** (auto-gitignored out of the personal repo). Missing sources are
+sprouted as empty dirs; a real path at the target is left untouched with a warning (clobber-safe). It
+adopts your existing manual links idempotently (a correct symlink is a no-op).
 
 ```jsonc
 // ~/.worm/config.json   (today holds only {"editor":"code"})
@@ -148,10 +156,14 @@ the symlinks you currently make by hand: `~/.claude/{commands,skills,scheduled-t
    resolves the live slot, injects env, owns logging, and forwards the interceptor's decision.
    Enable/disable/update is now a pure `config.json` edit. **Follow-up:** the hot-path fast path
    (recipes-roadmap spine (iv)) — each `pre-tool-use` still boots the full CLI; fine for now, optimize later.
-3. **Consolidate `.worm/`** (Decision 1) — mostly mechanical once code lives once.
-4. **Named stores (Decision 2) + global scope (Decision 3)** — the linking-layer generalization. These
-   are **independent of recipes** and can proceed in parallel with 1–3.
-5. **Templating + versioning** for the small bucket-3 set (recipes-roadmap §3/§6).
+3. **✅ DONE (2026-06-06) — global (home-scope) setups** (Decision 3). `worm sync --global` links
+   `~/<tail>` → `~/.worm/shared/<tail>` from the global config's `shared_paths`; clobber-safe, pruning,
+   gitignored manifest. (Done out of nominal order — highest value-per-risk, fully additive, no migration.)
+4. **Consolidate `.worm/`** (Decision 1) — move recipes/logs/manifest into the profile, drop the shared/
+   two-hop. Mostly mechanical once code lives once; needs careful migration of existing projects.
+5. **Named stores** (Decision 2) — external/team repos as link sources. Collapses the shared/ hop as a
+   byproduct, so it pairs naturally with (4).
+6. **Templating + versioning** for the small bucket-3 set (recipes-roadmap §3/§6).
 
 ## Open cross-cutting questions
 

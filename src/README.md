@@ -27,7 +27,7 @@ One file per command. Each exports a single `runX(args, options)` async function
 | `init.ts` | Bind the current clone as Slot 0. Lazily provisions `~/.worm/` on first run, writes the structural symlinks (`config.json`, `scripts/`), provisions `shared_paths`, seeds the managed-link manifest, and excludes `.worm/` via `.git/info/exclude`. Idempotent. |
 | `universe.ts` | `add <branch>` — create a permanent sibling worktree + run `on_create`. `rm <ref>` — remove a sibling (Slot 0 protected; refuses dirty without `--force`; runs `on_remove`; strips managed links before `git worktree remove`). |
 | `switch.ts` | `git switch <branch>` in the current slot + re-run `on_create`. Sugar over plain `git switch`, plus the "branch held elsewhere" guard. |
-| `sync.ts` | Declarative reconcile of shared-path links across all slots via the manifest; prunes removed links; GCs manifest entries for vanished slots. Idempotent. |
+| `sync.ts` | Declarative reconcile of shared-path links across all slots via the manifest; prunes removed links; GCs manifest entries for vanished slots. Idempotent. `--global` reconciles HOME-scope links instead (`~/<tail>` → `~/.worm/shared/<tail>`). |
 | `status.ts` | Enumerate the pool, render a table or `--json`. |
 | `destroy.ts` | Remove sibling universes + `.worm/` + the global profile. **Slot 0 is left intact.** |
 | `hook.ts` | `worm hook trigger <event>` — internal recipe-hook dispatcher invoked by each slot's `settings.local.json` (one static entry per event). Resolves the live slot, runs enabled recipes' hook commands with injected env, and owns logging. Must never throw; fails open on the hot path. |
@@ -45,6 +45,7 @@ Domain primitives. Pure functions where possible; the only side effects are file
 | `git.ts` | Typed wrappers for `git worktree {add,remove,list,prune}`, `switchBranch`, `currentBranch`, branch lookups, `dirtyFiles`. Parses porcelain output. |
 | `symlinks.ts` | `ensureSymlink()` — idempotent, prefers relative paths, refuses to overwrite real files. |
 | `links.ts` | The managed-link manifest: `reconcileSlotLinks` (create/prune, deref-guarded) and `stripSlotLinks` (before worktree removal). |
+| `global-links.ts` | HOME-scope analogue of `links.ts`: `reconcileGlobalLinks` links `~/<tail>` → `~/.worm/shared/<tail>` for `worm sync --global`, with its own manifest (`~/.worm/.managed-links.json`). |
 | `hooks.ts` | Runs `on_create`/`on_remove` with inherited stdio and `WORM_*` env (`hookEnv`). |
 | `universe.ts` | `scanUniverses()` builds the slot list from `git worktree list` (Slot 0 + matched siblings); `resolveSlotRef` / `findSlotByBranch` / `nextFreeIndex` / `universeLabel`. |
 

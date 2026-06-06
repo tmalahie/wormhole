@@ -37,6 +37,16 @@ export function globalConfigFile(): string {
   return path.join(globalRoot(), CONFIG_FILE_NAME);
 }
 
+/**
+ * Manifest of HOME-scope managed links (`~/.worm/.managed-links.json`), the
+ * global-scope analogue of a project's `.worm/.managed-links.json`. `worm sync
+ * --global` records the `~/<tail>` symlinks it creates here so prune only ever
+ * touches links it owns.
+ */
+export function globalManagedLinksFile(): string {
+  return path.join(globalRoot(), MANAGED_LINKS_FILE_NAME);
+}
+
 export function globalProjectDir(projectName: string): string {
   return path.join(globalMultiversesDir(), projectName);
 }

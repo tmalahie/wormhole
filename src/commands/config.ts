@@ -6,6 +6,7 @@ import {
   saveGlobalConfig,
   SUPPORTED_GLOBAL_KEYS,
   type GlobalConfig,
+  type ScalarGlobalKey,
 } from "../core/global-config.js";
 
 export interface ConfigOptions {
@@ -68,10 +69,10 @@ export async function runConfig(
   logger.success(`Set ${key} = ${value}.`);
 }
 
-function assertKnownKey(key: string): asserts key is keyof GlobalConfig {
+function assertKnownKey(key: string): asserts key is ScalarGlobalKey {
   if (!(SUPPORTED_GLOBAL_KEYS as readonly string[]).includes(key)) {
     throw new WormError(`Unknown config key: ${key}.`, {
-      hint: `Known keys: ${SUPPORTED_GLOBAL_KEYS.join(", ")}.`,
+      hint: `Known keys: ${SUPPORTED_GLOBAL_KEYS.join(", ")}. (shared_paths is edited in ~/.worm/config.json directly.)`,
     });
   }
 }
