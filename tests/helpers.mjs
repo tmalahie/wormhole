@@ -6,6 +6,9 @@ import { fileURLToPath } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const WORM_BIN = path.resolve(HERE, "..", "dist", "cli.js");
+// Worm-owned recipe code ships with the binary at dist/recipes/ (it is NOT
+// copied into a project's .worm/recipes/), so tests resolve it from here.
+export const PACKAGED_RECIPES = path.resolve(HERE, "..", "dist", "recipes");
 
 /**
  * Spin up an isolated sandbox:
@@ -31,7 +34,9 @@ export async function createSandbox() {
         ...process.env,
         WORM_HOME: opts.wormHome ?? wormHome,
         HOME: opts.home ?? wormHome,
+        ...opts.env,
       },
+      input: opts.input,
       reject: false,
     });
   }

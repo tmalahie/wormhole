@@ -5,7 +5,7 @@ import path from "node:path";
 import { tmpdir } from "node:os";
 import { mkdtemp, rm } from "node:fs/promises";
 import { execa } from "execa";
-import { createBranch, createSandbox } from "./helpers.mjs";
+import { createBranch, createSandbox, PACKAGED_RECIPES } from "./helpers.mjs";
 
 function escapeRegex(str) {
   return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -56,11 +56,19 @@ test("worm init binds Slot 0: symlinks, excludes .worm, seeds manifest, idempote
   const exclude = await readFile(path.join(sb.projectRoot, ".git", "info", "exclude"), "utf8");
   assert.match(exclude, /^\/\.worm\/$/m);
 
-  // Managed-link manifest is seeded.
+  // Managed-link manifest is seeded in the PROFILE (durable; survives a reclone).
   const manifest = JSON.parse(
-    await readFile(path.join(sb.projectRoot, ".worm", ".managed-links.json"), "utf8")
+    await readFile(
+      path.join(sb.wormHome, "multiverses", path.basename(sb.projectRoot), ".managed-links.json"),
+      "utf8"
+    )
   );
   assert.equal(typeof manifest, "object");
+  await assert.rejects(
+    stat(path.join(sb.projectRoot, ".worm", ".managed-links.json")),
+    /ENOENT/,
+    "manifest no longer lives in local .worm/"
+  );
 
   const r2 = await sb.worm(["init"]);
   assert.equal(r2.exitCode, 0, r2.stderr);
@@ -153,14 +161,18 @@ test("shared_paths are linked into Slot 0 and each new universe", async (t) => {
 
   await sb.worm(["init", "--template", templateDir]);
 
-  // Slot 0 gets a relative tunnel into .worm/shared.
+  // Slot 0 links straight at the profile source (absolute; the .worm/shared
+  // two-hop is gone).
   const slot0Link = await readlink(path.join(sb.projectRoot, ".env"));
-  assert.equal(slot0Link, ".worm/shared/.env");
+  assert.ok(path.isAbsolute(slot0Link), "slot links are absolute");
+  assert.match(slot0Link, /multiverses\/.+\/\.env$/);
 
   await sb.worm(["universe", "add", "feature-a", "--skip-hook"]);
   const root = await realpath(sb.projectRoot);
   const sibLink = await readlink(path.join(siblingPath(root, 1), ".env"));
-  assert.match(sibLink, /^\.\.\/.+\/\.worm\/shared\/\.env$/);
+  assert.match(sibLink, /multiverses\/.+\/\.env$/);
+  // No stale .worm/shared remains.
+  await assert.rejects(stat(path.join(sb.projectRoot, ".worm", "shared")), /ENOENT/);
 });
 
 test("worm sync reconciles links and prunes removed shared_paths via the manifest", async (t) => {
@@ -196,10 +208,12 @@ test("recipes: empty provisions nothing; sandbox generates Dockerfile + compose"
   const sbNone = await createSandbox();
   t.after(() => sbNone.cleanup());
   await sbNone.worm(["init"]);
+  // .worm/recipes is a symlink into the profile; with no recipes it resolves to
+  // an empty dir, so assert no artifacts were materialized.
   await assert.rejects(
-    stat(path.join(sbNone.projectRoot, ".worm", "recipes")),
+    stat(path.join(sbNone.projectRoot, ".worm", "recipes", "sandbox")),
     /ENOENT/,
-    "no enabled recipe → nothing written"
+    "no enabled recipe → no artifacts materialized"
   );
 
   // An enabled sandbox recipe generates artifacts under .worm/recipes/sandbox/.
@@ -226,7 +240,7 @@ test("recipes: empty provisions nothing; sandbox generates Dockerfile + compose"
   assert.doesNotMatch(compose, /\/Users\//, "no hardcoded home path leaks into the generated compose");
 });
 
-test("sandbox wiring writes idempotent per-slot hooks into settings.local.json", async (t) => {
+test("sandbox wiring installs the static dispatcher entry; container is computed fresh per slot", async (t) => {
   const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
   t.after(() => rm(templateDir, { recursive: true, force: true }));
   await writeFile(
@@ -239,41 +253,54 @@ test("sandbox wiring writes idempotent per-slot hooks into settings.local.json",
   await createBranch(sb.projectRoot, "feature-a");
   await sb.worm(["init", "--template", templateDir]);
 
-  const name = path.basename(sb.projectRoot);
+  const name = path.basename(await realpath(sb.projectRoot));
   const sandboxDir = path.join(sb.projectRoot, ".worm", "recipes", "sandbox");
   const readLocal = async (dir) =>
     JSON.parse(await readFile(path.join(dir, ".claude", "settings.local.json"), "utf8"));
 
-  // Interceptor + policy generated — and the interceptor is valid JS (it's
-  // embedded via String.raw and the suite otherwise never executes it).
-  const interceptor = path.join(sandboxDir, "redirect-to-sandbox.js");
-  await stat(interceptor);
-  const check = await execa("node", ["--check", interceptor], { reject: false });
-  assert.equal(check.exitCode, 0, `generated interceptor must be valid JS:\n${check.stderr}`);
+  // Policy materialized; interceptor code is live-once (not copied) — from inc1.
+  await assert.rejects(stat(path.join(sandboxDir, "redirect-to-sandbox.js")), /ENOENT/);
   const policy = JSON.parse(await readFile(path.join(sandboxDir, "sandbox-policy.json"), "utf8"));
   assert.ok(Array.isArray(policy.neverSandbox));
 
-  // Slot 0 wired in settings.local.json (the gitignored target).
+  // settings.local.json holds ONE static dispatcher entry per event — no
+  // per-recipe command, no container name baked in (that's computed at trigger).
   const s0 = await readLocal(sb.projectRoot);
   assert.equal(s0.hooks.PreToolUse.length, 1);
   assert.equal(s0.hooks.PreToolUse[0].matcher, "Bash");
-  assert.match(s0.hooks.PreToolUse[0].hooks[0].command, new RegExp(`${escapeRegex(name)}-main-sandbox`));
-  assert.match(s0.hooks.PreToolUse[0].hooks[0].command, /redirect-to-sandbox\.js/);
-  assert.ok(Array.isArray(s0.hooks.SessionStart), "autostart default → SessionStart present");
+  assert.match(s0.hooks.PreToolUse[0].hooks[0].command, /hook trigger pre-tool-use/);
+  assert.doesNotMatch(
+    s0.hooks.PreToolUse[0].hooks[0].command,
+    /sandbox|redirect-to-sandbox/,
+    "no per-recipe detail leaks into settings"
+  );
+  assert.match(s0.hooks.SessionStart[0].hooks[0].command, /hook trigger session-start/);
 
-  // A new universe gets its own container name in its own settings.local.json.
+  // The container name is produced at TRIGGER time: deny a destructive command
+  // and read it from the interceptor's decision. Slot 0 → <name>-main-sandbox.
+  const denyIn = JSON.stringify({ tool_input: { command: "rm -rf /tmp/zzz" } });
+  const d0 = await sb.worm(["hook", "trigger", "pre-tool-use"], { input: denyIn });
+  assert.match(d0.stdout, /"permissionDecision":"deny"/);
+  assert.match(d0.stdout, new RegExp(`${escapeRegex(name)}-main-sandbox`));
+
+  // A sibling slot computes its OWN container name from the SAME dispatcher entry.
   await sb.worm(["universe", "add", "feature-a", "--skip-hook"]);
   const root = await realpath(sb.projectRoot);
   const s1 = await readLocal(siblingPath(root, 1));
-  assert.match(s1.hooks.PreToolUse[0].hooks[0].command, new RegExp(`${escapeRegex(name)}-1-sandbox`));
+  assert.match(s1.hooks.PreToolUse[0].hooks[0].command, /hook trigger pre-tool-use/);
+  const d1 = await sb.worm(["hook", "trigger", "pre-tool-use"], {
+    cwd: siblingPath(root, 1),
+    input: denyIn,
+  });
+  assert.match(d1.stdout, new RegExp(`${escapeRegex(name)}-1-sandbox`));
 
-  // Idempotent: a re-sync must not duplicate Slot 0's hook entry.
+  // Idempotent: a re-sync must not duplicate the dispatcher entry.
   await sb.worm(["sync"]);
   const s0b = await readLocal(sb.projectRoot);
-  assert.equal(s0b.hooks.PreToolUse.length, 1, "re-sync must not duplicate worm hooks");
+  assert.equal(s0b.hooks.PreToolUse.length, 1, "re-sync must not duplicate the dispatcher entry");
 });
 
-test("syncPermissions recipe wires session hooks and a valid merge script", async (t) => {
+test("syncPermissions wires session dispatcher entries and runs through the dispatcher", async (t) => {
   const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
   t.after(() => rm(templateDir, { recursive: true, force: true }));
   await writeFile(
@@ -284,31 +311,42 @@ test("syncPermissions recipe wires session hooks and a valid merge script", asyn
   t.after(() => sb.cleanup());
   await sb.worm(["init", "--template", templateDir]);
 
-  const script = path.join(
-    sb.projectRoot, ".worm", "recipes", "syncPermissions", "sync-claude-settings.js"
-  );
-  const check = await execa("node", ["--check", script], { reject: false });
-  assert.equal(check.exitCode, 0, `generated sync script must be valid JS:\n${check.stderr}`);
-
+  // No artifacts dir, and settings hold the static session dispatcher entries —
+  // no per-recipe command, no canonical path baked in (computed at trigger).
+  await assert.rejects(stat(path.join(sb.projectRoot, ".worm", "recipes", "syncPermissions")), /ENOENT/);
   const s0 = JSON.parse(
     await readFile(path.join(sb.projectRoot, ".claude", "settings.local.json"), "utf8")
   );
   assert.equal(s0.hooks.SessionStart.length, 1);
-  const cmd = s0.hooks.SessionStart[0].hooks[0].command;
-  assert.match(cmd, /sync-claude-settings\.js/);
+  assert.match(s0.hooks.SessionStart[0].hooks[0].command, /hook trigger session-start/);
   assert.equal(s0.hooks.SessionEnd.length, 1);
-  assert.match(s0.hooks.SessionEnd[0].hooks[0].command, /sync-claude-settings\.js/);
+  assert.match(s0.hooks.SessionEnd[0].hooks[0].command, /hook trigger session-end/);
+  assert.ok(!s0.hooks.PreToolUse, "syncPermissions contributes no filter (PreToolUse) entry");
 
-  // Canonical store is the PERSISTENT global profile (committed in ~/.worm),
-  // not the ephemeral local .worm/recipes/ — so existing allowlists are pulled in.
+  // Triggering session-start through the dispatcher unions the slot's permissions
+  // with the canonical global-profile store (hermetic — pure node, no docker).
   const canonical = path.join(
-    sb.wormHome, "multiverses", path.basename(sb.projectRoot), ".claude", "settings.local.json"
+    sb.wormHome, "multiverses", path.basename(await realpath(sb.projectRoot)), ".claude", "settings.local.json"
   );
-  assert.ok(cmd.includes(`"${canonical}"`), `canonical must be the global profile file:\n${cmd}`);
-  assert.doesNotMatch(cmd, /recipes\/syncPermissions\/permissions\.json/);
+  await mkdir(path.dirname(canonical), { recursive: true });
+  await writeFile(canonical, JSON.stringify({ permissions: { allow: ["Bash(ls:*)"] } }));
+  const localFile = path.join(sb.projectRoot, ".claude", "settings.local.json");
+  const cur = JSON.parse(await readFile(localFile, "utf8"));
+  cur.permissions = { allow: ["Bash(git status:*)"] };
+  await writeFile(localFile, JSON.stringify(cur));
+
+  await sb.worm(["hook", "trigger", "session-start"]);
+
+  const merged = JSON.parse(await readFile(localFile, "utf8"));
+  assert.deepEqual(
+    new Set(merged.permissions.allow),
+    new Set(["Bash(ls:*)", "Bash(git status:*)"]),
+    "dispatcher ran syncPermissions: slot ∪ canonical"
+  );
+  assert.ok(merged.hooks.SessionStart, "the dispatcher entry itself is left intact");
 });
 
-test("recipes compose: sandbox + syncPermissions share settings.local.json", async (t) => {
+test("recipes compose: sandbox + syncPermissions share ONE dispatcher entry per event", async (t) => {
   const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
   t.after(() => rm(templateDir, { recursive: true, force: true }));
   await writeFile(
@@ -323,23 +361,50 @@ test("recipes compose: sandbox + syncPermissions share settings.local.json", asy
     JSON.parse(await readFile(path.join(sb.projectRoot, ".claude", "settings.local.json"), "utf8"));
 
   const s0 = await readLocal();
-  // PreToolUse: sandbox only.
-  assert.equal(s0.hooks.PreToolUse.length, 1);
-  assert.match(s0.hooks.PreToolUse[0].hooks[0].command, /redirect-to-sandbox\.js/);
-  // SessionStart: BOTH recipes coexist (container up + permission sync).
-  assert.equal(s0.hooks.SessionStart.length, 2, "both recipes contribute SessionStart");
-  const startCmds = s0.hooks.SessionStart.map((e) => e.hooks[0].command).join("\n");
-  assert.match(startCmds, /docker compose .* up -d/);
-  assert.match(startCmds, /sync-claude-settings\.js/);
-  // SessionEnd: syncPermissions (autostop default off → no sandbox down).
+  // Inversion: a SINGLE static entry per event, regardless of how many recipes
+  // contribute. session-start routes to BOTH recipes at trigger time.
+  assert.equal(s0.hooks.PreToolUse.length, 1, "one filter dispatcher (sandbox)");
+  assert.match(s0.hooks.PreToolUse[0].hooks[0].command, /hook trigger pre-tool-use/);
+  assert.equal(s0.hooks.SessionStart.length, 1, "single dispatcher entry, not one per recipe");
+  assert.match(s0.hooks.SessionStart[0].hooks[0].command, /hook trigger session-start/);
   assert.equal(s0.hooks.SessionEnd.length, 1);
-  assert.match(s0.hooks.SessionEnd[0].hooks[0].command, /sync-claude-settings\.js/);
+  assert.match(s0.hooks.SessionEnd[0].hooks[0].command, /hook trigger session-end/);
 
-  // Idempotent: re-sync must not duplicate either recipe's entries.
+  // Idempotent: re-sync must not duplicate the dispatcher entries.
   await sb.worm(["sync"]);
   const s0b = await readLocal();
-  assert.equal(s0b.hooks.SessionStart.length, 2, "re-sync must not duplicate");
+  assert.equal(s0b.hooks.SessionStart.length, 1, "re-sync must not duplicate");
   assert.equal(s0b.hooks.PreToolUse.length, 1);
+});
+
+test("worm sync preserves a user's own hooks and never duplicates its dispatcher entry", async (t) => {
+  const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
+  t.after(() => rm(templateDir, { recursive: true, force: true }));
+  await writeFile(
+    path.join(templateDir, "config.json"),
+    JSON.stringify({ shared_paths: [], hooks: {}, recipes: { sandbox: {} } })
+  );
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init", "--template", templateDir]);
+
+  // Add a user's own PreToolUse hook alongside worm's dispatcher entry.
+  const localFile = path.join(sb.projectRoot, ".claude", "settings.local.json");
+  const s0 = JSON.parse(await readFile(localFile, "utf8"));
+  s0.hooks.PreToolUse.push({ matcher: "Bash", hooks: [{ type: "command", command: "echo keep-me" }] });
+  await writeFile(localFile, JSON.stringify(s0));
+
+  await sb.worm(["sync"]);
+
+  const after = JSON.parse(await readFile(localFile, "utf8"));
+  const cmds = after.hooks.PreToolUse.map((e) => e.hooks[0].command);
+  assert.ok(cmds.includes("echo keep-me"), "user's own hook is preserved across re-wiring");
+  assert.equal(
+    cmds.filter((c) => c.includes("hook trigger")).length,
+    1,
+    "worm's dispatcher entry is not duplicated"
+  );
+  assert.equal(after.hooks.PreToolUse.length, 2, "user hook + one worm hook");
 });
 
 test("syncPermissions script unions permissions while preserving other keys", async (t) => {
@@ -353,9 +418,10 @@ test("syncPermissions script unions permissions while preserving other keys", as
   t.after(() => sb.cleanup());
   await sb.worm(["init", "--template", templateDir]);
 
-  const recipeDir = path.join(sb.projectRoot, ".worm", "recipes", "syncPermissions");
-  const script = path.join(recipeDir, "sync-claude-settings.js");
-  const canonical = path.join(recipeDir, "permissions.json");
+  const script = path.join(PACKAGED_RECIPES, "syncPermissions", "sync-claude-settings.js");
+  // Canonical store is just a fixture file here; put it somewhere that exists
+  // (syncPermissions no longer materializes a .worm/recipes/ dir).
+  const canonical = path.join(sb.projectRoot, ".worm", "permissions.json");
 
   // Canonical store already holds one allow rule…
   await writeFile(canonical, JSON.stringify({ permissions: { allow: ["Bash(ls:*)"] } }));
@@ -449,12 +515,18 @@ test("shareHistory refuses to clobber a real history dir", async (t) => {
   assert.match(r.stderr + r.stdout, /real history dir/);
 });
 
-test("recipe hooks log to .worm/logs", async (t) => {
+test("the dispatcher logs recipe hooks under .worm/logs", async (t) => {
   const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
   t.after(() => rm(templateDir, { recursive: true, force: true }));
+  // autostart off so triggering session-start never spawns docker — the run-hook
+  // logging is exercised by syncPermissions (pure node) instead.
   await writeFile(
     path.join(templateDir, "config.json"),
-    JSON.stringify({ shared_paths: [], hooks: {}, recipes: { sandbox: {} } })
+    JSON.stringify({
+      shared_paths: [],
+      hooks: {},
+      recipes: { sandbox: { autostart: false }, syncPermissions: {} },
+    })
   );
   const sb = await createSandbox();
   t.after(() => sb.cleanup());
@@ -465,28 +537,22 @@ test("recipe hooks log to .worm/logs", async (t) => {
   const container = `${name}-main-sandbox`;
   const logsDir = path.join(root, ".worm", "logs");
 
-  // init pre-creates the log dir so the docker `>>` redirect can't fail at runtime.
+  // init pre-creates the log dir so the dispatcher's `>>` redirect can't fail.
   assert.equal((await stat(logsDir)).isDirectory(), true);
 
-  // SessionStart redirects docker output to a per-container log file.
-  const s0 = JSON.parse(
-    await readFile(path.join(root, ".claude", "settings.local.json"), "utf8")
-  );
-  const startCmd = s0.hooks.SessionStart[0].hooks[0].command;
-  assert.match(startCmd, /docker compose .* up -d/);
-  assert.ok(
-    startCmd.includes(`>> "${path.join(logsDir, `${container}.log`)}" 2>&1`),
-    `SessionStart must redirect to the container log:\n${startCmd}`
-  );
-
-  // The interceptor records its decisions to <container>-redirect.log.
-  const interceptor = path.join(root, ".worm", "recipes", "sandbox", "redirect-to-sandbox.js");
-  await execa("node", [interceptor, container, "/x/compose.yml"], {
+  // Filter event: the dispatcher sets $WORM_LOG_DIR, so the interceptor self-logs
+  // its DENY decision to <container>-redirect.log (pure node, hermetic).
+  await sb.worm(["hook", "trigger", "pre-tool-use"], {
     input: JSON.stringify({ tool_input: { command: "rm -rf /tmp/zzz" } }),
-    reject: false,
   });
   const redirectLog = await readFile(path.join(logsDir, `${container}-redirect.log`), "utf8");
   assert.match(redirectLog, /DENY .*rm -rf \/tmp\/zzz/);
+
+  // Run event: the dispatcher captures the command's output under a dated banner
+  // to <recipe>.log — present regardless of what the command does.
+  await sb.worm(["hook", "trigger", "session-start"]);
+  const sessionLog = await readFile(path.join(logsDir, "syncPermissions.log"), "utf8");
+  assert.match(sessionLog, /=== .* session-start ===/);
 });
 
 test("sandbox interceptor: node code runs are sandboxed; npm and node --check are not", async (t) => {
@@ -501,9 +567,12 @@ test("sandbox interceptor: node code runs are sandboxed; npm and node --check ar
   await sb.worm(["init", "--template", templateDir]);
 
   const sandboxDir = path.join(sb.projectRoot, ".worm", "recipes", "sandbox");
-  const interceptor = path.join(sandboxDir, "redirect-to-sandbox.js");
+  // The interceptor is worm-owned code shipped with the binary; the project's
+  // policy file is passed as an arg (exactly as the generated hook does).
+  const interceptor = path.join(PACKAGED_RECIPES, "sandbox", "redirect-to-sandbox.js");
+  const policyFile = path.join(sandboxDir, "sandbox-policy.json");
   const decide = async (command) => {
-    const r = await execa("node", [interceptor, "c", "/x/compose.yml"], {
+    const r = await execa("node", [interceptor, "c", "/x/compose.yml", policyFile], {
       input: JSON.stringify({ tool_input: { command } }),
       reject: false,
     });
@@ -910,4 +979,275 @@ test("default scripts/setup.sh is created and executable", async (t) => {
   assert.ok((s.mode & 0o100) !== 0, "setup.sh should be executable by owner");
   const contents = await readFile(setupPath, "utf8");
   assert.match(contents, /^#!\/usr\/bin\/env bash/);
+});
+
+test("worm sync --global links HOME-scope shared paths (existing + sprouted) and is idempotent", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init"]); // provisions ~/.worm
+
+  // Two global tails: one with an existing source, one to be sprouted.
+  await writeFile(
+    path.join(sb.wormHome, "config.json"),
+    JSON.stringify({ editor: "code", shared_paths: [".claude/commands", ".claude/skills"] })
+  );
+  await mkdir(path.join(sb.wormHome, "shared", ".claude", "commands"), { recursive: true });
+  await writeFile(path.join(sb.wormHome, "shared", ".claude", "commands", "x.md"), "hi\n");
+
+  const r = await sb.worm(["sync", "--global"]);
+  assert.equal(r.exitCode, 0, r.stderr);
+
+  // ~/.claude/commands → ~/.worm/shared/.claude/commands (absolute symlink).
+  const cmdsLink = path.join(sb.wormHome, ".claude", "commands");
+  assert.ok(path.isAbsolute(await readlink(cmdsLink)), "global links are absolute");
+  assert.equal(
+    await realpath(cmdsLink),
+    await realpath(path.join(sb.wormHome, "shared", ".claude", "commands"))
+  );
+
+  // The missing source was sprouted as an empty dir, then linked.
+  assert.equal(
+    (await stat(path.join(sb.wormHome, "shared", ".claude", "skills"))).isDirectory(),
+    true,
+    "missing global source is sprouted"
+  );
+  assert.equal(
+    await realpath(path.join(sb.wormHome, ".claude", "skills")),
+    await realpath(path.join(sb.wormHome, "shared", ".claude", "skills"))
+  );
+
+  // Manifest records both tails and is gitignored out of the personal repo.
+  const manifest = JSON.parse(await readFile(path.join(sb.wormHome, ".managed-links.json"), "utf8"));
+  assert.deepEqual(Object.values(manifest)[0], [".claude/commands", ".claude/skills"]);
+  assert.match(await readFile(path.join(sb.wormHome, ".gitignore"), "utf8"), /\.managed-links\.json/);
+
+  // Idempotent.
+  const r2 = await sb.worm(["sync", "--global"]);
+  assert.equal(r2.exitCode, 0, r2.stderr);
+});
+
+test("worm sync --global prunes a tail removed from the global config", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init"]);
+  await writeFile(
+    path.join(sb.wormHome, "config.json"),
+    JSON.stringify({ shared_paths: [".claude/commands", ".claude/skills"] })
+  );
+  await sb.worm(["sync", "--global"]);
+  await readlink(path.join(sb.wormHome, ".claude", "skills")); // exists before
+
+  // Drop skills, re-sync.
+  await writeFile(
+    path.join(sb.wormHome, "config.json"),
+    JSON.stringify({ shared_paths: [".claude/commands"] })
+  );
+  await sb.worm(["sync", "--global"]);
+
+  await assert.rejects(readlink(path.join(sb.wormHome, ".claude", "skills")), /ENOENT/, "pruned");
+  await readlink(path.join(sb.wormHome, ".claude", "commands")); // still linked
+  const manifest = JSON.parse(await readFile(path.join(sb.wormHome, ".managed-links.json"), "utf8"));
+  assert.deepEqual(Object.values(manifest)[0], [".claude/commands"]);
+});
+
+test("worm sync --global refuses to clobber a real path (warns, leaves it)", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init"]);
+
+  // A REAL ~/.claude/commands dir already exists (not a worm-managed symlink).
+  await mkdir(path.join(sb.wormHome, ".claude", "commands"), { recursive: true });
+  await writeFile(path.join(sb.wormHome, ".claude", "commands", "mine.md"), "keep\n");
+  await writeFile(
+    path.join(sb.wormHome, "config.json"),
+    JSON.stringify({ shared_paths: [".claude/commands"] })
+  );
+
+  const r = await sb.worm(["sync", "--global"]);
+  assert.equal(r.exitCode, 0, "a real path is a warning, not fatal");
+  assert.match(r.stdout + r.stderr, /real path/);
+  // Still a real dir (not a symlink), and its contents survive.
+  await assert.rejects(readlink(path.join(sb.wormHome, ".claude", "commands")), "left as a real dir");
+  await stat(path.join(sb.wormHome, ".claude", "commands", "mine.md"));
+});
+
+test("worm sync --global is a no-op with a hint when nothing is configured", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init"]);
+
+  const r = await sb.worm(["sync", "--global"]);
+  assert.equal(r.exitCode, 0, r.stderr);
+  assert.match(r.stdout + r.stderr, /No global shared_paths/i);
+  await assert.rejects(stat(path.join(sb.wormHome, ".managed-links.json")), /ENOENT/, "no manifest fabricated");
+});
+
+test("init produces the consolidated layout (recipes/logs symlinks into the profile)", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init"]);
+
+  const profile = path.join(sb.wormHome, "multiverses", path.basename(sb.projectRoot));
+  // .worm/recipes and .worm/logs are absolute symlinks into the profile.
+  assert.ok(path.isAbsolute(await readlink(path.join(sb.projectRoot, ".worm", "recipes"))));
+  assert.equal(
+    await realpath(path.join(sb.projectRoot, ".worm", "recipes")),
+    await realpath(path.join(profile, "recipes"))
+  );
+  assert.equal(
+    await realpath(path.join(sb.projectRoot, ".worm", "logs")),
+    await realpath(path.join(profile, "logs"))
+  );
+  // Generated logs in the profile are gitignored out of the personal ~/.worm repo.
+  assert.match(await readFile(path.join(profile, "logs", ".gitignore"), "utf8"), /^\*$/m);
+});
+
+test("shared_paths can pull a tail from a named external store; edits land in that repo", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  const teamRepo = await mkdtemp(path.join(tmpdir(), "worm-team-"));
+  t.after(() => rm(teamRepo, { recursive: true, force: true }));
+  await mkdir(path.join(teamRepo, ".claude", "docs"), { recursive: true });
+  await writeFile(path.join(teamRepo, ".claude", "docs", "guide.md"), "TEAM\n");
+
+  const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
+  t.after(() => rm(templateDir, { recursive: true, force: true }));
+  await writeFile(
+    path.join(templateDir, "config.json"),
+    JSON.stringify({
+      shared_paths: [".env", { path: ".claude/docs", store: "team" }],
+      stores: { team: { root: teamRepo } },
+      hooks: {},
+    })
+  );
+  await sb.worm(["init", "--template", templateDir]);
+
+  // .claude/docs links into the EXTERNAL store; .env still comes from the profile.
+  const docsLink = path.join(sb.projectRoot, ".claude", "docs");
+  assert.equal(await realpath(docsLink), await realpath(path.join(teamRepo, ".claude", "docs")));
+  assert.equal(await readFile(path.join(docsLink, "guide.md"), "utf8"), "TEAM\n");
+  assert.match(await readlink(path.join(sb.projectRoot, ".env")), /multiverses\/.+\/\.env$/);
+
+  // Editing through the slot lands in the team repo (intended — two repos wired).
+  await writeFile(path.join(docsLink, "new.md"), "added\n");
+  assert.equal(await readFile(path.join(teamRepo, ".claude", "docs", "new.md"), "utf8"), "added\n");
+});
+
+test("a store with a url is cloned on demand when its root is missing", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  // A source git repo to serve as the store's url.
+  const src = await mkdtemp(path.join(tmpdir(), "worm-store-src-"));
+  t.after(() => rm(src, { recursive: true, force: true }));
+  await execa("git", ["init", "-q", "-b", "main"], { cwd: src });
+  await execa("git", ["config", "user.email", "t@e.com"], { cwd: src });
+  await execa("git", ["config", "user.name", "T"], { cwd: src });
+  await mkdir(path.join(src, "docs"), { recursive: true });
+  await writeFile(path.join(src, "docs", "team.md"), "CLONED\n");
+  await execa("git", ["add", "."], { cwd: src });
+  await execa("git", ["commit", "-q", "-m", "init"], { cwd: src });
+
+  const dstParent = await mkdtemp(path.join(tmpdir(), "worm-store-dst-"));
+  t.after(() => rm(dstParent, { recursive: true, force: true }));
+  const root = path.join(dstParent, "team"); // does not exist yet
+
+  const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
+  t.after(() => rm(templateDir, { recursive: true, force: true }));
+  await writeFile(
+    path.join(templateDir, "config.json"),
+    JSON.stringify({ shared_paths: [{ path: "docs", store: "team" }], stores: { team: { url: src, root } }, hooks: {} })
+  );
+  const r = await sb.worm(["init", "--template", templateDir]);
+  assert.equal(r.exitCode, 0, r.stderr);
+  assert.match(r.stdout + r.stderr, /cloning/i);
+
+  await stat(path.join(root, ".git")); // store was cloned to its root
+  assert.equal(await readFile(path.join(sb.projectRoot, "docs", "team.md"), "utf8"), "CLONED\n");
+});
+
+test("a store whose root is missing and has no url errors cleanly", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
+  t.after(() => rm(templateDir, { recursive: true, force: true }));
+  await writeFile(
+    path.join(templateDir, "config.json"),
+    JSON.stringify({ shared_paths: [{ path: "docs", store: "team" }], stores: { team: { root: "/no/such/worm/store/root" } }, hooks: {} })
+  );
+  const r = await sb.worm(["init", "--template", templateDir]);
+  assert.notEqual(r.exitCode, 0);
+  assert.match(r.stderr, /root not found/i);
+  assert.match(r.stderr, /add a "url"/);
+});
+
+test("referencing an undeclared store errors cleanly", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
+  t.after(() => rm(templateDir, { recursive: true, force: true }));
+  await writeFile(
+    path.join(templateDir, "config.json"),
+    JSON.stringify({ shared_paths: [{ path: "docs", store: "ghost" }], hooks: {} })
+  );
+  const r = await sb.worm(["init", "--template", templateDir]);
+  assert.notEqual(r.exitCode, 0);
+  assert.match(r.stderr, /Unknown store "ghost"/);
+});
+
+test("a project can reference a store declared in the global config", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  const ext = await mkdtemp(path.join(tmpdir(), "worm-gstore-"));
+  t.after(() => rm(ext, { recursive: true, force: true }));
+  await mkdir(path.join(ext, "shared"), { recursive: true });
+  await writeFile(path.join(ext, "shared", "f.md"), "G\n");
+
+  await sb.worm(["init"]); // provisions ~/.worm
+  // Global config declares the store; the project references it.
+  await writeFile(path.join(sb.wormHome, "config.json"), JSON.stringify({ stores: { org: { root: ext } } }));
+  const profileCfg = path.join(sb.wormHome, "multiverses", path.basename(sb.projectRoot), "config.json");
+  await writeFile(profileCfg, JSON.stringify({ shared_paths: [{ path: "shared", store: "org" }], hooks: {} }));
+
+  const r = await sb.worm(["sync"]);
+  assert.equal(r.exitCode, 0, r.stderr);
+  assert.equal(
+    await realpath(path.join(sb.projectRoot, "shared")),
+    await realpath(path.join(ext, "shared")),
+    "linked from the GLOBAL store"
+  );
+});
+
+test("worm template render substitutes {{vars}} and leaves shell ${VAR} untouched", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  const tmpl = path.join(sb.projectRoot, "x.tmpl");
+  await writeFile(tmpl, "name: {{project}}-sandbox\nmount: ${SANDBOX_DIR}\nport: {{ port }}\n");
+
+  const r = await sb.worm(["template", "render", tmpl, "project=app", "port=3000"]);
+  assert.equal(r.exitCode, 0, r.stderr);
+  assert.match(r.stdout, /name: app-sandbox/);
+  assert.match(r.stdout, /mount: \$\{SANDBOX_DIR\}/, "shell ${VAR} is left untouched");
+  assert.match(r.stdout, /port: 3000/);
+});
+
+test("worm template render errors on an unknown {{var}} (strict)", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  const tmpl = path.join(sb.projectRoot, "x.tmpl");
+  await writeFile(tmpl, "hello {{name}} {{ghost}}\n");
+
+  const r = await sb.worm(["template", "render", tmpl, "name=world"]);
+  assert.notEqual(r.exitCode, 0);
+  assert.match(r.stderr, /unknown variable \{\{ghost\}\}/);
+});
+
+test("worm template render rejects a bad KEY=VALUE arg", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  const tmpl = path.join(sb.projectRoot, "x.tmpl");
+  await writeFile(tmpl, "{{a}}\n");
+
+  const r = await sb.worm(["template", "render", tmpl, "noequals"]);
+  assert.notEqual(r.exitCode, 0);
+  assert.match(r.stderr, /expected KEY=VALUE/);
 });

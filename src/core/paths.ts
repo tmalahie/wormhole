@@ -1,5 +1,6 @@
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 export const GLOBAL_ROOT_NAME = ".worm";
 export const LOCAL_ROOT_NAME = ".worm";
@@ -36,6 +37,16 @@ export function globalConfigFile(): string {
   return path.join(globalRoot(), CONFIG_FILE_NAME);
 }
 
+/**
+ * Manifest of HOME-scope managed links (`~/.worm/.managed-links.json`), the
+ * global-scope analogue of a project's `.worm/.managed-links.json`. `worm sync
+ * --global` records the `~/<tail>` symlinks it creates here so prune only ever
+ * touches links it owns.
+ */
+export function globalManagedLinksFile(): string {
+  return path.join(globalRoot(), MANAGED_LINKS_FILE_NAME);
+}
+
 export function globalProjectDir(projectName: string): string {
   return path.join(globalMultiversesDir(), projectName);
 }
@@ -50,6 +61,19 @@ export function globalProjectFile(projectName: string, fileName: string): string
 
 export function globalProjectScriptsDir(projectName: string): string {
   return path.join(globalProjectDir(projectName), SCRIPTS_DIR_NAME);
+}
+
+/**
+ * Durable per-project state lives in the profile (survives a slot-0 reclone);
+ * the project's `.worm/recipes` and `.worm/logs` are symlinks INTO these. The
+ * materialized recipe artifacts (Dockerfile/compose/policy) are the real files.
+ */
+export function globalProjectRecipesDir(projectName: string): string {
+  return path.join(globalProjectDir(projectName), RECIPES_DIR_NAME);
+}
+
+export function globalProjectLogsDir(projectName: string): string {
+  return path.join(globalProjectDir(projectName), LOGS_DIR_NAME);
 }
 
 export function globalTemplatesDir(): string {
@@ -68,14 +92,6 @@ export function localConfigFile(projectRoot: string): string {
   return path.join(localRoot(projectRoot), CONFIG_FILE_NAME);
 }
 
-export function localSharedDir(projectRoot: string): string {
-  return path.join(localRoot(projectRoot), SHARED_DIR_NAME);
-}
-
-export function localSharedFile(projectRoot: string, fileName: string): string {
-  return path.join(localSharedDir(projectRoot), fileName);
-}
-
 export function localScriptsDir(projectRoot: string): string {
   return path.join(localRoot(projectRoot), SCRIPTS_DIR_NAME);
 }
@@ -90,18 +106,52 @@ export function localRecipeDir(projectRoot: string, recipeName: string): string 
   return path.join(localRecipesRoot(projectRoot), recipeName);
 }
 
-/** Where recipe hooks write their logs: `.worm/logs/` (at Slot 0). */
+/**
+ * Root of the worm-OWNED recipe code that ships WITH the binary — the
+ * config-independent scripts (the sandbox interceptor, the permission-sync
+ * script) that are parameterized at run time and so live ONCE rather than being
+ * copied per project. tsup copies `src/recipes/` → `dist/recipes/` at build; at
+ * run time the bundle is `dist/cli.js`, so `import.meta.url` resolves to `dist/`
+ * and the scripts sit alongside at `dist/recipes/`.
+ */
+export function packagedRecipesDir(): string {
+  return path.join(path.dirname(fileURLToPath(import.meta.url)), RECIPES_DIR_NAME);
+}
+
+/** A single packaged recipe code file: `dist/recipes/<name>/<file>`. */
+export function packagedRecipeScript(recipeName: string, file: string): string {
+  return path.join(packagedRecipesDir(), recipeName, file);
+}
+
+/** A packaged `{{var}}` template shipped with a recipe: `dist/recipes/<name>/templates/<file>`. */
+export function packagedRecipeTemplate(recipeName: string, file: string): string {
+  return path.join(packagedRecipesDir(), recipeName, "templates", file);
+}
+
+/**
+ * Absolute path to the running worm CLI entry (`dist/cli.js`). The recipe-hook
+ * dispatcher entries written into a slot's settings.local.json invoke it by
+ * absolute path — `node "<this>" hook trigger <event>` — so a change to the
+ * shell's PATH can't silently disable the hooks.
+ */
+export function wormCliEntry(): string {
+  return fileURLToPath(import.meta.url);
+}
+
+/** Where recipe hooks write their logs: `.worm/logs/` (a symlink into the
+ *  profile's `logs/`). */
 export function localLogsDir(slot0Root: string): string {
   return path.join(localRoot(slot0Root), LOGS_DIR_NAME);
 }
 
 /**
- * Path to the managed-link manifest at Slot 0 (.worm/.managed-links.json).
- * `worm sync` records the symlinks it creates here so prune/GC only ever
- * touches links it owns — never structural wiring or real user files.
+ * Path to the managed-link manifest. Lives in the PROFILE
+ * (`~/.worm/multiverses/<name>/.managed-links.json`) so it's durable per project
+ * and survives a slot-0 reclone. `worm sync` records the symlinks it creates
+ * here so prune/GC only ever touches links it owns — never real user files.
  */
-export function managedLinksFile(slot0Root: string): string {
-  return path.join(localRoot(slot0Root), MANAGED_LINKS_FILE_NAME);
+export function managedLinksFile(projectName: string): string {
+  return globalProjectFile(projectName, MANAGED_LINKS_FILE_NAME);
 }
 
 /**

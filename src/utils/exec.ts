@@ -6,6 +6,8 @@ export interface RunOptions {
   env?: NodeJS.ProcessEnv;
   inheritStdio?: boolean;
   shell?: boolean | string;
+  /** Written to the child's stdin (used by the hook dispatcher's filter run). */
+  input?: string;
 }
 
 export interface RunResult {
@@ -58,6 +60,7 @@ export async function runShell(
       env: options.env,
       shell: options.shell ?? true,
       stdio: options.inheritStdio ? "inherit" : "pipe",
+      input: options.input,
       reject: false,
     });
     return {

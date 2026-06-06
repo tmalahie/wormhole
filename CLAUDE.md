@@ -53,8 +53,9 @@ Keep that in mind when reviewing changes: a "clever" addition that breaks idempo
 
 ### Symlinks
 - Use `ensureSymlink()` from `src/core/symlinks.ts`. It's idempotent and refuses to clobber real files. Don't call `fs.symlink` directly.
-- Links a slot makes into the local `.worm/` tree are **relative**. Links that cross repos (project `.worm/config.json` → global `~/.worm/...`) are **absolute** — pass `{ relative: false }`.
-- Shared-path links are tracked in the **managed-link manifest** (`.worm/.managed-links.json`). Reconcile/prune through `core/links.ts` (`reconcileSlotLinks`, `stripSlotLinks`) so worm only ever touches links it created — never structural wiring or real user files. The prune is deref-guarded: a managed link that became a real file is left alone.
+- `.worm/` is (almost) all pointers into the profile (`~/.worm/multiverses/<name>/`): `config.json`, `scripts`, `recipes`, and `logs` are symlinks; durable state (recipe artifacts, logs, the manifest) lives in the profile. `core/layout.ts:ensureLocalLayout` establishes this; it runs on init/sync/universe-add.
+- Each slot's shared-path tunnels link **straight at the profile source** (`<slot>/<tail>` → `profile/<tail>`, **absolute** — the old `.worm/shared` two-hop is gone). All cross-repo links pass `{ relative: false }`.
+- Shared-path links are tracked in the **managed-link manifest**, now in the **profile** (`~/.worm/multiverses/<name>/.managed-links.json`), so `readManifest`/`writeManifest`/`reconcileSlotLinks` take the **project name** (not slot0Root). Reconcile/prune through `core/links.ts` so worm only ever touches links it created — never structural wiring or real user files. The prune is deref-guarded: a managed link that became a real file is left alone.
 
 ### Slot edge cases
 - **Slot 0 is a real working tree**, so git would otherwise see `.worm/` as untracked. `init.ts:ensureGitExclude` adds `/.worm/` to `.git/info/exclude` (local, not the tracked `.gitignore`).
@@ -72,7 +73,7 @@ Keep that in mind when reviewing changes: a "clever" addition that breaks idempo
 - The default `on_create` invokes `bash "$WORM_PROJECT_ROOT/.worm/scripts/setup.sh"`. Users edit `setup.sh` rather than the JSON config. Don't change the hook-command default without also updating the seeded `setup.sh` template.
 
 ### Config
-- `ConfigSchema` (`src/types.ts`) is `.strict()` and there is **no legacy normalization** — `core/config.ts` parses configs as-is, so an unknown or renamed key is a hard `Invalid config` error. This is a single-user tool; when you change the schema, migrate the on-disk profiles under `~/.worm/multiverses/<name>/config.json` (and the template) in the same change rather than adding a back-compat shim. The config shape: `{ shared_paths, hooks: { on_create?, on_remove? }, recipes: { <name>: <recipe-config> } }`.
+- `ConfigSchema` (`src/types.ts`) is `.strict()` and there is **no legacy normalization** — `core/config.ts` parses configs as-is, so an unknown or renamed key is a hard `Invalid config` error. This is a single-user tool; when you change the schema, migrate the on-disk profiles under `~/.worm/multiverses/<name>/config.json` (and the template) in the same change rather than adding a back-compat shim. The config shape: `{ shared_paths, stores, hooks: { on_create?, on_remove? }, recipes: { <name>: <recipe-config> } }`. A `shared_paths` entry is `string | { path, store? }` (bare = profile store); `stores` is `{ <name>: { root, url? } }` — `core/stores.ts:resolveStoreLinks` maps each entry to a source (profile by default, else the named store's root, cloning from `url` on demand), so `reconcileSlotLinks` consumes resolved `{ tail, source, sprout }` links, not raw paths.
 
 ### Templates
 - `~/.worm/templates/default/` is seeded on first global init by [src/core/templates.ts](src/core/templates.ts). Each new multiverse is bootstrapped from a template (CLI `--template <dir>` > global default > built-in `DEFAULT_CONFIG`).

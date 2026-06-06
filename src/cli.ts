@@ -12,6 +12,8 @@ import { runCompletion } from "./commands/completion.js";
 import { runSync } from "./commands/sync.js";
 import { runSwitch } from "./commands/switch.js";
 import { runUniverseAdd, runUniverseRemove } from "./commands/universe.js";
+import { runHookTrigger } from "./commands/hook.js";
+import { runTemplateRender } from "./commands/template.js";
 
 const program = new Command();
 
@@ -87,8 +89,20 @@ program
 program
   .command("sync")
   .description("Reconcile shared-path links across every slot (declarative, idempotent).")
-  .action(async () => {
-    await runSync();
+  .option("--global", "Reconcile HOME-scope links (~/.worm/config.json shared_paths) instead of the project.")
+  .action(async (opts) => {
+    await runSync(opts);
+  });
+
+const template = program
+  .command("template")
+  .description("Worm's templating primitive: render {{var}} template files.");
+
+template
+  .command("render <file> [vars...]")
+  .description("Render a {{var}} template file with KEY=VALUE vars to stdout (for setup scripts).")
+  .action(async (file: string, vars: string[] = []) => {
+    await runTemplateRender(file, vars);
   });
 
 program
@@ -127,6 +141,17 @@ program
   .description("Print a tab-completion script for the given shell (bash | zsh). Source via `eval \"$(worm completion zsh)\"`.")
   .action((shell: string) => {
     runCompletion(shell);
+  });
+
+const hook = program
+  .command("hook")
+  .description("Internal: worm's recipe-hook dispatcher (invoked by a slot's settings.local.json).");
+
+hook
+  .command("trigger <event>")
+  .description("Run enabled recipes' hooks for <event> (pre-tool-use | session-start | session-end).")
+  .action(async (event: string) => {
+    await runHookTrigger(event);
   });
 
 program

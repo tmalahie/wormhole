@@ -53,6 +53,11 @@ most of the pain in §3–§6. **A generated artifact is exactly one of:**
    per-project.** Fixing the code = upgrading worm (or the one shared copy) = instant propagation to
    every project. The mkpc/arcads drift above is the proof this is the right model: there was never a
    reason for two copies, and having two is what let them diverge.
+   **Status: SHIPPED 2026-06-06** for built-ins — the interceptor + sync script now live in
+   `src/recipes/` → `dist/recipes/` (`packagedRecipeScript()`); hooks pass per-project bits as args +
+   `WORM_RECIPE=`/`WORM_LOG_DIR` env, with a transitional `/.worm/recipes/` marker for clean upgrades.
+   (Third-party loading from `~/.worm/recipes/` is still §1; the inverted dispatcher below is still
+   future — recipes currently still emit their own per-recipe settings entries, just repointed.)
 
 2. **Runtime config** — the container name, `docker compose -p` project, `SANDBOX_DIR`, and the sandbox
    policy's `neverSandbox`/`exemptDirs`. This **already lives in `config.json`.** ✅ It is
@@ -86,13 +91,24 @@ fresh, injects env, runs each enabled recipe's command for that event, and owns 
 So the dispatcher must:
 - (i) reference the worm binary by **absolute path**, not `PATH`, so a shell-env change can't silently
   disable the sandbox;
-- (ii) have **defined failure semantics** — the interceptor fails **safe** (deny + clear message),
-  session hooks fail **open**;
+- (ii) have **defined failure semantics** — dispatcher *infra* failures (can't resolve the project /
+  load config) **fail OPEN** and append to `.worm/logs/dispatch.log`, because a worm bug must not block
+  every command; the interceptor's own decision logic is unchanged (it already allows on malformed
+  input). Session hooks swallow errors (never block a session);
 - (iii) faithfully pass **stdin→stdout** for the interceptor (its stdout *is* the permission decision);
 - (iv) use a **minimal-load fast path** (don't boot the whole CLI on every Bash).
 
 The latency objection to wrapping the hot path was judged **premature**: tens of ms, optimizable, and
 dwarfed by the agent's per-command LLM round-trip. The update/uninstall cleanliness wins easily.
+
+**Status: SHIPPED 2026-06-06.** `worm hook trigger <event>` ([src/commands/hook.ts](../src/commands/hook.ts))
+is the dispatcher; recipes declare `hooks(ctx, cfg): HookContribution` (data), and
+[applyRecipeWiring](../src/core/recipes.ts) installs ONE static `node "<cli>" hook trigger <event>` entry
+per event. (i)/(ii)/(iii) are done; the `isWormManaged` substring logic shrank to a single
+`hook trigger` marker plus two transitional legacy markers for one-sync migration. **Not yet done:**
+(iv) the fast path — each hot-path call still boots the full CLI + does ~2 git calls; acceptable for now
+(dwarfed by the LLM loop) but the obvious next optimization. Recipes-as-shareable-data (§1/§2) is still
+future; today the recipe set is still the hardcoded built-in `REGISTRY`.
 
 ---
 
@@ -132,7 +148,16 @@ editing typed code and rebuilding.
   `shareHistory`'s symlink-and-skip-if-real-dir behavior). Likely: declarative for the common case, with
   an escape hatch to a spine-bucket-1 script for the rest.
 
-## 3. One templating engine — but only for bucket 3 (revised 2026-06-06)
+## 3. One templating primitive — ✅ SHIPPED 2026-06-06
+
+**Status: SHIPPED — homemade, not a library.** After the spine shrank templating to plain `{{var}}`
+substitution (no user-facing logic), a ~25-line [utils/template.ts](../src/utils/template.ts)
+`renderTemplate` won over `eta`: zero deps (honoring the small-deps rule), and converting `compose.yml`
+to a real template **killed the `\${VAR}` escaping foot-gun** (`{{…}}` and `${…}` don't collide). The
+sandbox `Dockerfile`/`compose.yml` are now real `.tmpl` files under `src/recipes/sandbox/templates/`
+(rendered at materialize time; the lone conditional — the apt-get block — is precomputed and passed as a
+`{{tools}}` var). Exposed as **`worm template render <file> KEY=VALUE …`** so user setups (`setup.sh`) can drop
+their hand-rolled sed. (`eta` remains the escape hatch if logic in user-editable templates is ever wanted.)
 
 **Problem (original).** Generated `.js`/config files are `String.raw` strings in TS — unmaintainable.
 Quote: *"really not clean, I'll never want to maintain that."*

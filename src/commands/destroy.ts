@@ -59,7 +59,7 @@ export async function runDestroy(options: DestroyOptions = {}): Promise<void> {
     }
   }
 
-  const manifest = await readManifest(root);
+  const manifest = await readManifest(projectName);
 
   // 1. Remove sibling worktrees (force so uncommitted changes don't block).
   for (const slot of siblings) {
@@ -70,7 +70,7 @@ export async function runDestroy(options: DestroyOptions = {}): Promise<void> {
 
   // 2. Strip Slot 0's injected tunnels + recipe hooks (but never remove Slot 0 itself).
   await stripSlotLinks(root, manifest);
-  await stripRecipeWiring(root, root);
+  await stripRecipeWiring(root);
 
   // 3. Remove local .worm/ state.
   await fs.rm(localRoot(root), { recursive: true, force: true });

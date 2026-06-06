@@ -17,15 +17,12 @@ import {
   globalMultiversesDir,
   globalProjectConfig,
   globalProjectDir,
-  globalProjectFile,
   globalProjectScriptsDir,
   globalRoot,
   globalSharedDir,
   localConfigFile,
   localRoot,
   localScriptsDir,
-  localSharedDir,
-  localSharedFile,
 } from "../core/paths.js";
 import { ensureSymlink } from "../core/symlinks.js";
 import { applyRecipeWiring, materializeRecipes } from "../core/recipes.js";
@@ -40,6 +37,8 @@ import {
   type ResolvedTemplate,
 } from "../core/templates.js";
 import { readManifest, reconcileSlotLinks, writeManifest } from "../core/links.js";
+import { resolveStoreLinks } from "../core/stores.js";
+import { ensureLocalLayout } from "../core/layout.js";
 
 export interface InitOptions {
   name?: string;
@@ -86,7 +85,9 @@ export async function bindProject(
   const config = await prepareGlobalProfile(projectName, options, existed, template);
 
   await ensureDir(localRoot(projectRoot));
-  await ensureDir(localSharedDir(projectRoot));
+  // Durable state (recipes/, logs/, the manifest) lives in the profile; .worm/
+  // holds symlinks into it. Migrates an old layout in place.
+  await ensureLocalLayout(projectRoot, projectName);
 
   await ensureSymlink(
     localConfigFile(projectRoot),
@@ -102,10 +103,6 @@ export async function bindProject(
   );
   logger.step(`🪢 linked scripts/ → ${logger.dim(globalProjectScriptsDir(projectName))}`);
 
-  for (const sharedPath of config.shared_paths) {
-    await provisionSharedPath(projectRoot, projectName, sharedPath);
-  }
-
   const ignored = await writeTextIfMissing(
     path.join(localRoot(projectRoot), ".gitignore"),
     "*\n"
@@ -119,10 +116,12 @@ export async function bindProject(
   // .gitignore) so `git status` stays clean without touching the repo's files.
   await ensureGitExclude(projectRoot, "/.worm/");
 
-  // Reconcile Slot 0's wormhole tunnels and seed the managed-link manifest.
-  const manifest = await readManifest(projectRoot);
-  await reconcileSlotLinks(projectRoot, projectRoot, config.shared_paths, manifest);
-  await writeManifest(projectRoot, manifest);
+  // Reconcile Slot 0's wormhole tunnels (links straight into the profile) and
+  // seed the manifest.
+  const manifest = await readManifest(projectName);
+  const links = await resolveStoreLinks(config, projectName);
+  await reconcileSlotLinks(projectRoot, links, manifest);
+  await writeManifest(projectName, manifest);
 
   // Materialize enabled recipes' artifacts (a no-op when none are enabled).
   const recipeFiles = await materializeRecipes(projectRoot, projectName, config.recipes);
@@ -246,25 +245,4 @@ async function prepareGlobalProfile(
   await materializeTemplateScripts(template, globalProjectScriptsDir(projectName));
 
   return config;
-}
-
-async function provisionSharedPath(
-  projectRoot: string,
-  projectName: string,
-  sharedPath: string
-): Promise<void> {
-  const localTarget = localSharedFile(projectRoot, sharedPath);
-  const globalSource = globalProjectFile(projectName, sharedPath);
-
-  if (await pathExists(globalSource)) {
-    await ensureSymlink(localTarget, globalSource, { relative: false, type: "file" });
-    logger.step(`🔗 anomaly shared/${sharedPath} → ${logger.dim(globalSource)}`);
-    return;
-  }
-
-  await ensureDir(path.dirname(localTarget));
-  const created = await writeTextIfMissing(localTarget, "");
-  if (created) {
-    logger.step(`🌱 sprouted shared/${sharedPath} (no anomaly in the global plane)`);
-  }
 }
