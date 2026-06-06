@@ -377,7 +377,7 @@ test("recipes compose: sandbox + syncPermissions share ONE dispatcher entry per 
   assert.equal(s0b.hooks.PreToolUse.length, 1);
 });
 
-test("upgrade: legacy .worm/recipes hooks are replaced, not duplicated, on re-sync", async (t) => {
+test("worm sync preserves a user's own hooks and never duplicates its dispatcher entry", async (t) => {
   const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
   t.after(() => rm(templateDir, { recursive: true, force: true }));
   await writeFile(
@@ -388,42 +388,23 @@ test("upgrade: legacy .worm/recipes hooks are replaced, not duplicated, on re-sy
   t.after(() => sb.cleanup());
   await sb.worm(["init", "--template", templateDir]);
 
-  // Seed BOTH older wiring formats — pre-live-once (embedded .worm/recipes/ path)
-  // and inc1 live-once (WORM_RECIPE= marker) — plus a user's own hook that must
-  // survive. One `worm sync` should migrate both to the single dispatcher entry.
+  // Add a user's own PreToolUse hook alongside worm's dispatcher entry.
   const localFile = path.join(sb.projectRoot, ".claude", "settings.local.json");
-  const preLiveOnce = `node "${sb.projectRoot}/.worm/recipes/sandbox/redirect-to-sandbox.js" "c" "x"`;
-  const inc1 = `WORM_RECIPE="sandbox" WORM_LOG_DIR="/x" node "/pkg/redirect.js" "c" "y" "z"`;
-  await mkdir(path.dirname(localFile), { recursive: true });
-  await writeFile(
-    localFile,
-    JSON.stringify({
-      hooks: {
-        PreToolUse: [
-          { matcher: "Bash", hooks: [{ type: "command", command: "echo keep-me" }] },
-          { matcher: "Bash", hooks: [{ type: "command", command: preLiveOnce }] },
-          { matcher: "Bash", hooks: [{ type: "command", command: inc1 }] },
-        ],
-      },
-    })
-  );
+  const s0 = JSON.parse(await readFile(localFile, "utf8"));
+  s0.hooks.PreToolUse.push({ matcher: "Bash", hooks: [{ type: "command", command: "echo keep-me" }] });
+  await writeFile(localFile, JSON.stringify(s0));
 
   await sb.worm(["sync"]);
 
-  const s0 = JSON.parse(await readFile(localFile, "utf8"));
-  const cmds = s0.hooks.PreToolUse.map((e) => e.hooks[0].command);
-  assert.ok(cmds.includes("echo keep-me"), "user's own hook is preserved");
-  assert.ok(
-    !cmds.some((c) => c.includes(".worm/recipes/sandbox/redirect-to-sandbox.js")),
-    "pre-live-once entry removed"
-  );
-  assert.ok(!cmds.some((c) => c.includes("WORM_RECIPE=")), "inc1 entry removed");
+  const after = JSON.parse(await readFile(localFile, "utf8"));
+  const cmds = after.hooks.PreToolUse.map((e) => e.hooks[0].command);
+  assert.ok(cmds.includes("echo keep-me"), "user's own hook is preserved across re-wiring");
   assert.equal(
     cmds.filter((c) => c.includes("hook trigger")).length,
     1,
-    "exactly one dispatcher entry after migration"
+    "worm's dispatcher entry is not duplicated"
   );
-  assert.equal(s0.hooks.PreToolUse.length, 2, "user hook + one dispatcher entry");
+  assert.equal(after.hooks.PreToolUse.length, 2, "user hook + one worm hook");
 });
 
 test("syncPermissions script unions permissions while preserving other keys", async (t) => {
@@ -1119,50 +1100,6 @@ test("init produces the consolidated layout (recipes/logs symlinks into the prof
   );
   // Generated logs in the profile are gitignored out of the personal ~/.worm repo.
   assert.match(await readFile(path.join(profile, "logs", ".gitignore"), "utf8"), /^\*$/m);
-});
-
-test("consolidation migrates an old-layout project (recipes/logs/manifest/shared) on sync", async (t) => {
-  const sb = await createSandbox();
-  t.after(() => sb.cleanup());
-  const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
-  t.after(() => rm(templateDir, { recursive: true, force: true }));
-  await writeFile(
-    path.join(templateDir, "config.json"),
-    JSON.stringify({ shared_paths: [".env"], hooks: {} })
-  );
-  await sb.worm(["init", "--template", templateDir]);
-
-  const proj = sb.projectRoot;
-  const profile = path.join(sb.wormHome, "multiverses", path.basename(proj));
-
-  // Forge a PRE-consolidation layout on top of the fresh one: real dirs where
-  // there should now be symlinks, a LOCAL manifest, and a stale .worm/shared.
-  await rm(path.join(proj, ".worm", "recipes"), { recursive: true, force: true });
-  await mkdir(path.join(proj, ".worm", "recipes", "sandbox"), { recursive: true });
-  await writeFile(path.join(proj, ".worm", "recipes", "sandbox", "Dockerfile"), "OLD-EDIT\n");
-  await rm(path.join(proj, ".worm", "logs"), { recursive: true, force: true });
-  await mkdir(path.join(proj, ".worm", "logs"), { recursive: true });
-  await writeFile(path.join(proj, ".worm", "logs", "old.log"), "x\n");
-  await writeFile(path.join(proj, ".worm", ".managed-links.json"), JSON.stringify({ [proj]: [".env"] }));
-  await mkdir(path.join(proj, ".worm", "shared", ".claude"), { recursive: true });
-
-  const r = await sb.worm(["sync"]);
-  assert.equal(r.exitCode, 0, r.stderr);
-
-  // recipes/logs became symlinks into the profile; USER CONTENT is preserved.
-  assert.ok(path.isAbsolute(await readlink(path.join(proj, ".worm", "recipes"))), "recipes is now a symlink");
-  assert.equal(
-    await readFile(path.join(profile, "recipes", "sandbox", "Dockerfile"), "utf8"),
-    "OLD-EDIT\n",
-    "user edits moved into the profile, not clobbered"
-  );
-  assert.ok(path.isAbsolute(await readlink(path.join(proj, ".worm", "logs"))), "logs is now a symlink");
-  assert.equal(await readFile(path.join(profile, "logs", "old.log"), "utf8"), "x\n");
-  // Manifest migrated to the profile; the local copy is gone.
-  await stat(path.join(profile, ".managed-links.json"));
-  await assert.rejects(stat(path.join(proj, ".worm", ".managed-links.json")), /ENOENT/, "local manifest removed");
-  // Stale .worm/shared swept.
-  await assert.rejects(stat(path.join(proj, ".worm", "shared")), /ENOENT/, ".worm/shared removed");
 });
 
 test("shared_paths can pull a tail from a named external store; edits land in that repo", async (t) => {

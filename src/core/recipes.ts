@@ -124,15 +124,11 @@ export interface HookCommand {
 }
 export type HookContribution = Partial<Record<HookEvent, HookCommand[]>>;
 
-// worm's hook-entry markers, for idempotent (re)wiring. Inverted dispatch means
+// worm's hook-entry marker, for idempotent (re)wiring. Inverted dispatch means
 // settings.local.json holds ONE static entry per event — `node "<cli>" hook
-// trigger <event>` — recognised by DISPATCH_MARKER. The LEGACY markers match
-// wiring written by older versions (pre-live-once embedded `.worm/recipes/`
-// paths; live-once `WORM_RECIPE=` per-recipe commands) so a single `worm sync`
-// migrates a project forward without leaving duplicates. Drop them once every
-// install has synced once.
+// trigger <event>` — recognised by this marker, so re-wiring strips and re-adds
+// only worm's own entries.
 const DISPATCH_MARKER = "hook trigger ";
-const LEGACY_MARKERS = ["WORM_RECIPE=", "/.worm/recipes/"];
 
 /** The static settings command that routes an event back into worm. Referenced
  *  by absolute path so a PATH change can't silently disable the hooks. */
@@ -422,18 +418,14 @@ export async function runRecipeFilters(
   return null;
 }
 
-// worm recognises its own hook entries by the dispatcher marker (current) or a
-// legacy marker (older wiring being migrated). See the marker constants above.
+// worm recognises its own hook entries by the dispatcher marker (see above).
 function isWormManaged(entry: unknown): boolean {
   const hooks = (entry as { hooks?: unknown })?.hooks;
   return (
     Array.isArray(hooks) &&
     hooks.some((h) => {
       const cmd = (h as { command?: unknown })?.command;
-      return (
-        typeof cmd === "string" &&
-        (cmd.includes(DISPATCH_MARKER) || LEGACY_MARKERS.some((m) => cmd.includes(m)))
-      );
+      return typeof cmd === "string" && cmd.includes(DISPATCH_MARKER);
     })
   );
 }

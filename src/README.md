@@ -40,7 +40,7 @@ Domain primitives. Pure functions where possible; the only side effects are file
 | File | Owns |
 |---|---|
 | `paths.ts` | **Single source of truth** for every path. `globalRoot()` honours `WORM_HOME`. `siblingWorktreeDir`/`SLOT_DIR_INFIX` define the `<repo>-<N>` layout; `globalProject{Recipes,Logs}Dir` the durable profile state; `managedLinksFile(projectName)` the manifest (now in the profile). |
-| `layout.ts` | Consolidation: `ensureLocalLayout` makes `.worm/recipes` & `.worm/logs` symlinks into the profile (migrating old real dirs in place) and moves the manifest there; `removeLegacyShared` sweeps the old `.worm/shared`. Run on init/sync/universe-add. |
+| `layout.ts` | `ensureLocalLayout` makes `.worm/recipes` & `.worm/logs` symlinks into the profile (and gitignores generated logs). Run on init/sync/universe-add. |
 | `project.ts` | `findSlot0Root()` (via `git rev-parse --git-common-dir`) is the root resolver used by every command but `init`/`clone`, which use `gitToplevel()`. Retains a legacy `isBareCloneContainer` detector for a future `worm migrate`. |
 | `config.ts` | Load / save / validate `Config` via zod (`.strict()`, parsed as-is — no legacy normalization). |
 | `templates.ts` | Seed `~/.worm/templates/default/` and resolve a template (override → global default → built-in) into a `Config` + `scripts/`. |

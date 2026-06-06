@@ -10,7 +10,7 @@ import {
 } from "../core/links.js";
 import { applyRecipeWiring, materializeRecipes } from "../core/recipes.js";
 import { resolveStoreLinks } from "../core/stores.js";
-import { ensureLocalLayout, removeLegacyShared } from "../core/layout.js";
+import { ensureLocalLayout } from "../core/layout.js";
 import { loadGlobalConfig } from "../core/global-config.js";
 import {
   reconcileGlobalLinks,
@@ -70,7 +70,6 @@ export async function runSync(options: SyncOptions = {}): Promise<void> {
     if (!live.has(key)) delete manifest[key];
   }
   await writeManifest(projectName, manifest);
-  await removeLegacyShared(root); // sweep any stale .worm/shared after re-pointing
 
   // Materialize enabled recipes' artifacts (a no-op when none enabled; non-clobbering).
   const recipeFiles = await materializeRecipes(root, projectName, config.recipes);

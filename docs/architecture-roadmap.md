@@ -36,6 +36,12 @@ one hop) and `removeLegacyShared` sweeps the old `.worm/shared`. Net `.worm/`: `
 + `recipes` + `logs` (all symlinks) + `.gitignore`. `findSlot0Root` is unchanged (still keys off `.worm/`
 + the `config.json` pointer). Run on init / sync / universe add, idempotent.
 
+> **Cleanup (2026-06-06):** the one-shot migration scaffolding (moving an old project's real
+> `.worm/recipes`/`logs` into the profile, relocating a local manifest, `removeLegacyShared`, and the
+> transitional `WORM_RECIPE=` / `/.worm/recipes/` hook markers) was **removed** once the sole user's
+> projects had migrated — the old layout never shipped a release, so no future install will see it.
+> `ensureLocalLayout` now just establishes the symlinks; `isWormManaged` matches only `hook trigger`.
+
 **Decided (Q2):** keep `.worm/` for discoverability, but make it **almost entirely pointers** into the
 profile. Not "delete it," not "leave it" — thin it.
 

@@ -92,15 +92,6 @@ export function localConfigFile(projectRoot: string): string {
   return path.join(localRoot(projectRoot), CONFIG_FILE_NAME);
 }
 
-/**
- * Legacy local shared-tunnel dir (`.worm/shared/`). The two-hop indirection it
- * provided was dropped in the consolidation — slot links now point straight at
- * the profile. Retained only so migration can find and remove a stale one.
- */
-export function legacyLocalSharedDir(projectRoot: string): string {
-  return path.join(localRoot(projectRoot), SHARED_DIR_NAME);
-}
-
 export function localScriptsDir(projectRoot: string): string {
   return path.join(localRoot(projectRoot), SCRIPTS_DIR_NAME);
 }

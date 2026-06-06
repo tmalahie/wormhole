@@ -53,7 +53,7 @@ Keep that in mind when reviewing changes: a "clever" addition that breaks idempo
 
 ### Symlinks
 - Use `ensureSymlink()` from `src/core/symlinks.ts`. It's idempotent and refuses to clobber real files. Don't call `fs.symlink` directly.
-- Post-consolidation, `.worm/` is (almost) all pointers into the profile (`~/.worm/multiverses/<name>/`): `config.json`, `scripts`, `recipes`, and `logs` are symlinks; durable state (recipe artifacts, logs, the manifest) lives in the profile. `core/layout.ts:ensureLocalLayout` establishes this (and migrates an old project's real `.worm/recipes`/`logs` in place); it runs on init/sync/universe-add.
+- `.worm/` is (almost) all pointers into the profile (`~/.worm/multiverses/<name>/`): `config.json`, `scripts`, `recipes`, and `logs` are symlinks; durable state (recipe artifacts, logs, the manifest) lives in the profile. `core/layout.ts:ensureLocalLayout` establishes this; it runs on init/sync/universe-add.
 - Each slot's shared-path tunnels link **straight at the profile source** (`<slot>/<tail>` → `profile/<tail>`, **absolute** — the old `.worm/shared` two-hop is gone). All cross-repo links pass `{ relative: false }`.
 - Shared-path links are tracked in the **managed-link manifest**, now in the **profile** (`~/.worm/multiverses/<name>/.managed-links.json`), so `readManifest`/`writeManifest`/`reconcileSlotLinks` take the **project name** (not slot0Root). Reconcile/prune through `core/links.ts` so worm only ever touches links it created — never structural wiring or real user files. The prune is deref-guarded: a managed link that became a real file is left alone.
 

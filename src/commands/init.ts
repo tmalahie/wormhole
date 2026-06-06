@@ -38,7 +38,7 @@ import {
 } from "../core/templates.js";
 import { readManifest, reconcileSlotLinks, writeManifest } from "../core/links.js";
 import { resolveStoreLinks } from "../core/stores.js";
-import { ensureLocalLayout, removeLegacyShared } from "../core/layout.js";
+import { ensureLocalLayout } from "../core/layout.js";
 
 export interface InitOptions {
   name?: string;
@@ -117,12 +117,11 @@ export async function bindProject(
   await ensureGitExclude(projectRoot, "/.worm/");
 
   // Reconcile Slot 0's wormhole tunnels (links straight into the profile) and
-  // seed the manifest, then sweep any stale .worm/shared left by the old two-hop.
+  // seed the manifest.
   const manifest = await readManifest(projectName);
   const links = await resolveStoreLinks(config, projectName);
   await reconcileSlotLinks(projectRoot, links, manifest);
   await writeManifest(projectName, manifest);
-  await removeLegacyShared(projectRoot);
 
   // Materialize enabled recipes' artifacts (a no-op when none are enabled).
   const recipeFiles = await materializeRecipes(projectRoot, projectName, config.recipes);
