@@ -91,13 +91,24 @@ fresh, injects env, runs each enabled recipe's command for that event, and owns 
 So the dispatcher must:
 - (i) reference the worm binary by **absolute path**, not `PATH`, so a shell-env change can't silently
   disable the sandbox;
-- (ii) have **defined failure semantics** — the interceptor fails **safe** (deny + clear message),
-  session hooks fail **open**;
+- (ii) have **defined failure semantics** — dispatcher *infra* failures (can't resolve the project /
+  load config) **fail OPEN** and append to `.worm/logs/dispatch.log`, because a worm bug must not block
+  every command; the interceptor's own decision logic is unchanged (it already allows on malformed
+  input). Session hooks swallow errors (never block a session);
 - (iii) faithfully pass **stdin→stdout** for the interceptor (its stdout *is* the permission decision);
 - (iv) use a **minimal-load fast path** (don't boot the whole CLI on every Bash).
 
 The latency objection to wrapping the hot path was judged **premature**: tens of ms, optimizable, and
 dwarfed by the agent's per-command LLM round-trip. The update/uninstall cleanliness wins easily.
+
+**Status: SHIPPED 2026-06-06.** `worm hook trigger <event>` ([src/commands/hook.ts](../src/commands/hook.ts))
+is the dispatcher; recipes declare `hooks(ctx, cfg): HookContribution` (data), and
+[applyRecipeWiring](../src/core/recipes.ts) installs ONE static `node "<cli>" hook trigger <event>` entry
+per event. (i)/(ii)/(iii) are done; the `isWormManaged` substring logic shrank to a single
+`hook trigger` marker plus two transitional legacy markers for one-sync migration. **Not yet done:**
+(iv) the fast path — each hot-path call still boots the full CLI + does ~2 git calls; acceptable for now
+(dwarfed by the LLM loop) but the obvious next optimization. Recipes-as-shareable-data (§1/§2) is still
+future; today the recipe set is still the hardcoded built-in `REGISTRY`.
 
 ---
 

@@ -34,7 +34,9 @@ export async function createSandbox() {
         ...process.env,
         WORM_HOME: opts.wormHome ?? wormHome,
         HOME: opts.home ?? wormHome,
+        ...opts.env,
       },
+      input: opts.input,
       reject: false,
     });
   }

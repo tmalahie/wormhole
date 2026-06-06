@@ -9,25 +9,38 @@ import {
   writeJson,
   writeTextIfMissing,
 } from "../utils/fs.js";
+import { runShell } from "../utils/exec.js";
 import { logger } from "../utils/logger.js";
 import { ensureSymlink } from "./symlinks.js";
-import { globalProjectFile, localLogsDir, localRecipeDir, packagedRecipeScript } from "./paths.js";
+import { hookEnv } from "./hooks.js";
+import {
+  globalProjectFile,
+  localLogsDir,
+  localRecipeDir,
+  packagedRecipeScript,
+  wormCliEntry,
+} from "./paths.js";
 import type {
   RecipesConfig,
   SandboxRecipeConfig,
   ShareHistoryRecipeConfig,
   SyncPermissionsRecipeConfig,
+  UniverseSlot,
 } from "../types.js";
 
 /**
  * The recipe engine. A "recipe" is a composable capability (provider-style):
  * enabled iff its key is present in the project's `recipes` config. Each recipe
  * contributes (1) artifacts materialized under `.worm/recipes/<name>/` and
- * (2) per-slot Claude Code hook entries merged into each slot's
- * `.claude/settings.local.json`. The engine iterates the enabled set; recipes
- * compose because the settings merge namespaces each entry by a worm-owned
- * marker (see RECIPE_HOOK_MARKER), so re-running strips and re-adds only worm's
- * entries and never touches a user's own hooks.
+ * (2) hook commands run by the dispatcher.
+ *
+ * Hooks are INVERTED: a slot's `.claude/settings.local.json` holds ONE static
+ * entry per hook event — `node "<cli>" hook trigger <event>` — installed once.
+ * At trigger time the dispatcher (`runRecipeHooks` / `runRecipeFilters`, invoked
+ * by `worm hook trigger`) resolves the live slot, asks each enabled recipe for
+ * its commands for that event, injects env (the WORM_* vars + WORM_LOG_DIR), and
+ * owns logging. So enabling/disabling/updating a recipe is a pure config change —
+ * settings.local.json never churns, and identifiers can't go stale.
  *
  * Worm-OWNED code (the sandbox interceptor, the permission-sync script) is
  * config-independent and so lives ONCE in the package (see `packagedRecipeScript`)
@@ -42,7 +55,7 @@ export interface RecipeArtifact {
   executable?: boolean;
 }
 
-/** Claude hook-event name (PreToolUse / SessionStart / SessionEnd / …) → entries. */
+/** Claude hook-event key (PreToolUse / SessionStart / SessionEnd) → entries. */
 export type SettingsContribution = Record<string, unknown[]>;
 
 /** Minimal slot shape the wiring needs (UniverseSlot satisfies it). */
@@ -63,39 +76,65 @@ export interface Recipe<C = unknown> {
   select(recipes: RecipesConfig): C | undefined;
   /** Files to write under `.worm/recipes/<name>/`. */
   artifacts?(projectName: string, cfg: C): RecipeArtifact[];
-  /** Hook entries to merge into a slot's settings.local.json. */
-  wireSlot?(ctx: RecipeWireContext, cfg: C): SettingsContribution;
+  /** Hook commands this recipe contributes, by event. Computed lazily at trigger
+   *  time by the dispatcher (and probed at wiring time to decide which static
+   *  dispatcher entries to install). */
+  hooks?(ctx: RecipeWireContext, cfg: C): HookContribution;
   /** Imperative per-slot setup (idempotent), run when a slot is wired. */
   onSlotCreate?(ctx: RecipeWireContext, cfg: C): Promise<void>;
 }
 
-// --- hook-command markers ----------------------------------------------------
+// --- hook events & the dispatcher contract -----------------------------------
+
+/** worm's normalized hook events (mapped to the agent's settings keys below). */
+export type HookEvent = "pre-tool-use" | "session-start" | "session-end";
+
+interface HookEventMeta {
+  /** The Claude Code settings.local.json event key. */
+  claudeEvent: string;
+  /** Settings matcher (PreToolUse gates Bash); omitted → no matcher. */
+  matcher?: string;
+  /**
+   * Filter events read the tool input on stdin and emit a permission decision
+   * on stdout (PreToolUse). Run events are fire-and-log (Session*).
+   */
+  filter: boolean;
+}
+
+export const HOOK_EVENTS: Record<HookEvent, HookEventMeta> = {
+  "pre-tool-use": { claudeEvent: "PreToolUse", matcher: "Bash", filter: true },
+  "session-start": { claudeEvent: "SessionStart", filter: false },
+  "session-end": { claudeEvent: "SessionEnd", filter: false },
+};
 
 /**
- * Marker every worm-generated hook command carries (as an env assignment) so
- * the engine can find and replace ONLY its own entries on re-wiring, leaving a
- * user's own hooks untouched. The command now points at packaged code (not a
- * per-project `.worm/recipes/` path), so the path can no longer serve as the
- * marker — this explicit env var does.
+ * One command a recipe wants run for a hook event. The command is just the
+ * program + args — the DISPATCHER injects env (the WORM_* hook vars +
+ * WORM_LOG_DIR) and owns logging, so a recipe never bakes env or `>>` redirects
+ * into the string (baking them in is what let the old per-recipe wiring rot).
  */
-const RECIPE_HOOK_MARKER = "WORM_RECIPE=";
+export interface HookCommand {
+  command: string;
+  /** Log basename for run-events (defaults to the recipe name). Unused for
+   *  filter-events — their stdout IS the decision; they self-log. */
+  log?: string;
+}
+export type HookContribution = Partial<Record<HookEvent, HookCommand[]>>;
 
-/**
- * Transitional marker: the `.worm/recipes/` path that pre-live-once versions
- * embedded in their hook commands. Recognising it lets a single `worm sync`
- * migrate an existing project off the old wiring instead of leaving a duplicate
- * un-marked entry behind. Safe to drop once every install has synced once.
- */
-const LEGACY_HOOK_MARKER = "/.worm/recipes/";
+// worm's hook-entry markers, for idempotent (re)wiring. Inverted dispatch means
+// settings.local.json holds ONE static entry per event — `node "<cli>" hook
+// trigger <event>` — recognised by DISPATCH_MARKER. The LEGACY markers match
+// wiring written by older versions (pre-live-once embedded `.worm/recipes/`
+// paths; live-once `WORM_RECIPE=` per-recipe commands) so a single `worm sync`
+// migrates a project forward without leaving duplicates. Drop them once every
+// install has synced once.
+const DISPATCH_MARKER = "hook trigger ";
+const LEGACY_MARKERS = ["WORM_RECIPE=", "/.worm/recipes/"];
 
-/**
- * Env prefix stamped on a recipe's hook command: the marker (identifying the
- * recipe) plus, for the packaged node scripts, the log dir they append to.
- */
-function recipeEnv(recipe: string, logDir?: string): string {
-  const parts = [`WORM_RECIPE="${recipe}"`];
-  if (logDir) parts.push(`WORM_LOG_DIR="${logDir}"`);
-  return parts.join(" ");
+/** The static settings command that routes an event back into worm. Referenced
+ *  by absolute path so a PATH change can't silently disable the hooks. */
+function dispatchCommand(event: HookEvent): string {
+  return `node "${wormCliEntry()}" hook trigger ${event}`;
 }
 
 // --- the sandbox recipe (currently the only built-in) -----------------------
@@ -115,41 +154,41 @@ const sandboxRecipe: Recipe<SandboxRecipeConfig> = {
       },
     ];
   },
-  wireSlot({ slot0Root, projectName, slot }, cfg) {
+  hooks({ slot0Root, projectName, slot }, cfg) {
     const dir = localRecipeDir(slot0Root, "sandbox");
     const compose = path.join(dir, "compose.yml");
     const policy = path.join(dir, "sandbox-policy.json");
     // Code lives ONCE in the package; the per-project bits (container, compose,
-    // policy) are passed as args, so there's nothing to copy or keep in sync.
+    // policy) are computed here at trigger time and passed as args.
     const script = packagedRecipeScript("sandbox", "redirect-to-sandbox.js");
     const container = `${projectName}-${slot.name}-sandbox`;
     const project = `${projectName}-${slot.name}`;
-    const logDir = localLogsDir(slot0Root);
-    // The interceptor's stdout IS the permission decision, so it logs its own
-    // decisions to a file (via $WORM_LOG_DIR) rather than being output-redirected.
-    const log = path.join(logDir, `${container}.log`);
-    const intercept = `${recipeEnv("sandbox", logDir)} node "${script}" "${container}" "${compose}" "${policy}"`;
-    const block: SettingsContribution = {
-      PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: intercept }] }],
+    const out: HookContribution = {
+      // Filter: the interceptor reads the tool input on stdin and self-logs its
+      // decision to <container>-redirect.log (via WORM_LOG_DIR set by dispatch).
+      "pre-tool-use": [{ command: `node "${script}" "${container}" "${compose}" "${policy}"`, log: container }],
     };
     if (cfg.autostart) {
-      const up = `${recipeEnv("sandbox")} SANDBOX_DIR="${slot.path}" SANDBOX_CONTAINER="${container}" docker compose -p "${project}" -f "${compose}" up -d`;
-      block.SessionStart = [{ hooks: [{ type: "command", command: logged(up, log, "up") }] }];
+      out["session-start"] = [
+        {
+          command: `SANDBOX_DIR="${slot.path}" SANDBOX_CONTAINER="${container}" docker compose -p "${project}" -f "${compose}" up -d`,
+          log: container,
+        },
+      ];
     }
     if (cfg.autostop) {
-      const down = `${recipeEnv("sandbox")} docker compose -p "${project}" -f "${compose}" down`;
-      block.SessionEnd = [{ hooks: [{ type: "command", command: logged(down, log, "down") }] }];
+      out["session-end"] = [
+        { command: `docker compose -p "${project}" -f "${compose}" down`, log: container },
+      ];
     }
-    return block;
+    return out;
   },
 };
 
 /**
- * Wrap a hook command so its stdout+stderr append to `logFile` under a dated
- * banner. POSIX-sh only (`{ …; } >>file 2>&1`), so it runs under whatever shell
- * Claude invokes hooks with. `\n` survives to the generated JSON and printf
- * turns it into a real newline at run time. The log dir is created by
- * `materializeRecipes`, since the shell opens the `>>` redirect before the body.
+ * Wrap a run-event command so its stdout+stderr append to `logFile` under a
+ * dated banner. POSIX-sh only (`{ …; } >>file 2>&1`). Owned by the dispatcher
+ * (recipes never see this) — the ONE place that knows about hook logging.
  */
 function logged(command: string, logFile: string, label: string): string {
   return `{ printf '\\n=== %s ${label} ===\\n' "$(date '+%FT%T')"; ${command}; } >> "${logFile}" 2>&1`;
@@ -158,8 +197,8 @@ function logged(command: string, logFile: string, label: string): string {
 // --- the syncPermissions recipe ---------------------------------------------
 // Unions the `permissions` block of each slot's settings.local.json with a
 // canonical store shared across slots (so approving a command in one slot
-// teaches them all). It contributes SessionStart + SessionEnd hooks running a
-// merge-preserving script — only `permissions` is synced; `hooks` (e.g. the
+// teaches them all). It contributes session-start + session-end commands running
+// a merge-preserving script — only `permissions` is synced; `hooks` (e.g. the
 // sandbox recipe's) are left intact, which is what lets the two recipes share
 // the same settings.local.json.
 
@@ -168,25 +207,24 @@ const syncPermissionsRecipe: Recipe<SyncPermissionsRecipeConfig> = {
   select: (recipes) => recipes.syncPermissions,
   // No artifacts: the sync script is worm-owned code that lives ONCE in the
   // package (parameterized at run time), never copied into a project.
-  wireSlot({ slot0Root, projectName }) {
+  hooks({ projectName }) {
     const script = packagedRecipeScript("syncPermissions", "sync-claude-settings.js");
     // The canonical union store lives in the PERSISTENT global profile (in
     // ~/.worm — committed, shared across slots, surviving re-clones), NOT the
     // ephemeral local .worm/recipes/. It's also where a user's accumulated
     // allowlist already lives, so existing permissions are pulled in on first run.
     const canonical = globalProjectFile(projectName, path.join(".claude", "settings.local.json"));
-    const command = `${recipeEnv("syncPermissions", localLogsDir(slot0Root))} node "${script}" "${canonical}"`;
-    const entry = { hooks: [{ type: "command", command }] };
+    const command = `node "${script}" "${canonical}"`;
     // Same bidirectional sync on both boundaries: pull on start, push on end.
-    return { SessionStart: [entry], SessionEnd: [entry] };
+    return { "session-start": [{ command }], "session-end": [{ command }] };
   },
 };
 
 // --- the shareHistory recipe -------------------------------------------------
 // Symlinks each sibling slot's Claude history dir to Slot 0's canonical one, so
 // every slot shares one conversation history. Purely imperative (onSlotCreate)
-// — no artifacts, no settings hooks. (Lifts the `ln -sfn` block that used to
-// live in projects' setup.sh into a first-class recipe.)
+// — no artifacts, no hook commands. (Lifts the `ln -sfn` block that used to live
+// in projects' setup.sh into a first-class recipe.)
 
 /** Claude's project-history slug: the absolute path with `/` and `.` → `-`. */
 function claudeSlug(absPath: string): string {
@@ -243,8 +281,8 @@ export async function materializeRecipes(
 ): Promise<string[]> {
   const written: string[] = [];
   const enabled = enabledRecipes(recipes);
-  // Pre-create the log dir so the hooks' `>> .worm/logs/…` redirects don't fail
-  // (the shell opens the redirect before the command body runs).
+  // Pre-create the log dir so the dispatcher's `>> .worm/logs/…` redirects don't
+  // fail (the shell opens the redirect before the command body runs).
   if (enabled.length > 0) await ensureDir(localLogsDir(slot0Root));
   for (const { recipe, cfg } of enabled) {
     const artifacts = recipe.artifacts?.(projectName, cfg) ?? [];
@@ -262,9 +300,15 @@ export async function materializeRecipes(
   return written;
 }
 
-// --- per-slot Claude Code hook wiring (.claude/settings.local.json) ----------
+// --- per-slot hook wiring (installs the static dispatcher entries) -----------
 
-/** Install (or, when no recipes are enabled, strip) recipe hooks for one slot. */
+/**
+ * Install the dispatcher entries for one slot. Probes which events have at least
+ * one enabled-recipe command, then writes ONE static `worm hook trigger <event>`
+ * entry per such event into the slot's settings.local.json — the actual commands
+ * are NOT baked in; they're recomputed at trigger time. Also runs each recipe's
+ * imperative `onSlotCreate`. Returns whether the file changed.
+ */
 export async function applyRecipeWiring(
   slot0Root: string,
   projectName: string,
@@ -272,16 +316,26 @@ export async function applyRecipeWiring(
   recipes: RecipesConfig
 ): Promise<boolean> {
   const ctx: RecipeWireContext = { slot0Root, projectName, slot };
-  const install: SettingsContribution = {};
+  const events = new Set<HookEvent>();
   for (const { recipe, cfg } of enabledRecipes(recipes)) {
     // Imperative per-slot setup (e.g. shareHistory's symlink) runs first.
     if (recipe.onSlotCreate) await recipe.onSlotCreate(ctx, cfg);
-    const contribution = recipe.wireSlot?.(ctx, cfg);
+    const contribution = recipe.hooks?.(ctx, cfg);
     if (!contribution) continue;
-    for (const [event, entries] of Object.entries(contribution)) {
-      if (!entries || entries.length === 0) continue;
-      (install[event] ??= []).push(...entries);
+    for (const [event, cmds] of Object.entries(contribution) as Array<
+      [HookEvent, HookCommand[] | undefined]
+    >) {
+      if (cmds && cmds.length > 0) events.add(event);
     }
+  }
+  const install: SettingsContribution = {};
+  for (const event of events) {
+    const meta = HOOK_EVENTS[event];
+    const entry: Record<string, unknown> = {
+      hooks: [{ type: "command", command: dispatchCommand(event) }],
+    };
+    if (meta.matcher) entry.matcher = meta.matcher;
+    (install[meta.claudeEvent] ??= []).push(entry);
   }
   return writeSlotHooks(slot.path, install);
 }
@@ -291,9 +345,82 @@ export async function stripRecipeWiring(slotPath: string): Promise<boolean> {
   return writeSlotHooks(slotPath, {});
 }
 
-// worm recognises its own hook entries two ways: the canonical WORM_RECIPE= env
-// marker stamped on every command it writes now, and — transitionally — the
-// legacy `.worm/recipes/` path embedded by pre-live-once versions.
+// --- the dispatcher (invoked by `worm hook trigger <event>`) -----------------
+
+export interface DispatchContext {
+  slot0Root: string;
+  projectName: string;
+  slot: UniverseSlot;
+  branch: string;
+}
+
+/** The WORM_* + log env the dispatcher injects when running a recipe's command,
+ *  so the command string itself stays clean (no baked-in env). */
+function dispatchEnv(ctx: DispatchContext, recipe: string, logDir: string): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    ...hookEnv(ctx.slot0Root, ctx.slot, ctx.branch),
+    WORM_LOG_DIR: logDir,
+    WORM_RECIPE: recipe,
+  };
+}
+
+function wireContext(ctx: DispatchContext): RecipeWireContext {
+  return { slot0Root: ctx.slot0Root, projectName: ctx.projectName, slot: ctx.slot };
+}
+
+/**
+ * Run every enabled recipe's RUN-event commands (session-start/-end) for
+ * `event`, each with its output captured to `.worm/logs/<log>.log` under a dated
+ * banner. Fire-and-log: one recipe's failure never aborts the others.
+ */
+export async function runRecipeHooks(
+  ctx: DispatchContext,
+  recipes: RecipesConfig,
+  event: HookEvent
+): Promise<void> {
+  const logDir = localLogsDir(ctx.slot0Root);
+  await ensureDir(logDir);
+  for (const { recipe, cfg } of enabledRecipes(recipes)) {
+    const cmds = recipe.hooks?.(wireContext(ctx), cfg)?.[event] ?? [];
+    for (const hc of cmds) {
+      const logFile = path.join(logDir, `${hc.log ?? recipe.name}.log`);
+      await runShell(logged(hc.command, logFile, event), {
+        cwd: ctx.slot.path,
+        env: dispatchEnv(ctx, recipe.name, logDir),
+      });
+    }
+  }
+}
+
+/**
+ * Run every enabled recipe's FILTER-event commands (pre-tool-use) against the
+ * tool input on stdin, returning the first `deny` decision (verbatim, to be
+ * written to stdout) or null to allow. Each filter self-logs via WORM_LOG_DIR.
+ */
+export async function runRecipeFilters(
+  ctx: DispatchContext,
+  recipes: RecipesConfig,
+  event: HookEvent,
+  input: string
+): Promise<string | null> {
+  const logDir = localLogsDir(ctx.slot0Root);
+  for (const { recipe, cfg } of enabledRecipes(recipes)) {
+    const cmds = recipe.hooks?.(wireContext(ctx), cfg)?.[event] ?? [];
+    for (const hc of cmds) {
+      const res = await runShell(hc.command, {
+        cwd: ctx.slot.path,
+        env: dispatchEnv(ctx, recipe.name, logDir),
+        input,
+      });
+      if (res.stdout.includes('"permissionDecision":"deny"')) return res.stdout;
+    }
+  }
+  return null;
+}
+
+// worm recognises its own hook entries by the dispatcher marker (current) or a
+// legacy marker (older wiring being migrated). See the marker constants above.
 function isWormManaged(entry: unknown): boolean {
   const hooks = (entry as { hooks?: unknown })?.hooks;
   return (
@@ -302,7 +429,7 @@ function isWormManaged(entry: unknown): boolean {
       const cmd = (h as { command?: unknown })?.command;
       return (
         typeof cmd === "string" &&
-        (cmd.includes(RECIPE_HOOK_MARKER) || cmd.includes(LEGACY_HOOK_MARKER))
+        (cmd.includes(DISPATCH_MARKER) || LEGACY_MARKERS.some((m) => cmd.includes(m)))
       );
     })
   );
@@ -311,10 +438,10 @@ function isWormManaged(entry: unknown): boolean {
 /**
  * Merge `install` into a slot's `.claude/settings.local.json` (gitignored by
  * convention, so worm never dirties a tracked repo). worm owns only the hook
- * entries it recognises — their commands carry the `WORM_RECIPE=` marker — so on
- * each run it strips its previous entries and re-adds `install`, leaving every
- * other hook and key (and other recipes' entries) intact. Pass an empty
- * `install` to strip. Idempotent. Returns whether the file changed.
+ * entries it recognises (see `isWormManaged`) — so on each run it strips its
+ * previous entries and re-adds `install`, leaving every other hook and key
+ * intact. Pass an empty `install` to strip. Idempotent. Returns whether the
+ * file changed.
  */
 async function writeSlotHooks(
   slotPath: string,

@@ -142,8 +142,12 @@ the symlinks you currently make by hand: `~/.claude/{commands,skills,scheduled-t
    **Follow-up:** existing projects keep orphaned stale copies under `.worm/recipes/{sandbox,syncPermissions}/`
    — harmless (nothing references them) but a `worm sync` could prune worm-owned (un-edited) recipe
    artifacts. Not auto-deleted yet (user-owned-after-generation guard).
-2. **Inverted dispatcher** (recipes-roadmap spine). Removes `settings.local.json` churn and the
-   `isWormManaged` substring fragility; unblocks clean enable/disable/update.
+2. **✅ DONE (2026-06-06) — inverted dispatcher** (recipes-roadmap spine). `settings.local.json` now
+   holds ONE static `node "<cli>" hook trigger <event>` entry per event; recipes declare their commands
+   as data (`Recipe.hooks`), and the dispatcher ([src/commands/hook.ts](../src/commands/hook.ts))
+   resolves the live slot, injects env, owns logging, and forwards the interceptor's decision.
+   Enable/disable/update is now a pure `config.json` edit. **Follow-up:** the hot-path fast path
+   (recipes-roadmap spine (iv)) — each `pre-tool-use` still boots the full CLI; fine for now, optimize later.
 3. **Consolidate `.worm/`** (Decision 1) — mostly mechanical once code lives once.
 4. **Named stores (Decision 2) + global scope (Decision 3)** — the linking-layer generalization. These
    are **independent of recipes** and can proceed in parallel with 1–3.

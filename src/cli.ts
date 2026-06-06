@@ -12,6 +12,7 @@ import { runCompletion } from "./commands/completion.js";
 import { runSync } from "./commands/sync.js";
 import { runSwitch } from "./commands/switch.js";
 import { runUniverseAdd, runUniverseRemove } from "./commands/universe.js";
+import { runHookTrigger } from "./commands/hook.js";
 
 const program = new Command();
 
@@ -127,6 +128,17 @@ program
   .description("Print a tab-completion script for the given shell (bash | zsh). Source via `eval \"$(worm completion zsh)\"`.")
   .action((shell: string) => {
     runCompletion(shell);
+  });
+
+const hook = program
+  .command("hook")
+  .description("Internal: worm's recipe-hook dispatcher (invoked by a slot's settings.local.json).");
+
+hook
+  .command("trigger <event>")
+  .description("Run enabled recipes' hooks for <event> (pre-tool-use | session-start | session-end).")
+  .action(async (event: string) => {
+    await runHookTrigger(event);
   });
 
 program

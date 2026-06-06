@@ -226,7 +226,7 @@ test("recipes: empty provisions nothing; sandbox generates Dockerfile + compose"
   assert.doesNotMatch(compose, /\/Users\//, "no hardcoded home path leaks into the generated compose");
 });
 
-test("sandbox wiring writes idempotent per-slot hooks into settings.local.json", async (t) => {
+test("sandbox wiring installs the static dispatcher entry; container is computed fresh per slot", async (t) => {
   const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
   t.after(() => rm(templateDir, { recursive: true, force: true }));
   await writeFile(
@@ -239,45 +239,54 @@ test("sandbox wiring writes idempotent per-slot hooks into settings.local.json",
   await createBranch(sb.projectRoot, "feature-a");
   await sb.worm(["init", "--template", templateDir]);
 
-  const name = path.basename(sb.projectRoot);
+  const name = path.basename(await realpath(sb.projectRoot));
   const sandboxDir = path.join(sb.projectRoot, ".worm", "recipes", "sandbox");
   const readLocal = async (dir) =>
     JSON.parse(await readFile(path.join(dir, ".claude", "settings.local.json"), "utf8"));
 
-  // Policy is materialized per project; the interceptor itself is worm-owned
-  // code that ships with the binary (live-once), NOT copied into the project.
-  await assert.rejects(
-    stat(path.join(sandboxDir, "redirect-to-sandbox.js")),
-    /ENOENT/,
-    "interceptor code must not be copied into the project"
-  );
-  const interceptor = path.join(PACKAGED_RECIPES, "sandbox", "redirect-to-sandbox.js");
-  const check = await execa("node", ["--check", interceptor], { reject: false });
-  assert.equal(check.exitCode, 0, `packaged interceptor must be valid JS:\n${check.stderr}`);
+  // Policy materialized; interceptor code is live-once (not copied) — from inc1.
+  await assert.rejects(stat(path.join(sandboxDir, "redirect-to-sandbox.js")), /ENOENT/);
   const policy = JSON.parse(await readFile(path.join(sandboxDir, "sandbox-policy.json"), "utf8"));
   assert.ok(Array.isArray(policy.neverSandbox));
 
-  // Slot 0 wired in settings.local.json (the gitignored target).
+  // settings.local.json holds ONE static dispatcher entry per event — no
+  // per-recipe command, no container name baked in (that's computed at trigger).
   const s0 = await readLocal(sb.projectRoot);
   assert.equal(s0.hooks.PreToolUse.length, 1);
   assert.equal(s0.hooks.PreToolUse[0].matcher, "Bash");
-  assert.match(s0.hooks.PreToolUse[0].hooks[0].command, new RegExp(`${escapeRegex(name)}-main-sandbox`));
-  assert.match(s0.hooks.PreToolUse[0].hooks[0].command, /redirect-to-sandbox\.js/);
-  assert.ok(Array.isArray(s0.hooks.SessionStart), "autostart default → SessionStart present");
+  assert.match(s0.hooks.PreToolUse[0].hooks[0].command, /hook trigger pre-tool-use/);
+  assert.doesNotMatch(
+    s0.hooks.PreToolUse[0].hooks[0].command,
+    /sandbox|redirect-to-sandbox/,
+    "no per-recipe detail leaks into settings"
+  );
+  assert.match(s0.hooks.SessionStart[0].hooks[0].command, /hook trigger session-start/);
 
-  // A new universe gets its own container name in its own settings.local.json.
+  // The container name is produced at TRIGGER time: deny a destructive command
+  // and read it from the interceptor's decision. Slot 0 → <name>-main-sandbox.
+  const denyIn = JSON.stringify({ tool_input: { command: "rm -rf /tmp/zzz" } });
+  const d0 = await sb.worm(["hook", "trigger", "pre-tool-use"], { input: denyIn });
+  assert.match(d0.stdout, /"permissionDecision":"deny"/);
+  assert.match(d0.stdout, new RegExp(`${escapeRegex(name)}-main-sandbox`));
+
+  // A sibling slot computes its OWN container name from the SAME dispatcher entry.
   await sb.worm(["universe", "add", "feature-a", "--skip-hook"]);
   const root = await realpath(sb.projectRoot);
   const s1 = await readLocal(siblingPath(root, 1));
-  assert.match(s1.hooks.PreToolUse[0].hooks[0].command, new RegExp(`${escapeRegex(name)}-1-sandbox`));
+  assert.match(s1.hooks.PreToolUse[0].hooks[0].command, /hook trigger pre-tool-use/);
+  const d1 = await sb.worm(["hook", "trigger", "pre-tool-use"], {
+    cwd: siblingPath(root, 1),
+    input: denyIn,
+  });
+  assert.match(d1.stdout, new RegExp(`${escapeRegex(name)}-1-sandbox`));
 
-  // Idempotent: a re-sync must not duplicate Slot 0's hook entry.
+  // Idempotent: a re-sync must not duplicate the dispatcher entry.
   await sb.worm(["sync"]);
   const s0b = await readLocal(sb.projectRoot);
-  assert.equal(s0b.hooks.PreToolUse.length, 1, "re-sync must not duplicate worm hooks");
+  assert.equal(s0b.hooks.PreToolUse.length, 1, "re-sync must not duplicate the dispatcher entry");
 });
 
-test("syncPermissions recipe wires session hooks and a valid merge script", async (t) => {
+test("syncPermissions wires session dispatcher entries and runs through the dispatcher", async (t) => {
   const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
   t.after(() => rm(templateDir, { recursive: true, force: true }));
   await writeFile(
@@ -288,35 +297,42 @@ test("syncPermissions recipe wires session hooks and a valid merge script", asyn
   t.after(() => sb.cleanup());
   await sb.worm(["init", "--template", templateDir]);
 
-  // The sync script ships with the binary (live-once), not materialized here.
-  await assert.rejects(
-    stat(path.join(sb.projectRoot, ".worm", "recipes", "syncPermissions")),
-    /ENOENT/,
-    "sync script must not be copied into the project"
-  );
-  const script = path.join(PACKAGED_RECIPES, "syncPermissions", "sync-claude-settings.js");
-  const check = await execa("node", ["--check", script], { reject: false });
-  assert.equal(check.exitCode, 0, `packaged sync script must be valid JS:\n${check.stderr}`);
-
+  // No artifacts dir, and settings hold the static session dispatcher entries —
+  // no per-recipe command, no canonical path baked in (computed at trigger).
+  await assert.rejects(stat(path.join(sb.projectRoot, ".worm", "recipes", "syncPermissions")), /ENOENT/);
   const s0 = JSON.parse(
     await readFile(path.join(sb.projectRoot, ".claude", "settings.local.json"), "utf8")
   );
   assert.equal(s0.hooks.SessionStart.length, 1);
-  const cmd = s0.hooks.SessionStart[0].hooks[0].command;
-  assert.match(cmd, /sync-claude-settings\.js/);
+  assert.match(s0.hooks.SessionStart[0].hooks[0].command, /hook trigger session-start/);
   assert.equal(s0.hooks.SessionEnd.length, 1);
-  assert.match(s0.hooks.SessionEnd[0].hooks[0].command, /sync-claude-settings\.js/);
+  assert.match(s0.hooks.SessionEnd[0].hooks[0].command, /hook trigger session-end/);
+  assert.ok(!s0.hooks.PreToolUse, "syncPermissions contributes no filter (PreToolUse) entry");
 
-  // Canonical store is the PERSISTENT global profile (committed in ~/.worm),
-  // not the ephemeral local .worm/recipes/ — so existing allowlists are pulled in.
+  // Triggering session-start through the dispatcher unions the slot's permissions
+  // with the canonical global-profile store (hermetic — pure node, no docker).
   const canonical = path.join(
-    sb.wormHome, "multiverses", path.basename(sb.projectRoot), ".claude", "settings.local.json"
+    sb.wormHome, "multiverses", path.basename(await realpath(sb.projectRoot)), ".claude", "settings.local.json"
   );
-  assert.ok(cmd.includes(`"${canonical}"`), `canonical must be the global profile file:\n${cmd}`);
-  assert.doesNotMatch(cmd, /recipes\/syncPermissions\/permissions\.json/);
+  await mkdir(path.dirname(canonical), { recursive: true });
+  await writeFile(canonical, JSON.stringify({ permissions: { allow: ["Bash(ls:*)"] } }));
+  const localFile = path.join(sb.projectRoot, ".claude", "settings.local.json");
+  const cur = JSON.parse(await readFile(localFile, "utf8"));
+  cur.permissions = { allow: ["Bash(git status:*)"] };
+  await writeFile(localFile, JSON.stringify(cur));
+
+  await sb.worm(["hook", "trigger", "session-start"]);
+
+  const merged = JSON.parse(await readFile(localFile, "utf8"));
+  assert.deepEqual(
+    new Set(merged.permissions.allow),
+    new Set(["Bash(ls:*)", "Bash(git status:*)"]),
+    "dispatcher ran syncPermissions: slot ∪ canonical"
+  );
+  assert.ok(merged.hooks.SessionStart, "the dispatcher entry itself is left intact");
 });
 
-test("recipes compose: sandbox + syncPermissions share settings.local.json", async (t) => {
+test("recipes compose: sandbox + syncPermissions share ONE dispatcher entry per event", async (t) => {
   const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
   t.after(() => rm(templateDir, { recursive: true, force: true }));
   await writeFile(
@@ -331,22 +347,19 @@ test("recipes compose: sandbox + syncPermissions share settings.local.json", asy
     JSON.parse(await readFile(path.join(sb.projectRoot, ".claude", "settings.local.json"), "utf8"));
 
   const s0 = await readLocal();
-  // PreToolUse: sandbox only.
-  assert.equal(s0.hooks.PreToolUse.length, 1);
-  assert.match(s0.hooks.PreToolUse[0].hooks[0].command, /redirect-to-sandbox\.js/);
-  // SessionStart: BOTH recipes coexist (container up + permission sync).
-  assert.equal(s0.hooks.SessionStart.length, 2, "both recipes contribute SessionStart");
-  const startCmds = s0.hooks.SessionStart.map((e) => e.hooks[0].command).join("\n");
-  assert.match(startCmds, /docker compose .* up -d/);
-  assert.match(startCmds, /sync-claude-settings\.js/);
-  // SessionEnd: syncPermissions (autostop default off → no sandbox down).
+  // Inversion: a SINGLE static entry per event, regardless of how many recipes
+  // contribute. session-start routes to BOTH recipes at trigger time.
+  assert.equal(s0.hooks.PreToolUse.length, 1, "one filter dispatcher (sandbox)");
+  assert.match(s0.hooks.PreToolUse[0].hooks[0].command, /hook trigger pre-tool-use/);
+  assert.equal(s0.hooks.SessionStart.length, 1, "single dispatcher entry, not one per recipe");
+  assert.match(s0.hooks.SessionStart[0].hooks[0].command, /hook trigger session-start/);
   assert.equal(s0.hooks.SessionEnd.length, 1);
-  assert.match(s0.hooks.SessionEnd[0].hooks[0].command, /sync-claude-settings\.js/);
+  assert.match(s0.hooks.SessionEnd[0].hooks[0].command, /hook trigger session-end/);
 
-  // Idempotent: re-sync must not duplicate either recipe's entries.
+  // Idempotent: re-sync must not duplicate the dispatcher entries.
   await sb.worm(["sync"]);
   const s0b = await readLocal();
-  assert.equal(s0b.hooks.SessionStart.length, 2, "re-sync must not duplicate");
+  assert.equal(s0b.hooks.SessionStart.length, 1, "re-sync must not duplicate");
   assert.equal(s0b.hooks.PreToolUse.length, 1);
 });
 
@@ -361,11 +374,12 @@ test("upgrade: legacy .worm/recipes hooks are replaced, not duplicated, on re-sy
   t.after(() => sb.cleanup());
   await sb.worm(["init", "--template", templateDir]);
 
-  // Simulate a project wired by a PRE-live-once worm: a PreToolUse entry that
-  // points at a local .worm/recipes/ script and carries NO WORM_RECIPE= marker,
-  // alongside a user's own hook that must survive.
+  // Seed BOTH older wiring formats — pre-live-once (embedded .worm/recipes/ path)
+  // and inc1 live-once (WORM_RECIPE= marker) — plus a user's own hook that must
+  // survive. One `worm sync` should migrate both to the single dispatcher entry.
   const localFile = path.join(sb.projectRoot, ".claude", "settings.local.json");
-  const legacyCmd = `node "${sb.projectRoot}/.worm/recipes/sandbox/redirect-to-sandbox.js" "c" "x"`;
+  const preLiveOnce = `node "${sb.projectRoot}/.worm/recipes/sandbox/redirect-to-sandbox.js" "c" "x"`;
+  const inc1 = `WORM_RECIPE="sandbox" WORM_LOG_DIR="/x" node "/pkg/redirect.js" "c" "y" "z"`;
   await mkdir(path.dirname(localFile), { recursive: true });
   await writeFile(
     localFile,
@@ -373,7 +387,8 @@ test("upgrade: legacy .worm/recipes hooks are replaced, not duplicated, on re-sy
       hooks: {
         PreToolUse: [
           { matcher: "Bash", hooks: [{ type: "command", command: "echo keep-me" }] },
-          { matcher: "Bash", hooks: [{ type: "command", command: legacyCmd }] },
+          { matcher: "Bash", hooks: [{ type: "command", command: preLiveOnce }] },
+          { matcher: "Bash", hooks: [{ type: "command", command: inc1 }] },
         ],
       },
     })
@@ -386,14 +401,15 @@ test("upgrade: legacy .worm/recipes hooks are replaced, not duplicated, on re-sy
   assert.ok(cmds.includes("echo keep-me"), "user's own hook is preserved");
   assert.ok(
     !cmds.some((c) => c.includes(".worm/recipes/sandbox/redirect-to-sandbox.js")),
-    "legacy worm entry is removed, not left as a duplicate"
+    "pre-live-once entry removed"
   );
+  assert.ok(!cmds.some((c) => c.includes("WORM_RECIPE=")), "inc1 entry removed");
   assert.equal(
-    cmds.filter((c) => c.includes("WORM_RECIPE=")).length,
+    cmds.filter((c) => c.includes("hook trigger")).length,
     1,
-    "exactly one new-style worm interceptor after migration"
+    "exactly one dispatcher entry after migration"
   );
-  assert.equal(s0.hooks.PreToolUse.length, 2, "user hook + one worm hook");
+  assert.equal(s0.hooks.PreToolUse.length, 2, "user hook + one dispatcher entry");
 });
 
 test("syncPermissions script unions permissions while preserving other keys", async (t) => {
@@ -504,12 +520,18 @@ test("shareHistory refuses to clobber a real history dir", async (t) => {
   assert.match(r.stderr + r.stdout, /real history dir/);
 });
 
-test("recipe hooks log to .worm/logs", async (t) => {
+test("the dispatcher logs recipe hooks under .worm/logs", async (t) => {
   const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
   t.after(() => rm(templateDir, { recursive: true, force: true }));
+  // autostart off so triggering session-start never spawns docker — the run-hook
+  // logging is exercised by syncPermissions (pure node) instead.
   await writeFile(
     path.join(templateDir, "config.json"),
-    JSON.stringify({ shared_paths: [], hooks: {}, recipes: { sandbox: {} } })
+    JSON.stringify({
+      shared_paths: [],
+      hooks: {},
+      recipes: { sandbox: { autostart: false }, syncPermissions: {} },
+    })
   );
   const sb = await createSandbox();
   t.after(() => sb.cleanup());
@@ -520,36 +542,22 @@ test("recipe hooks log to .worm/logs", async (t) => {
   const container = `${name}-main-sandbox`;
   const logsDir = path.join(root, ".worm", "logs");
 
-  // init pre-creates the log dir so the docker `>>` redirect can't fail at runtime.
+  // init pre-creates the log dir so the dispatcher's `>>` redirect can't fail.
   assert.equal((await stat(logsDir)).isDirectory(), true);
 
-  // SessionStart redirects docker output to a per-container log file.
-  const s0 = JSON.parse(
-    await readFile(path.join(root, ".claude", "settings.local.json"), "utf8")
-  );
-  const startCmd = s0.hooks.SessionStart[0].hooks[0].command;
-  assert.match(startCmd, /docker compose .* up -d/);
-  assert.ok(
-    startCmd.includes(`>> "${path.join(logsDir, `${container}.log`)}" 2>&1`),
-    `SessionStart must redirect to the container log:\n${startCmd}`
-  );
-
-  // The interceptor (worm-owned, packaged) records its decisions under
-  // $WORM_LOG_DIR — which the generated PreToolUse command points at .worm/logs.
-  const preCmd = s0.hooks.PreToolUse[0].hooks[0].command;
-  assert.ok(
-    preCmd.includes(`WORM_LOG_DIR="${logsDir}"`),
-    `PreToolUse must set WORM_LOG_DIR to .worm/logs:\n${preCmd}`
-  );
-  const interceptor = path.join(PACKAGED_RECIPES, "sandbox", "redirect-to-sandbox.js");
-  const policyFile = path.join(root, ".worm", "recipes", "sandbox", "sandbox-policy.json");
-  await execa("node", [interceptor, container, "/x/compose.yml", policyFile], {
+  // Filter event: the dispatcher sets $WORM_LOG_DIR, so the interceptor self-logs
+  // its DENY decision to <container>-redirect.log (pure node, hermetic).
+  await sb.worm(["hook", "trigger", "pre-tool-use"], {
     input: JSON.stringify({ tool_input: { command: "rm -rf /tmp/zzz" } }),
-    env: { ...process.env, WORM_LOG_DIR: logsDir },
-    reject: false,
   });
   const redirectLog = await readFile(path.join(logsDir, `${container}-redirect.log`), "utf8");
   assert.match(redirectLog, /DENY .*rm -rf \/tmp\/zzz/);
+
+  // Run event: the dispatcher captures the command's output under a dated banner
+  // to <recipe>.log — present regardless of what the command does.
+  await sb.worm(["hook", "trigger", "session-start"]);
+  const sessionLog = await readFile(path.join(logsDir, "syncPermissions.log"), "utf8");
+  assert.match(sessionLog, /=== .* session-start ===/);
 });
 
 test("sandbox interceptor: node code runs are sandboxed; npm and node --check are not", async (t) => {
