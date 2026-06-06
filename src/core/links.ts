@@ -1,7 +1,15 @@
 import path from "node:path";
 import { ensureSymlink } from "./symlinks.js";
-import { localSharedFile, managedLinksFile } from "./paths.js";
-import { fs, isSymlink, pathExists, readJson, writeJson } from "../utils/fs.js";
+import { globalProjectFile, managedLinksFile } from "./paths.js";
+import {
+  ensureDir,
+  fs,
+  isSymlink,
+  pathExists,
+  readJson,
+  writeJson,
+  writeTextIfMissing,
+} from "../utils/fs.js";
 
 /** Map of resolved slot path → relative link paths worm created in that slot. */
 export type LinkManifest = Record<string, string[]>;
@@ -13,8 +21,8 @@ export interface ReconcileResult {
   skipped: string[];
 }
 
-export async function readManifest(slot0Root: string): Promise<LinkManifest> {
-  const file = managedLinksFile(slot0Root);
+export async function readManifest(projectName: string): Promise<LinkManifest> {
+  const file = managedLinksFile(projectName);
   if (!(await pathExists(file))) return {};
   try {
     return (await readJson<LinkManifest>(file)) ?? {};
@@ -24,20 +32,22 @@ export async function readManifest(slot0Root: string): Promise<LinkManifest> {
 }
 
 export async function writeManifest(
-  slot0Root: string,
+  projectName: string,
   manifest: LinkManifest
 ): Promise<void> {
-  await writeJson(managedLinksFile(slot0Root), manifest);
+  await writeJson(managedLinksFile(projectName), manifest);
 }
 
 /**
  * Reconcile one slot's wormhole tunnels (shared_paths) against `desired`,
- * mutating `manifest` in place. Creates missing links, prunes links it
- * previously managed that are no longer desired, and refuses to touch a path
+ * mutating `manifest` in place. Each tail is linked DIRECTLY at the profile
+ * source (`~/.worm/multiverses/<name>/<rel>`, absolute — the `.worm/shared`
+ * two-hop is gone), sprouting an empty profile source when missing. Prunes links
+ * it previously managed that are no longer desired, and refuses to touch a path
  * that has become a real file. The caller persists the manifest.
  */
 export async function reconcileSlotLinks(
-  slot0Root: string,
+  projectName: string,
   slotPath: string,
   desired: string[],
   manifest: LinkManifest
@@ -49,9 +59,14 @@ export async function reconcileSlotLinks(
   const skipped: string[] = [];
 
   for (const rel of desired) {
+    const target = globalProjectFile(projectName, rel);
+    // Sprout an empty profile source so the slot link never dangles.
+    if (!(await pathExists(target))) {
+      await ensureDir(path.dirname(target));
+      await writeTextIfMissing(target, "");
+    }
     const linkPath = path.join(slotPath, rel);
-    const target = localSharedFile(slot0Root, rel);
-    const res = await ensureSymlink(linkPath, target, { relative: true });
+    const res = await ensureSymlink(linkPath, target, { relative: false });
     if (res.created) created.push(rel);
   }
 

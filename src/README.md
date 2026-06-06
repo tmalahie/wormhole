@@ -11,7 +11,7 @@ cli.ts
 
 ## The model in one paragraph
 
-A worm project is a **normal git clone**. **Slot 0 is the primary working tree itself** (`~/git/<repo>/`, never renamed). Extra slots are permanent sibling worktrees at `~/git/<repo>-<N>`, added on demand. The pool is **emergent** — it's whatever `git worktree list` reports, not a fixed count. There is no bare container and no spawn/teardown: you `git switch` branches in place. The `.worm/` directory at Slot 0 holds the local wiring (a symlink to the global profile, the seeded `scripts/`, shared "tunnel" files, and the managed-link manifest).
+A worm project is a **normal git clone**. **Slot 0 is the primary working tree itself** (`~/git/<repo>/`, never renamed). Extra slots are permanent sibling worktrees at `~/git/<repo>-<N>`, added on demand. The pool is **emergent** — it's whatever `git worktree list` reports, not a fixed count. There is no bare container and no spawn/teardown: you `git switch` branches in place. The `.worm/` directory at Slot 0 is (almost) all **pointers into the profile** (`~/.worm/multiverses/<name>/`): `config.json`, `scripts`, `recipes`, and `logs` are symlinks, plus a local `.gitignore`. The durable per-project state (recipe artifacts, logs, the managed-link manifest) lives in the profile and survives a slot-0 reclone.
 
 ## Layers
 
@@ -38,13 +38,14 @@ Domain primitives. Pure functions where possible; the only side effects are file
 
 | File | Owns |
 |---|---|
-| `paths.ts` | **Single source of truth** for every path. `globalRoot()` honours `WORM_HOME`. `siblingWorktreeDir`/`SLOT_DIR_INFIX` define the `<repo>-<N>` layout; `managedLinksFile` the manifest location. |
+| `paths.ts` | **Single source of truth** for every path. `globalRoot()` honours `WORM_HOME`. `siblingWorktreeDir`/`SLOT_DIR_INFIX` define the `<repo>-<N>` layout; `globalProject{Recipes,Logs}Dir` the durable profile state; `managedLinksFile(projectName)` the manifest (now in the profile). |
+| `layout.ts` | Consolidation: `ensureLocalLayout` makes `.worm/recipes` & `.worm/logs` symlinks into the profile (migrating old real dirs in place) and moves the manifest there; `removeLegacyShared` sweeps the old `.worm/shared`. Run on init/sync/universe-add. |
 | `project.ts` | `findSlot0Root()` (via `git rev-parse --git-common-dir`) is the root resolver used by every command but `init`/`clone`, which use `gitToplevel()`. Retains a legacy `isBareCloneContainer` detector for a future `worm migrate`. |
 | `config.ts` | Load / save / validate `Config` via zod (`.strict()`, parsed as-is — no legacy normalization). |
 | `templates.ts` | Seed `~/.worm/templates/default/` and resolve a template (override → global default → built-in) into a `Config` + `scripts/`. |
 | `git.ts` | Typed wrappers for `git worktree {add,remove,list,prune}`, `switchBranch`, `currentBranch`, branch lookups, `dirtyFiles`. Parses porcelain output. |
 | `symlinks.ts` | `ensureSymlink()` — idempotent, prefers relative paths, refuses to overwrite real files. |
-| `links.ts` | The managed-link manifest: `reconcileSlotLinks` (create/prune, deref-guarded) and `stripSlotLinks` (before worktree removal). |
+| `links.ts` | The managed-link manifest (in the profile): `reconcileSlotLinks` (links each slot's tails straight at the profile source, absolute; sprouts a missing source; create/prune, deref-guarded) and `stripSlotLinks` (before worktree removal). |
 | `global-links.ts` | HOME-scope analogue of `links.ts`: `reconcileGlobalLinks` links `~/<tail>` → `~/.worm/shared/<tail>` for `worm sync --global`, with its own manifest (`~/.worm/.managed-links.json`). |
 | `hooks.ts` | Runs `on_create`/`on_remove` with inherited stdio and `WORM_*` env (`hookEnv`). |
 | `universe.ts` | `scanUniverses()` builds the slot list from `git worktree list` (Slot 0 + matched siblings); `resolveSlotRef` / `findSlotByBranch` / `nextFreeIndex` / `universeLabel`. |
@@ -70,9 +71,9 @@ These are easy to break and hard to debug — keep them in mind when touching th
 
 2. **The pool is emergent.** `scanUniverses` reads `git worktree list`; a slot is Slot 0 (path === root) or a sibling matching `<repo>-<N>` one level up. No `universes_count`.
 
-3. **Relative vs absolute symlinks.** Links into the local `.worm/` tree are relative (survive a move). Links that cross repos (`.worm/config.json` → `~/.worm/...`) are absolute.
+3. **Symlinks point at the profile (absolute).** Post-consolidation, `.worm/` is (almost) all pointers into `~/.worm/multiverses/<name>/`: `config.json`, `scripts`, `recipes`, and `logs` are symlinks, and each slot's shared-path tunnels link **straight at the profile source** (`<slot>/<tail>` → `profile/<tail>`, absolute — the old `.worm/shared` two-hop is gone). `core/layout.ts:ensureLocalLayout` establishes this and migrates an old project in place.
 
-4. **The managed-link manifest is the source of truth for injected links.** `sync`/`rm`/`destroy` only touch links recorded in `.worm/.managed-links.json`, and the prune skips a link that became a real file. Strip managed links before `git worktree remove`.
+4. **The managed-link manifest is the source of truth for injected links.** It lives in the **profile** (`~/.worm/multiverses/<name>/.managed-links.json`), so `readManifest`/`writeManifest` take the project name. `sync`/`rm`/`destroy` only touch links recorded there, and the prune skips a link that became a real file. Strip managed links before `git worktree remove`.
 
 5. **All paths route through `core/paths.ts`.** No string concatenation of path segments elsewhere. The `<repo>-<N>` naming lives on one constant (`SLOT_DIR_INFIX`).
 

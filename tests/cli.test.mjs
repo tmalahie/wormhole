@@ -56,11 +56,19 @@ test("worm init binds Slot 0: symlinks, excludes .worm, seeds manifest, idempote
   const exclude = await readFile(path.join(sb.projectRoot, ".git", "info", "exclude"), "utf8");
   assert.match(exclude, /^\/\.worm\/$/m);
 
-  // Managed-link manifest is seeded.
+  // Managed-link manifest is seeded in the PROFILE (durable; survives a reclone).
   const manifest = JSON.parse(
-    await readFile(path.join(sb.projectRoot, ".worm", ".managed-links.json"), "utf8")
+    await readFile(
+      path.join(sb.wormHome, "multiverses", path.basename(sb.projectRoot), ".managed-links.json"),
+      "utf8"
+    )
   );
   assert.equal(typeof manifest, "object");
+  await assert.rejects(
+    stat(path.join(sb.projectRoot, ".worm", ".managed-links.json")),
+    /ENOENT/,
+    "manifest no longer lives in local .worm/"
+  );
 
   const r2 = await sb.worm(["init"]);
   assert.equal(r2.exitCode, 0, r2.stderr);
@@ -153,14 +161,18 @@ test("shared_paths are linked into Slot 0 and each new universe", async (t) => {
 
   await sb.worm(["init", "--template", templateDir]);
 
-  // Slot 0 gets a relative tunnel into .worm/shared.
+  // Slot 0 links straight at the profile source (absolute; the .worm/shared
+  // two-hop is gone).
   const slot0Link = await readlink(path.join(sb.projectRoot, ".env"));
-  assert.equal(slot0Link, ".worm/shared/.env");
+  assert.ok(path.isAbsolute(slot0Link), "slot links are absolute");
+  assert.match(slot0Link, /multiverses\/.+\/\.env$/);
 
   await sb.worm(["universe", "add", "feature-a", "--skip-hook"]);
   const root = await realpath(sb.projectRoot);
   const sibLink = await readlink(path.join(siblingPath(root, 1), ".env"));
-  assert.match(sibLink, /^\.\.\/.+\/\.worm\/shared\/\.env$/);
+  assert.match(sibLink, /multiverses\/.+\/\.env$/);
+  // No stale .worm/shared remains.
+  await assert.rejects(stat(path.join(sb.projectRoot, ".worm", "shared")), /ENOENT/);
 });
 
 test("worm sync reconciles links and prunes removed shared_paths via the manifest", async (t) => {
@@ -196,10 +208,12 @@ test("recipes: empty provisions nothing; sandbox generates Dockerfile + compose"
   const sbNone = await createSandbox();
   t.after(() => sbNone.cleanup());
   await sbNone.worm(["init"]);
+  // .worm/recipes is a symlink into the profile; with no recipes it resolves to
+  // an empty dir, so assert no artifacts were materialized.
   await assert.rejects(
-    stat(path.join(sbNone.projectRoot, ".worm", "recipes")),
+    stat(path.join(sbNone.projectRoot, ".worm", "recipes", "sandbox")),
     /ENOENT/,
-    "no enabled recipe → nothing written"
+    "no enabled recipe → no artifacts materialized"
   );
 
   // An enabled sandbox recipe generates artifacts under .worm/recipes/sandbox/.
@@ -1085,4 +1099,68 @@ test("worm sync --global is a no-op with a hint when nothing is configured", asy
   assert.equal(r.exitCode, 0, r.stderr);
   assert.match(r.stdout + r.stderr, /No global shared_paths/i);
   await assert.rejects(stat(path.join(sb.wormHome, ".managed-links.json")), /ENOENT/, "no manifest fabricated");
+});
+
+test("init produces the consolidated layout (recipes/logs symlinks into the profile)", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init"]);
+
+  const profile = path.join(sb.wormHome, "multiverses", path.basename(sb.projectRoot));
+  // .worm/recipes and .worm/logs are absolute symlinks into the profile.
+  assert.ok(path.isAbsolute(await readlink(path.join(sb.projectRoot, ".worm", "recipes"))));
+  assert.equal(
+    await realpath(path.join(sb.projectRoot, ".worm", "recipes")),
+    await realpath(path.join(profile, "recipes"))
+  );
+  assert.equal(
+    await realpath(path.join(sb.projectRoot, ".worm", "logs")),
+    await realpath(path.join(profile, "logs"))
+  );
+  // Generated logs in the profile are gitignored out of the personal ~/.worm repo.
+  assert.match(await readFile(path.join(profile, "logs", ".gitignore"), "utf8"), /^\*$/m);
+});
+
+test("consolidation migrates an old-layout project (recipes/logs/manifest/shared) on sync", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
+  t.after(() => rm(templateDir, { recursive: true, force: true }));
+  await writeFile(
+    path.join(templateDir, "config.json"),
+    JSON.stringify({ shared_paths: [".env"], hooks: {} })
+  );
+  await sb.worm(["init", "--template", templateDir]);
+
+  const proj = sb.projectRoot;
+  const profile = path.join(sb.wormHome, "multiverses", path.basename(proj));
+
+  // Forge a PRE-consolidation layout on top of the fresh one: real dirs where
+  // there should now be symlinks, a LOCAL manifest, and a stale .worm/shared.
+  await rm(path.join(proj, ".worm", "recipes"), { recursive: true, force: true });
+  await mkdir(path.join(proj, ".worm", "recipes", "sandbox"), { recursive: true });
+  await writeFile(path.join(proj, ".worm", "recipes", "sandbox", "Dockerfile"), "OLD-EDIT\n");
+  await rm(path.join(proj, ".worm", "logs"), { recursive: true, force: true });
+  await mkdir(path.join(proj, ".worm", "logs"), { recursive: true });
+  await writeFile(path.join(proj, ".worm", "logs", "old.log"), "x\n");
+  await writeFile(path.join(proj, ".worm", ".managed-links.json"), JSON.stringify({ [proj]: [".env"] }));
+  await mkdir(path.join(proj, ".worm", "shared", ".claude"), { recursive: true });
+
+  const r = await sb.worm(["sync"]);
+  assert.equal(r.exitCode, 0, r.stderr);
+
+  // recipes/logs became symlinks into the profile; USER CONTENT is preserved.
+  assert.ok(path.isAbsolute(await readlink(path.join(proj, ".worm", "recipes"))), "recipes is now a symlink");
+  assert.equal(
+    await readFile(path.join(profile, "recipes", "sandbox", "Dockerfile"), "utf8"),
+    "OLD-EDIT\n",
+    "user edits moved into the profile, not clobbered"
+  );
+  assert.ok(path.isAbsolute(await readlink(path.join(proj, ".worm", "logs"))), "logs is now a symlink");
+  assert.equal(await readFile(path.join(profile, "logs", "old.log"), "utf8"), "x\n");
+  // Manifest migrated to the profile; the local copy is gone.
+  await stat(path.join(profile, ".managed-links.json"));
+  await assert.rejects(stat(path.join(proj, ".worm", ".managed-links.json")), /ENOENT/, "local manifest removed");
+  // Stale .worm/shared swept.
+  await assert.rejects(stat(path.join(proj, ".worm", "shared")), /ENOENT/, ".worm/shared removed");
 });

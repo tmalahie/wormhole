@@ -59,7 +59,7 @@ export async function runDestroy(options: DestroyOptions = {}): Promise<void> {
     }
   }
 
-  const manifest = await readManifest(root);
+  const manifest = await readManifest(projectName);
 
   // 1. Remove sibling worktrees (force so uncommitted changes don't block).
   for (const slot of siblings) {

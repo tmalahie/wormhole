@@ -9,6 +9,7 @@ import {
   writeManifest,
 } from "../core/links.js";
 import { applyRecipeWiring, materializeRecipes } from "../core/recipes.js";
+import { ensureLocalLayout, removeLegacyShared } from "../core/layout.js";
 import { loadGlobalConfig } from "../core/global-config.js";
 import {
   reconcileGlobalLinks,
@@ -37,13 +38,17 @@ export async function runSync(options: SyncOptions = {}): Promise<void> {
   }
   const root = await findSlot0Root();
   const config = await loadLocalConfig(root);
+  const projectName = await readProjectName(root);
+  // Ensure the consolidated layout (recipes/logs symlinks into the profile,
+  // manifest in the profile); migrates an old project in place.
+  await ensureLocalLayout(root, projectName);
   const slots = await scanUniverses(root);
-  const manifest = await readManifest(root);
+  const manifest = await readManifest(projectName);
 
   let created = 0;
   let pruned = 0;
   for (const slot of slots) {
-    const res = await reconcileSlotLinks(root, slot.path, config.shared_paths, manifest);
+    const res = await reconcileSlotLinks(projectName, slot.path, config.shared_paths, manifest);
     created += res.created.length;
     pruned += res.pruned.length;
     for (const rel of res.created) logger.step(`🔗 ${slot.name}: linked ${rel}`);
@@ -58,10 +63,10 @@ export async function runSync(options: SyncOptions = {}): Promise<void> {
   for (const key of Object.keys(manifest)) {
     if (!live.has(key)) delete manifest[key];
   }
-  await writeManifest(root, manifest);
+  await writeManifest(projectName, manifest);
+  await removeLegacyShared(root); // sweep any stale .worm/shared after re-pointing
 
   // Materialize enabled recipes' artifacts (a no-op when none enabled; non-clobbering).
-  const projectName = await readProjectName(root);
   const recipeFiles = await materializeRecipes(root, projectName, config.recipes);
   for (const file of recipeFiles) logger.step(`📦 recipes/${file}`);
   const anyEnabled = Object.keys(config.recipes).length > 0;

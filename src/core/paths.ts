@@ -63,6 +63,19 @@ export function globalProjectScriptsDir(projectName: string): string {
   return path.join(globalProjectDir(projectName), SCRIPTS_DIR_NAME);
 }
 
+/**
+ * Durable per-project state lives in the profile (survives a slot-0 reclone);
+ * the project's `.worm/recipes` and `.worm/logs` are symlinks INTO these. The
+ * materialized recipe artifacts (Dockerfile/compose/policy) are the real files.
+ */
+export function globalProjectRecipesDir(projectName: string): string {
+  return path.join(globalProjectDir(projectName), RECIPES_DIR_NAME);
+}
+
+export function globalProjectLogsDir(projectName: string): string {
+  return path.join(globalProjectDir(projectName), LOGS_DIR_NAME);
+}
+
 export function globalTemplatesDir(): string {
   return path.join(globalRoot(), TEMPLATES_DIR_NAME);
 }
@@ -79,12 +92,13 @@ export function localConfigFile(projectRoot: string): string {
   return path.join(localRoot(projectRoot), CONFIG_FILE_NAME);
 }
 
-export function localSharedDir(projectRoot: string): string {
+/**
+ * Legacy local shared-tunnel dir (`.worm/shared/`). The two-hop indirection it
+ * provided was dropped in the consolidation — slot links now point straight at
+ * the profile. Retained only so migration can find and remove a stale one.
+ */
+export function legacyLocalSharedDir(projectRoot: string): string {
   return path.join(localRoot(projectRoot), SHARED_DIR_NAME);
-}
-
-export function localSharedFile(projectRoot: string, fileName: string): string {
-  return path.join(localSharedDir(projectRoot), fileName);
 }
 
 export function localScriptsDir(projectRoot: string): string {
@@ -128,18 +142,20 @@ export function wormCliEntry(): string {
   return fileURLToPath(import.meta.url);
 }
 
-/** Where recipe hooks write their logs: `.worm/logs/` (at Slot 0). */
+/** Where recipe hooks write their logs: `.worm/logs/` (a symlink into the
+ *  profile's `logs/`). */
 export function localLogsDir(slot0Root: string): string {
   return path.join(localRoot(slot0Root), LOGS_DIR_NAME);
 }
 
 /**
- * Path to the managed-link manifest at Slot 0 (.worm/.managed-links.json).
- * `worm sync` records the symlinks it creates here so prune/GC only ever
- * touches links it owns — never structural wiring or real user files.
+ * Path to the managed-link manifest. Lives in the PROFILE
+ * (`~/.worm/multiverses/<name>/.managed-links.json`) so it's durable per project
+ * and survives a slot-0 reclone. `worm sync` records the symlinks it creates
+ * here so prune/GC only ever touches links it owns — never real user files.
  */
-export function managedLinksFile(slot0Root: string): string {
-  return path.join(localRoot(slot0Root), MANAGED_LINKS_FILE_NAME);
+export function managedLinksFile(projectName: string): string {
+  return globalProjectFile(projectName, MANAGED_LINKS_FILE_NAME);
 }
 
 /**

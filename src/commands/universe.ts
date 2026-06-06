@@ -17,6 +17,7 @@ import {
 } from "../core/git.js";
 import { siblingWorktreeDir } from "../core/paths.js";
 import { applyRecipeWiring, materializeRecipes } from "../core/recipes.js";
+import { ensureLocalLayout } from "../core/layout.js";
 import { hookEnv, runHook } from "../core/hooks.js";
 import {
   readManifest,
@@ -68,9 +69,11 @@ export async function runUniverseAdd(
   await worktreeAdd(root, target, branch, { createIfMissing: options.create });
   logger.step(`🪢 worktree opened at ${logger.dim(target)}`);
 
-  const manifest = await readManifest(root);
-  await reconcileSlotLinks(root, target, config.shared_paths, manifest);
-  await writeManifest(root, manifest);
+  const projectName = await readProjectName(root);
+  await ensureLocalLayout(root, projectName);
+  const manifest = await readManifest(projectName);
+  await reconcileSlotLinks(projectName, target, config.shared_paths, manifest);
+  await writeManifest(projectName, manifest);
 
   if (!options.skipHook && config.hooks.on_create) {
     const slot: UniverseSlot = {
@@ -93,7 +96,6 @@ export async function runUniverseAdd(
   }
 
   // Provision recipe artifacts (idempotent) and wire this slot (no-op when none enabled).
-  const projectName = await readProjectName(root);
   await materializeRecipes(root, projectName, config.recipes);
   if (await applyRecipeWiring(root, projectName, { name: String(index), path: target }, config.recipes)) {
     logger.step("⚡ wired recipe hooks");
@@ -157,10 +159,11 @@ export async function runUniverseRemove(
     }
   }
 
-  const manifest = await readManifest(root);
+  const projectName = await readProjectName(root);
+  const manifest = await readManifest(projectName);
   await stripSlotLinks(slot.path, manifest);
   delete manifest[slot.path];
-  await writeManifest(root, manifest);
+  await writeManifest(projectName, manifest);
   logger.step("🧹 swept wormhole symlinks");
 
   await worktreeRemove(root, slot.path, { force: options.force });

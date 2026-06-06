@@ -26,7 +26,15 @@ machinery. Only the *source root* and *scope root* vary.
 
 ---
 
-## Decision 1 — consolidate the project-local `.worm/` (symlink-into-global) ✅
+## Decision 1 — consolidate the project-local `.worm/` (symlink-into-global) — ✅ SHIPPED 2026-06-06
+
+**Status: SHIPPED.** [core/layout.ts](../src/core/layout.ts) `ensureLocalLayout` makes `.worm/recipes`
+and `.worm/logs` symlinks into the profile (migrating an old project's real dirs in place, preserving
+edits); the manifest moved to `profile/.managed-links.json` (`readManifest`/`writeManifest`/
+`reconcileSlotLinks` now take the project name); slot links point **straight at the profile** (absolute,
+one hop) and `removeLegacyShared` sweeps the old `.worm/shared`. Net `.worm/`: `config.json` + `scripts`
++ `recipes` + `logs` (all symlinks) + `.gitignore`. `findSlot0Root` is unchanged (still keys off `.worm/`
++ the `config.json` pointer). Run on init / sync / universe add, idempotent.
 
 **Decided (Q2):** keep `.worm/` for discoverability, but make it **almost entirely pointers** into the
 profile. Not "delete it," not "leave it" — thin it.
@@ -40,7 +48,7 @@ profile. Not "delete it," not "leave it" — thin it.
 | `shared/` | a dir of symlinks → profile (a **second hop**) | **drop** — redundant indirection |
 | `recipes/` | **real copied files** | → symlink to profile; only bucket-3 scaffolding remains there |
 | `logs/` | **real files** | → symlink to profile (the profile already has a `logs/`) |
-| `.managed-links.json` | real, local | keep local (per-checkout link state) — see open question |
+| `.managed-links.json` | real, local | **moved to the profile** (durable; survives a reclone) |
 | `.gitignore` = `*` | real, local | keep |
 
 **Target tree:**
@@ -72,9 +80,9 @@ Collapse to `slot → profile/<tail>` directly (the store, per Decision 2). `.wo
 pointers next to the code; `logs/` and `recipes/` are no longer duplicated; propagation of code/state is
 automatic (Decision-1 + recipes-roadmap spine reinforce each other).
 
-**Open question:** should `.managed-links.json` also move to the profile (durable, survives a slot-0
-reclone) or stay local (it describes *this* checkout's links)? It's already keyed by absolute slot path,
-so either works. Lean: keep the link records authoritative in one place; decide during impl.
+**Resolved:** `.managed-links.json` **moved to the profile** (`profile/.managed-links.json`) — durable,
+survives a slot-0 reclone, and keyed by absolute slot path so it stays correct. `migrateManifestToProfile`
+moves a pre-consolidation local manifest on the next init/sync (profile copy wins if both exist).
 
 ## Decision 2 — named stores (external + team resources) ✅
 
@@ -159,10 +167,11 @@ adopts your existing manual links idempotently (a correct symlink is a no-op).
 3. **✅ DONE (2026-06-06) — global (home-scope) setups** (Decision 3). `worm sync --global` links
    `~/<tail>` → `~/.worm/shared/<tail>` from the global config's `shared_paths`; clobber-safe, pruning,
    gitignored manifest. (Done out of nominal order — highest value-per-risk, fully additive, no migration.)
-4. **Consolidate `.worm/`** (Decision 1) — move recipes/logs/manifest into the profile, drop the shared/
-   two-hop. Mostly mechanical once code lives once; needs careful migration of existing projects.
-5. **Named stores** (Decision 2) — external/team repos as link sources. Collapses the shared/ hop as a
-   byproduct, so it pairs naturally with (4).
+4. **✅ DONE (2026-06-06) — consolidate `.worm/`** (Decision 1). recipes/logs/manifest live in the
+   profile; `.worm/` is config/scripts/recipes/logs symlinks + `.gitignore`; the shared/ two-hop is gone
+   (slot links are absolute, one hop); old projects migrate in place ([core/layout.ts](../src/core/layout.ts)).
+5. **Named stores** (Decision 2) — external/team repos as link sources. Now the natural next step: the
+   link source is already a single profile path, so generalizing it to a chosen store is a focused change.
 6. **Templating + versioning** for the small bucket-3 set (recipes-roadmap §3/§6).
 
 ## Open cross-cutting questions
