@@ -2,8 +2,14 @@
 
 > Status: **design notes + decisions.** Captured 2026-06-01 (brain-dump), reviewed and partly
 > **decided** 2026-06-06. Sections marked ✅ are decided directions; the rest are still open backlog.
-> Companion doc: [architecture-roadmap.md](architecture-roadmap.md) covers the *linking layer* (where
-> worm state lives, stores, scopes) — several decisions here depend on it.
+> Companion docs: [architecture-roadmap.md](architecture-roadmap.md) covers the *linking layer* (where
+> worm state lives, stores, scopes) — several decisions here depend on it;
+> [multi-agent-roadmap.md](multi-agent-roadmap.md) covers wiring agents other than Claude Code.
+>
+> **Active next items (2026-06-06):** §1 + §2 — *shareable recipe packages* (the "Next up" plan at the
+> bottom of this doc), and the agent-adapter seam in
+> [multi-agent-roadmap.md](multi-agent-roadmap.md). They're synergistic: a recipe-as-data format (§2) is
+> what an agent adapter renders per agent.
 
 ## Why this exists
 
@@ -240,4 +246,74 @@ the whole artifact set.
 
 §1 + §2 still describe the open work to make recipes **shareable directories of data + real files**; the
 spine (live-once code + inverted dispatch) is the architecture they plug into, and is also what unblocks
-multi-agent support (logging/wiring move behind the dispatcher).
+multi-agent support ([multi-agent-roadmap.md](multi-agent-roadmap.md)) — logging/wiring already moved
+behind the dispatcher.
+
+---
+
+## Next up (2026-06-06): shareable recipe packages — the §1 + §2 plan
+
+§1 (third-party recipes) and §2 (recipe-as-data) ship together: you can't load a recipe from a folder
+until a recipe is *expressible* as a folder. This is the concrete, phased plan, grounded in today's code.
+
+**Where the seams already are.** Built-ins are the `REGISTRY` array
+([recipes.ts#L257](../src/core/recipes.ts#L257)); everything downstream consumes them only through
+[`enabledRecipes`](../src/core/recipes.ts#L259-L266) (`materializeRecipes` / `applyRecipeWiring` /
+`runRecipeHooks` / `runRecipeFilters`). So the loader's whole job is to **return a longer `REGISTRY`** —
+built-ins plus whatever it discovered on disk. Nothing downstream needs to change. Two real blockers stand
+between here and that:
+
+1. **Config is `.strict()` zod** ([types.ts#L36-L43](../src/types.ts#L36-L43)). `RecipesSchema` enumerates
+   exactly `sandbox` / `syncPermissions` / `shareHistory`, so an unknown recipe key is a hard *Invalid
+   config* error. A loaded recipe must be able to register its own key + schema.
+2. **Recipe code resolves from the package** ([`packagedRecipeScript`](../src/core/paths.ts) →
+   `dist/recipes/`). A third-party recipe's scripts/templates must resolve from *its* directory instead.
+
+### Phase 1 — a recipe is a directory (define the format)
+
+A recipe becomes a folder with a manifest + real files, loadable without compiling TS:
+
+```
+<name>/
+  recipe.json        # name, config JSON Schema, the (event → command) table, requires[], onSlotCreate?
+  *.js               # worm-owned, config-independent scripts (live-once; read params at run time)
+  templates/*.tmpl   # bucket-3 scaffolding rendered with renderTemplate
+```
+
+- The `recipe.json` *(event → command)* table is precisely what `Recipe.hooks()` returns today, as data.
+  Commands reference `{{recipeDir}}` / the documented `WORM_*` vars; the dispatcher still injects env and
+  owns logging, so the manifest stays declarative.
+- The **built-ins migrate to this format first** (dogfood it) — `sandbox` is the stress test (it has a
+  script, two templates, a policy, and a conditional). Keep `Recipe` as the in-memory shape; add a
+  `recipeFromManifest(dir): Recipe` that adapts a folder to it. Built-ins stay in `dist/recipes/`; the
+  interface the engine sees is unchanged.
+
+### Phase 2 — load recipes from disk (open the set, §1)
+
+- Discover folders in `~/.worm/recipes/<name>/` (global) and optionally a project-local dir; merge with
+  built-ins (project/global override a built-in of the same name — same precedence rule as stores).
+- `REGISTRY` becomes `loadRecipes()` = built-ins ++ discovered. `packagedRecipeScript` generalizes to
+  `recipeAsset(recipe, rel)` resolving against the recipe's own dir.
+- **Config validation goes dynamic (§2).** `RecipesSchema` stops being a fixed `.strict()` object: build
+  the recipe map's schema from the union of loaded recipes' JSON Schemas. Keep zod under the hood (compile
+  each manifest's JSON Schema → a validator); unknown key = "no such recipe `foo`; is it installed under
+  `~/.worm/recipes/`?" with a hint, *not* a raw strict-parse failure.
+- **Distribution** (open): `worm recipe add <git-url>` cloning into `~/.worm/recipes/<name>/` is the
+  smallest thing that works and matches the stores clone-on-demand pattern. npm / a registry are heavier
+  and can wait.
+
+### Phase 3 — trust (the sharp new question)
+
+With inverted dispatch, a third-party recipe's code runs **in worm's dispatcher process, on the hot path**
+(every Bash command). Before recipes are casually shareable:
+
+- At minimum: **explicit opt-in per recipe source** (a loaded recipe from outside the package is inert
+  until trusted — `worm recipe trust <name>`), recorded in the profile.
+- Consider running recipe hook commands themselves through the sandbox, or a capability allowlist in
+  `recipe.json` the user reviews on `add`. This is genuinely open — flag it loudly, don't hand-wave it.
+
+### What this deliberately is *not*
+
+Not a plugin system with arbitrary TS compiled in the engine's toolchain (§2 keeps recipes *data + assets*,
+not code linked into worm). Not the versioning/plan-apply story (§6, still deferred) — a loaded recipe's
+scaffolding obeys the same non-clobbering rule as today until §6 lands.

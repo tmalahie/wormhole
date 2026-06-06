@@ -12,7 +12,7 @@ A coding agent is only as good as its setup: the right instructions and skills, 
 
 The worktree pool used to be the whole story; now it's the backend. The product is the cognitive layer it serves — the git-tracked home that keeps your agents consistent, contained, and reproducible across every universe.
 
-> Built around **Claude Code** today (the recipes wire Claude's hooks and settings) on a deliberately agent-agnostic core — the pool, tunnels, and lifecycle hooks don't care which agent you run.
+> Built around **Claude Code** today (the recipes wire Claude's hooks and settings) on a deliberately agent-agnostic core — the pool, tunnels, and lifecycle hooks don't care which agent you run. Opening the recipe set and wiring other agents are the next iterations — see [Roadmap](#roadmap).
 
 ---
 
@@ -163,6 +163,15 @@ On first run, `~/.worm/templates/default/` is seeded with a `config.json` and `s
 |---|---|
 | `WORM_HOME` | Override the global root (default: `~/.worm`). Useful for sandboxes, CI, or multiple worm "homes". |
 | `WORM_DEBUG` | Set to `1` to print stack traces on error. |
+
+## Roadmap
+
+worm's substrate is already agent-agnostic — the warm pool, shared-file tunnels, lifecycle hooks, and your instructions file (`CLAUDE.md` / `AGENTS.md` / …) don't care which agent you run. The **recipe engine** is the part still wired specifically to Claude Code. The next two iterations open both up:
+
+- **Shareable recipe packages** — author a recipe in its own folder (`~/.worm/recipes/<name>/`) or a git repo and drop it in, instead of forking wormhole. A recipe becomes a directory of data + real script files, loaded alongside the built-ins, with its config validated from a manifest. Details: [docs/recipes-roadmap.md](docs/recipes-roadmap.md) §1–§2 and the "Next up" plan.
+- **Agents beyond Claude** — an agent-adapter seam so recipes can wire Cursor, Gemini, Codex, … not just Claude Code. Agents with a pre-tool/session hook system get **full** recipe support (sandbox, permission sync); agents without one still get the pool, tunnels, and shared instructions. Details: [docs/multi-agent-roadmap.md](docs/multi-agent-roadmap.md).
+
+The two halves fit together: a recipe-as-data format is what an agent adapter renders per agent. Earlier iterations — live-once recipe code, the inverted hook dispatcher, named stores, home-scope `worm sync --global`, and `worm template render` — are already shipped (the roadmap docs carry the full history). The one deferred item is a Terraform-style `plan`/`apply` for regenerating scaffolding you've edited.
 
 ## Development
 
