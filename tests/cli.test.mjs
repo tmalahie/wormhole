@@ -5,7 +5,7 @@ import path from "node:path";
 import { tmpdir } from "node:os";
 import { mkdtemp, rm } from "node:fs/promises";
 import { execa } from "execa";
-import { createBranch, createSandbox } from "./helpers.mjs";
+import { createBranch, createSandbox, PACKAGED_RECIPES } from "./helpers.mjs";
 
 function escapeRegex(str) {
   return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -244,12 +244,16 @@ test("sandbox wiring writes idempotent per-slot hooks into settings.local.json",
   const readLocal = async (dir) =>
     JSON.parse(await readFile(path.join(dir, ".claude", "settings.local.json"), "utf8"));
 
-  // Interceptor + policy generated — and the interceptor is valid JS (it's
-  // embedded via String.raw and the suite otherwise never executes it).
-  const interceptor = path.join(sandboxDir, "redirect-to-sandbox.js");
-  await stat(interceptor);
+  // Policy is materialized per project; the interceptor itself is worm-owned
+  // code that ships with the binary (live-once), NOT copied into the project.
+  await assert.rejects(
+    stat(path.join(sandboxDir, "redirect-to-sandbox.js")),
+    /ENOENT/,
+    "interceptor code must not be copied into the project"
+  );
+  const interceptor = path.join(PACKAGED_RECIPES, "sandbox", "redirect-to-sandbox.js");
   const check = await execa("node", ["--check", interceptor], { reject: false });
-  assert.equal(check.exitCode, 0, `generated interceptor must be valid JS:\n${check.stderr}`);
+  assert.equal(check.exitCode, 0, `packaged interceptor must be valid JS:\n${check.stderr}`);
   const policy = JSON.parse(await readFile(path.join(sandboxDir, "sandbox-policy.json"), "utf8"));
   assert.ok(Array.isArray(policy.neverSandbox));
 
@@ -284,11 +288,15 @@ test("syncPermissions recipe wires session hooks and a valid merge script", asyn
   t.after(() => sb.cleanup());
   await sb.worm(["init", "--template", templateDir]);
 
-  const script = path.join(
-    sb.projectRoot, ".worm", "recipes", "syncPermissions", "sync-claude-settings.js"
+  // The sync script ships with the binary (live-once), not materialized here.
+  await assert.rejects(
+    stat(path.join(sb.projectRoot, ".worm", "recipes", "syncPermissions")),
+    /ENOENT/,
+    "sync script must not be copied into the project"
   );
+  const script = path.join(PACKAGED_RECIPES, "syncPermissions", "sync-claude-settings.js");
   const check = await execa("node", ["--check", script], { reject: false });
-  assert.equal(check.exitCode, 0, `generated sync script must be valid JS:\n${check.stderr}`);
+  assert.equal(check.exitCode, 0, `packaged sync script must be valid JS:\n${check.stderr}`);
 
   const s0 = JSON.parse(
     await readFile(path.join(sb.projectRoot, ".claude", "settings.local.json"), "utf8")
@@ -342,6 +350,52 @@ test("recipes compose: sandbox + syncPermissions share settings.local.json", asy
   assert.equal(s0b.hooks.PreToolUse.length, 1);
 });
 
+test("upgrade: legacy .worm/recipes hooks are replaced, not duplicated, on re-sync", async (t) => {
+  const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
+  t.after(() => rm(templateDir, { recursive: true, force: true }));
+  await writeFile(
+    path.join(templateDir, "config.json"),
+    JSON.stringify({ shared_paths: [], hooks: {}, recipes: { sandbox: {} } })
+  );
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init", "--template", templateDir]);
+
+  // Simulate a project wired by a PRE-live-once worm: a PreToolUse entry that
+  // points at a local .worm/recipes/ script and carries NO WORM_RECIPE= marker,
+  // alongside a user's own hook that must survive.
+  const localFile = path.join(sb.projectRoot, ".claude", "settings.local.json");
+  const legacyCmd = `node "${sb.projectRoot}/.worm/recipes/sandbox/redirect-to-sandbox.js" "c" "x"`;
+  await mkdir(path.dirname(localFile), { recursive: true });
+  await writeFile(
+    localFile,
+    JSON.stringify({
+      hooks: {
+        PreToolUse: [
+          { matcher: "Bash", hooks: [{ type: "command", command: "echo keep-me" }] },
+          { matcher: "Bash", hooks: [{ type: "command", command: legacyCmd }] },
+        ],
+      },
+    })
+  );
+
+  await sb.worm(["sync"]);
+
+  const s0 = JSON.parse(await readFile(localFile, "utf8"));
+  const cmds = s0.hooks.PreToolUse.map((e) => e.hooks[0].command);
+  assert.ok(cmds.includes("echo keep-me"), "user's own hook is preserved");
+  assert.ok(
+    !cmds.some((c) => c.includes(".worm/recipes/sandbox/redirect-to-sandbox.js")),
+    "legacy worm entry is removed, not left as a duplicate"
+  );
+  assert.equal(
+    cmds.filter((c) => c.includes("WORM_RECIPE=")).length,
+    1,
+    "exactly one new-style worm interceptor after migration"
+  );
+  assert.equal(s0.hooks.PreToolUse.length, 2, "user hook + one worm hook");
+});
+
 test("syncPermissions script unions permissions while preserving other keys", async (t) => {
   const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
   t.after(() => rm(templateDir, { recursive: true, force: true }));
@@ -353,9 +407,10 @@ test("syncPermissions script unions permissions while preserving other keys", as
   t.after(() => sb.cleanup());
   await sb.worm(["init", "--template", templateDir]);
 
-  const recipeDir = path.join(sb.projectRoot, ".worm", "recipes", "syncPermissions");
-  const script = path.join(recipeDir, "sync-claude-settings.js");
-  const canonical = path.join(recipeDir, "permissions.json");
+  const script = path.join(PACKAGED_RECIPES, "syncPermissions", "sync-claude-settings.js");
+  // Canonical store is just a fixture file here; put it somewhere that exists
+  // (syncPermissions no longer materializes a .worm/recipes/ dir).
+  const canonical = path.join(sb.projectRoot, ".worm", "permissions.json");
 
   // Canonical store already holds one allow rule…
   await writeFile(canonical, JSON.stringify({ permissions: { allow: ["Bash(ls:*)"] } }));
@@ -479,10 +534,18 @@ test("recipe hooks log to .worm/logs", async (t) => {
     `SessionStart must redirect to the container log:\n${startCmd}`
   );
 
-  // The interceptor records its decisions to <container>-redirect.log.
-  const interceptor = path.join(root, ".worm", "recipes", "sandbox", "redirect-to-sandbox.js");
-  await execa("node", [interceptor, container, "/x/compose.yml"], {
+  // The interceptor (worm-owned, packaged) records its decisions under
+  // $WORM_LOG_DIR — which the generated PreToolUse command points at .worm/logs.
+  const preCmd = s0.hooks.PreToolUse[0].hooks[0].command;
+  assert.ok(
+    preCmd.includes(`WORM_LOG_DIR="${logsDir}"`),
+    `PreToolUse must set WORM_LOG_DIR to .worm/logs:\n${preCmd}`
+  );
+  const interceptor = path.join(PACKAGED_RECIPES, "sandbox", "redirect-to-sandbox.js");
+  const policyFile = path.join(root, ".worm", "recipes", "sandbox", "sandbox-policy.json");
+  await execa("node", [interceptor, container, "/x/compose.yml", policyFile], {
     input: JSON.stringify({ tool_input: { command: "rm -rf /tmp/zzz" } }),
+    env: { ...process.env, WORM_LOG_DIR: logsDir },
     reject: false,
   });
   const redirectLog = await readFile(path.join(logsDir, `${container}-redirect.log`), "utf8");
@@ -501,9 +564,12 @@ test("sandbox interceptor: node code runs are sandboxed; npm and node --check ar
   await sb.worm(["init", "--template", templateDir]);
 
   const sandboxDir = path.join(sb.projectRoot, ".worm", "recipes", "sandbox");
-  const interceptor = path.join(sandboxDir, "redirect-to-sandbox.js");
+  // The interceptor is worm-owned code shipped with the binary; the project's
+  // policy file is passed as an arg (exactly as the generated hook does).
+  const interceptor = path.join(PACKAGED_RECIPES, "sandbox", "redirect-to-sandbox.js");
+  const policyFile = path.join(sandboxDir, "sandbox-policy.json");
   const decide = async (command) => {
-    const r = await execa("node", [interceptor, "c", "/x/compose.yml"], {
+    const r = await execa("node", [interceptor, "c", "/x/compose.yml", policyFile], {
       input: JSON.stringify({ tool_input: { command } }),
       reject: false,
     });

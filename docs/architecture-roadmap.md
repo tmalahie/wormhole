@@ -134,9 +134,14 @@ the symlinks you currently make by hand: `~/.claude/{commands,skills,scheduled-t
 
 ## Sequencing (by leverage ÷ risk)
 
-1. **✅ Highest-leverage, lowest-risk — stop copying worm-owned recipe code** (recipes-roadmap spine
-   bucket 1). Kills the live mkpc/arcads drift bug with almost no new machinery, and is a prerequisite
-   for Decision 1. Do this first.
+1. **✅ DONE (2026-06-06) — stop copying worm-owned recipe code** (recipes-roadmap spine bucket 1).
+   The interceptor + permission-sync scripts now live once in `src/recipes/` → `dist/recipes/`
+   (resolved via `packagedRecipeScript()`), referenced by the generated hooks with per-project bits
+   (container/compose/policy/log-dir) passed as args + env. New `WORM_RECIPE=` hook marker, with a
+   transitional `/.worm/recipes/` matcher so one `worm sync` migrates an existing project cleanly.
+   **Follow-up:** existing projects keep orphaned stale copies under `.worm/recipes/{sandbox,syncPermissions}/`
+   — harmless (nothing references them) but a `worm sync` could prune worm-owned (un-edited) recipe
+   artifacts. Not auto-deleted yet (user-owned-after-generation guard).
 2. **Inverted dispatcher** (recipes-roadmap spine). Removes `settings.local.json` churn and the
    `isWormManaged` substring fragility; unblocks clean enable/disable/update.
 3. **Consolidate `.worm/`** (Decision 1) — mostly mechanical once code lives once.

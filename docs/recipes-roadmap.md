@@ -53,6 +53,11 @@ most of the pain in §3–§6. **A generated artifact is exactly one of:**
    per-project.** Fixing the code = upgrading worm (or the one shared copy) = instant propagation to
    every project. The mkpc/arcads drift above is the proof this is the right model: there was never a
    reason for two copies, and having two is what let them diverge.
+   **Status: SHIPPED 2026-06-06** for built-ins — the interceptor + sync script now live in
+   `src/recipes/` → `dist/recipes/` (`packagedRecipeScript()`); hooks pass per-project bits as args +
+   `WORM_RECIPE=`/`WORM_LOG_DIR` env, with a transitional `/.worm/recipes/` marker for clean upgrades.
+   (Third-party loading from `~/.worm/recipes/` is still §1; the inverted dispatcher below is still
+   future — recipes currently still emit their own per-recipe settings entries, just repointed.)
 
 2. **Runtime config** — the container name, `docker compose -p` project, `SANDBOX_DIR`, and the sandbox
    policy's `neverSandbox`/`exemptDirs`. This **already lives in `config.json`.** ✅ It is

@@ -1,5 +1,6 @@
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 export const GLOBAL_ROOT_NAME = ".worm";
 export const LOCAL_ROOT_NAME = ".worm";
@@ -88,6 +89,23 @@ export function localRecipesRoot(projectRoot: string): string {
 /** A single recipe's artifact dir: `.worm/recipes/<name>/`. */
 export function localRecipeDir(projectRoot: string, recipeName: string): string {
   return path.join(localRecipesRoot(projectRoot), recipeName);
+}
+
+/**
+ * Root of the worm-OWNED recipe code that ships WITH the binary — the
+ * config-independent scripts (the sandbox interceptor, the permission-sync
+ * script) that are parameterized at run time and so live ONCE rather than being
+ * copied per project. tsup copies `src/recipes/` → `dist/recipes/` at build; at
+ * run time the bundle is `dist/cli.js`, so `import.meta.url` resolves to `dist/`
+ * and the scripts sit alongside at `dist/recipes/`.
+ */
+export function packagedRecipesDir(): string {
+  return path.join(path.dirname(fileURLToPath(import.meta.url)), RECIPES_DIR_NAME);
+}
+
+/** A single packaged recipe code file: `dist/recipes/<name>/<file>`. */
+export function packagedRecipeScript(recipeName: string, file: string): string {
+  return path.join(packagedRecipesDir(), recipeName, file);
 }
 
 /** Where recipe hooks write their logs: `.worm/logs/` (at Slot 0). */
