@@ -132,6 +132,11 @@ export function packagedRecipeScript(recipeName: string, file: string): string {
   return path.join(packagedRecipesDir(), recipeName, file);
 }
 
+/** A packaged `{{var}}` template shipped with a recipe: `dist/recipes/<name>/templates/<file>`. */
+export function packagedRecipeTemplate(recipeName: string, file: string): string {
+  return path.join(packagedRecipesDir(), recipeName, "templates", file);
+}
+
 /**
  * Absolute path to the running worm CLI entry (`dist/cli.js`). The recipe-hook
  * dispatcher entries written into a slot's settings.local.json invoke it by

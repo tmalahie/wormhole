@@ -31,6 +31,7 @@ One file per command. Each exports a single `runX(args, options)` async function
 | `status.ts` | Enumerate the pool, render a table or `--json`. |
 | `destroy.ts` | Remove sibling universes + `.worm/` + the global profile. **Slot 0 is left intact.** |
 | `hook.ts` | `worm hook trigger <event>` — internal recipe-hook dispatcher invoked by each slot's `settings.local.json` (one static entry per event). Resolves the live slot, runs enabled recipes' hook commands with injected env, and owns logging. Must never throw; fails open on the hot path. |
+| `template.ts` | `worm template render <file> KEY=VALUE …` — render a `{{var}}` template file to stdout (worm's templating primitive, for user setup scripts). |
 | `path.ts` / `shell-init.ts` / `completion.ts` / `config.ts` | Navigation helpers, shell wrapper, tab-completion, and machine-level settings. |
 
 ### `core/`
@@ -60,6 +61,7 @@ Cross-cutting helpers. No domain knowledge here.
 | `logger.ts` | picocolors-wrapped `info` / `step` / `success` / `warn` / `error` / `hint`. Consistent tone in one place. |
 | `fs.ts` | `pathExists`, `isDirectory`, `isSymlink`, `ensureDir`, `readJson` / `writeJson`, `readSymlinkTarget`. |
 | `exec.ts` | `run` (no throw), `runOrThrow` (throws `WormError` with stderr), `runShell` (for hooks). |
+| `template.ts` | `renderTemplate(tmpl, vars)` — strict `{{var}}` substitution (worm's one rendering primitive; leaves shell `${VAR}` untouched). Used by recipe scaffolds and `worm template render`. |
 
 ### `types.ts`
 Shared types and the canonical `ConfigSchema` (zod) + `DEFAULT_CONFIG` + `RecipesSchema` / `SandboxRecipeSchema` + `StoreSchema` / `SharedPathSchema` (the `string | {path, store}` union). Everything that touches config imports from here.

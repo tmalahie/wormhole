@@ -181,7 +181,11 @@ adopts your existing manual links idempotently (a correct symlink is a no-op).
 5. **Named stores** (Decision 2) — external/team repos as link sources. Now the natural next step: the
    link source is already a single profile path, so generalizing it to a chosen store is a focused change.
    **✅ DONE (2026-06-06)** — [core/stores.ts](../src/core/stores.ts); see Decision 2.
-6. **Templating + versioning** for the small bucket-3 set (recipes-roadmap §3/§6). ← the last open item.
+6. **✅ DONE (2026-06-06) — templating** (recipes-roadmap §3). Homemade `{{var}}` `renderTemplate`
+   ([utils/template.ts](../src/utils/template.ts)); sandbox scaffolds are real `.tmpl` files; `worm template render`
+   exposes it for user setups. **Versioning (recipes-roadmap §6)** — Terraform-style plan/apply so engine
+   updates re-render un-edited bucket-3 artifacts — is the **last open item**, deferred (the artifact set
+   is tiny and non-clobbering today, so the pain is low).
 
 ## Open cross-cutting questions
 

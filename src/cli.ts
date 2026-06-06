@@ -13,6 +13,7 @@ import { runSync } from "./commands/sync.js";
 import { runSwitch } from "./commands/switch.js";
 import { runUniverseAdd, runUniverseRemove } from "./commands/universe.js";
 import { runHookTrigger } from "./commands/hook.js";
+import { runTemplateRender } from "./commands/template.js";
 
 const program = new Command();
 
@@ -91,6 +92,17 @@ program
   .option("--global", "Reconcile HOME-scope links (~/.worm/config.json shared_paths) instead of the project.")
   .action(async (opts) => {
     await runSync(opts);
+  });
+
+const template = program
+  .command("template")
+  .description("Worm's templating primitive: render {{var}} template files.");
+
+template
+  .command("render <file> [vars...]")
+  .description("Render a {{var}} template file with KEY=VALUE vars to stdout (for setup scripts).")
+  .action(async (file: string, vars: string[] = []) => {
+    await runTemplateRender(file, vars);
   });
 
 program

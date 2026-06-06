@@ -1279,3 +1279,38 @@ test("a project can reference a store declared in the global config", async (t) 
     "linked from the GLOBAL store"
   );
 });
+
+test("worm template render substitutes {{vars}} and leaves shell ${VAR} untouched", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  const tmpl = path.join(sb.projectRoot, "x.tmpl");
+  await writeFile(tmpl, "name: {{project}}-sandbox\nmount: ${SANDBOX_DIR}\nport: {{ port }}\n");
+
+  const r = await sb.worm(["template", "render", tmpl, "project=app", "port=3000"]);
+  assert.equal(r.exitCode, 0, r.stderr);
+  assert.match(r.stdout, /name: app-sandbox/);
+  assert.match(r.stdout, /mount: \$\{SANDBOX_DIR\}/, "shell ${VAR} is left untouched");
+  assert.match(r.stdout, /port: 3000/);
+});
+
+test("worm template render errors on an unknown {{var}} (strict)", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  const tmpl = path.join(sb.projectRoot, "x.tmpl");
+  await writeFile(tmpl, "hello {{name}} {{ghost}}\n");
+
+  const r = await sb.worm(["template", "render", tmpl, "name=world"]);
+  assert.notEqual(r.exitCode, 0);
+  assert.match(r.stderr, /unknown variable \{\{ghost\}\}/);
+});
+
+test("worm template render rejects a bad KEY=VALUE arg", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  const tmpl = path.join(sb.projectRoot, "x.tmpl");
+  await writeFile(tmpl, "{{a}}\n");
+
+  const r = await sb.worm(["template", "render", tmpl, "noequals"]);
+  assert.notEqual(r.exitCode, 0);
+  assert.match(r.stderr, /expected KEY=VALUE/);
+});

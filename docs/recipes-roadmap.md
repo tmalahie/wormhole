@@ -148,7 +148,16 @@ editing typed code and rebuilding.
   `shareHistory`'s symlink-and-skip-if-real-dir behavior). Likely: declarative for the common case, with
   an escape hatch to a spine-bucket-1 script for the rest.
 
-## 3. One templating engine — but only for bucket 3 (revised 2026-06-06)
+## 3. One templating primitive — ✅ SHIPPED 2026-06-06
+
+**Status: SHIPPED — homemade, not a library.** After the spine shrank templating to plain `{{var}}`
+substitution (no user-facing logic), a ~25-line [utils/template.ts](../src/utils/template.ts)
+`renderTemplate` won over `eta`: zero deps (honoring the small-deps rule), and converting `compose.yml`
+to a real template **killed the `\${VAR}` escaping foot-gun** (`{{…}}` and `${…}` don't collide). The
+sandbox `Dockerfile`/`compose.yml` are now real `.tmpl` files under `src/recipes/sandbox/templates/`
+(rendered at materialize time; the lone conditional — the apt-get block — is precomputed and passed as a
+`{{tools}}` var). Exposed as **`worm template render <file> KEY=VALUE …`** so user setups (`setup.sh`) can drop
+their hand-rolled sed. (`eta` remains the escape hatch if logic in user-editable templates is ever wanted.)
 
 **Problem (original).** Generated `.js`/config files are `String.raw` strings in TS — unmaintainable.
 Quote: *"really not clean, I'll never want to maintain that."*

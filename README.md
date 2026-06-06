@@ -71,10 +71,12 @@ worm universe rm my-other-feature
 | `worm universe add <branch> [--create] [--skip-hook]` | Create a permanent sibling worktree on `<branch>` at `<repo>-<N>`, link shared paths, run `on_create`. Refuses a branch already checked out in another slot. |
 | `worm universe rm <ref> [--force] [--skip-hook]` | Remove a sibling universe — `<ref>` is a slot index or a branch. Refuses Slot 0; refuses uncommitted changes unless `--force`; runs `on_remove`. |
 | `worm switch <branch> [--create] [--skip-hook]` | `git switch <branch>` in the current slot and re-run the warm-up hook. (Plain `git switch` works too — this just adds the hook + the "branch held elsewhere" guard.) |
-| `worm sync` | Declaratively reconcile shared-path links across all slots: create missing tunnels, prune removed ones. Idempotent. |
+| `worm sync` | Declaratively reconcile shared-path links across all slots: create missing tunnels, prune removed ones, clone any missing store. Idempotent. |
+| `worm sync --global` | Reconcile **HOME-scope** links from `~/.worm/config.json`'s `shared_paths` (e.g. `~/.claude/commands` → `~/.worm/shared/.claude/commands`) — machine-wide setup, independent of any project. |
+| `worm template render <file> [KEY=VALUE …]` | Render a `{{var}}` template file to stdout (worm's templating primitive; leaves shell `${VAR}` untouched). For setup scripts that want to drop hand-rolled sed. |
 | `worm cd <branch>` / `worm tp <N>` | Change directory into a slot by branch name or 0-based index. Requires the shell-init wrapper. |
 | `worm path <ref>` | Print the worktree path for a branch or slot index (what `cd`/`tp` use under the hood). |
-| `worm config <key> [value]` | Read or write machine-level worm settings in `~/.worm/config.json` (supported keys: `editor`). `--list` prints everything; `--unset` clears a key. |
+| `worm config <key> [value]` | Read or write machine-level worm settings in `~/.worm/config.json` (scalar keys, e.g. `editor`; `shared_paths`/`stores` are edited in the JSON directly). `--list` prints everything; `--unset` clears a key. |
 | `worm destroy [--force]` | Unbind the project: remove sibling universes, `.worm/`, and the global profile. **Slot 0 (your repo) is left intact.** Prompts unless `--force`. |
 | `worm shell-init` | Print the shell function described in [Shell integration](#shell-integration-recommended). |
 | `worm completion <bash\|zsh>` | Print a tab-completion script for the chosen shell. |
@@ -89,22 +91,24 @@ For a project named `mkpc` with two extra universes:
 ~/git/
 ├── mkpc/                              ← Slot 0: the primary working tree (a normal clone)
 │   ├── .git/                          ← standard git directory (the common dir for all slots)
-│   ├── .worm/                         ← local wiring (excluded from git via .git/info/exclude)
+│   ├── .worm/                         ← thin wiring: (almost) all pointers (git-excluded locally)
 │   │   ├── .gitignore                 ← single line: `*`
-│   │   ├── .managed-links.json        ← manifest of the symlinks worm created per slot
-│   │   ├── config.json                → symlink to ~/.worm/multiverses/mkpc/config.json
-│   │   ├── scripts/                   → symlink to ~/.worm/multiverses/mkpc/scripts/
-│   │   │   └── setup.sh               ← warm-up hook (edit this!)
-│   │   └── shared/                    ← the "tunnel" sources mirrored into every slot
-│   │       └── .env                   → ~/.worm/multiverses/mkpc/.env (or local placeholder)
-│   └── .env                           → .worm/shared/.env   (a tunnel, on Slot 0)
+│   │   ├── config.json                → ~/.worm/multiverses/mkpc/config.json
+│   │   ├── scripts/                   → ~/.worm/multiverses/mkpc/scripts/   (setup.sh lives here)
+│   │   ├── recipes/                   → ~/.worm/multiverses/mkpc/recipes/   (materialized artifacts)
+│   │   └── logs/                      → ~/.worm/multiverses/mkpc/logs/      (recipe-hook logs)
+│   └── .env                           → ~/.worm/multiverses/mkpc/.env       (a tunnel, on Slot 0)
 ├── mkpc-1/                            ← sibling universe (worm universe add …)
-│   ├── .env                           → ../mkpc/.worm/shared/.env
-│   └── …                               (its checked-out branch)
+│   └── .env                           → ~/.worm/multiverses/mkpc/.env
 └── mkpc-2/                            ← another sibling universe
+
+~/.worm/                              ← your agents' meta-repo (a git repo)
+└── multiverses/mkpc/                 ← mkpc's PROFILE — the durable state, survives a reclone
+    ├── config.json  .env  scripts/  recipes/  logs/
+    └── .managed-links.json           ← manifest of the symlinks worm created per slot
 ```
 
-Slots are **permanent** — there's no spawn/teardown, so they stay warm (your `node_modules`, build state, etc. just persist in each one). Sibling worktrees live one level up so Slot 0's `git status` never sees them, and `.worm/` is hidden from git locally. Shared files are relative symlinks back to Slot 0's `.worm/shared/`, recorded in a manifest so `worm sync` can add/prune them safely.
+Slots are **permanent** — there's no spawn/teardown, so they stay warm (your `node_modules`, build state, etc. just persist in each one). Sibling worktrees live one level up so Slot 0's `git status` never sees them, and `.worm/` is hidden from git locally. A project's `.worm/` is almost entirely **symlinks into its profile** (`~/.worm/multiverses/<project>/`), where the durable state lives; each slot's shared files link **straight at the profile** (absolute, one hop), recorded in the profile's manifest so `worm sync` can add/prune them safely.
 
 ## Configuration
 
@@ -113,6 +117,7 @@ Each project gets a config at `~/.worm/multiverses/<project-name>/config.json`. 
 ```json
 {
   "shared_paths": [],
+  "stores": {},
   "hooks": {
     "on_create": "bash \"$WORM_PROJECT_ROOT/.worm/scripts/setup.sh\""
   },
@@ -122,11 +127,17 @@ Each project gets a config at `~/.worm/multiverses/<project-name>/config.json`. 
 
 Edit the file (or pre-seed a `--template <dir>`) to add what your project needs.
 
-- **`shared_paths`** — files tunnelled from `.worm/shared/` into every slot. If a matching file exists at `~/.worm/multiverses/<project>/<path>`, it's symlinked there; otherwise an empty local placeholder is created on first `init`. Common entries: `.env`, `CLAUDE.local.md`, `.mcp.json`. Run `worm sync` after changing this list.
+- **`shared_paths`** — files tunnelled into every slot. Each entry is either a bare path, pulled from the project **profile** (`~/.worm/multiverses/<project>/<path>`, sprouting an empty placeholder if absent), or `{ "path": ".claude/docs", "store": "team" }` to pull it from a named **store** instead. Each slot gets an absolute symlink straight at the source. Common entries: `.env`, `CLAUDE.local.md`, `.mcp.json`. Run `worm sync` after changing this list.
+- **`stores`** — named external sources for `shared_paths`, e.g. `{ "team": { "root": "~/git/team-shared", "url": "git@github.com:org/team-shared" } }`. A `shared_paths` entry with `"store": "team"` links from that store's `root` instead of the profile — so team docs/commands can live in a **separate git repo**, shared with your team and editable in place (your edits land as changes in that repo). If `root` is missing and a `url` is given, `worm sync` clones it on demand. Declare stores per project here, or machine-wide in `~/.worm/config.json` (project stores win on a name clash).
 - **`hooks`** — `on_create` runs inside a slot to warm it up: when Slot 0 is bound (`init` / `clone`), when a sibling is created (`universe add`), and on `switch`. `on_remove` runs before a slot is removed. The default `on_create` invokes `.worm/scripts/setup.sh` — drop your install commands there (`npm install`, `pip install -r requirements.txt`, …) instead of editing the JSON. A non-zero `on_create` warns but doesn't abort; a non-zero `on_remove` aborts the removal unless `--force`. Pass `--skip-hook` to any of these commands to bind/switch without running the hook (e.g. on an already-warm checkout).
-- **`recipes`** — composable capabilities, keyed by name (provider-style). A recipe is **enabled iff its key is present**; each value is validated by that recipe's own schema. `init`/`sync`/`universe add` materialize every enabled recipe's artifacts under `.worm/recipes/<name>/` and merge its per-slot hook entries into each slot's `.claude/settings.local.json` (the gitignored, per-slot file). Recipes compose — worm namespaces the entries it owns (their commands reference the `.worm/recipes/` tree), so re-running only strips and re-adds worm's own hooks. Artifacts are materialized **non-clobbering** (so you can edit a generated file and keep it): `worm sync` re-applies hook *wiring* every run, but it will **not** overwrite an existing artifact. To pull in a recipe/engine update, delete the stale artifact (e.g. `rm .worm/recipes/sandbox/Dockerfile`) and re-run `worm sync`. (A dedicated regenerate/upgrade command is on the roadmap — see [docs/recipes-roadmap.md](docs/recipes-roadmap.md).) Recipe hooks (which run silently inside Claude sessions) write to **`.worm/logs/`** — `<container>.log` for the container's `up`/`down` output (including the first build), `<container>-redirect.log` for the sandbox's allow/deny decisions, and `sync-permissions.log` for the permission sync. `tail -f` them to see what fired.
+- **`recipes`** — composable capabilities, keyed by name (provider-style). A recipe is **enabled iff its key is present**; each value is validated by that recipe's own schema. Two kinds of thing back a recipe, kept deliberately separate:
+  - **Worm-owned code ships with the binary** — config-independent scripts (the sandbox interceptor, the permission-sync script) parameterized at run time, so they live **once** and a fix propagates by upgrading `worm`, with nothing to re-materialize per project.
+  - **Genuinely per-project artifacts** (the sandbox `Dockerfile` / `compose.yml` / policy) are **materialized** under `.worm/recipes/<name>/` (→ the profile), **non-clobbering** — edit a generated file and it's kept. To pull a scaffold update, delete it (e.g. `rm .worm/recipes/sandbox/Dockerfile`) and re-run `worm sync`. (A planned regenerate/upgrade command is the last roadmap item — see [docs/recipes-roadmap.md](docs/recipes-roadmap.md).)
+
+  Hooks are **inverted**: each slot's `.claude/settings.local.json` (gitignored, per-slot) holds **one static entry per event** — `worm hook trigger <event>` — installed once. At tool/session time that dispatcher resolves the live slot, runs each enabled recipe's command for the event, injects env, and owns logging. So **enabling, disabling, or updating a recipe is a pure `config.json` edit** — settings never churn, and recipes compose without clobbering each other or your own hooks. Recipe-hook logs land in **`.worm/logs/`** (→ the profile): `<container>.log` for the container's `up`/`down` output, `<container>-redirect.log` for the sandbox's allow/deny decisions, `sync-permissions.log` for permission sync. `tail -f` them to see what fired.
+
   Built-in recipes (enable by adding the key, e.g. `"recipes": { "sandbox": {}, "syncPermissions": {} }`):
-  - **`sandbox`** — `{ "backend": "docker", "image": "node:22-bookworm", "tools": [], "neverSandbox": [...], "exemptDirs": [], "autostart": true, "autostop": false }`. Generates a Dockerfile (from `image` + `tools`), a compose file, and a `redirect-to-sandbox.js` interceptor, then wires each slot so its container auto-starts (`autostart`) and filesystem-mutating commands are redirected into it (mounted at the same path via `$SANDBOX_DIR`). See [docs/strategy-3-spec.md](docs/strategy-3-spec.md) §6.
+  - **`sandbox`** — `{ "backend": "docker", "image": "node:22-bookworm", "tools": [], "neverSandbox": [...], "exemptDirs": [], "autostart": true, "autostop": false }`. Materializes a Dockerfile (from `image` + `tools`), a compose file, and a sandbox policy (the interceptor itself ships with worm), then wires each slot so its container auto-starts (`autostart`) and filesystem-mutating commands are redirected into it (mounted at the same path via `$SANDBOX_DIR`). See [docs/strategy-3-spec.md](docs/strategy-3-spec.md) §6.
   - **`syncPermissions`** (`{}`) — wires `SessionStart`/`SessionEnd` hooks that union the `permissions` block of each slot's `settings.local.json` with a canonical store shared across slots (approve a command once, every slot learns it). Merge-preserving — it never touches other recipes' hooks.
   - **`shareHistory`** (`{}`) — symlinks each sibling slot's Claude history dir (`~/.claude/projects/<slot-slug>`) to Slot 0's, so all slots share one conversation history. Refuses to clobber a real history dir (warns instead).
 
