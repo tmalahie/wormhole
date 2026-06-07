@@ -6,7 +6,7 @@ import { StoreSchema } from "../types.js";
 
 /**
  * Machine-level worm settings stored in ~/.worm/config.json. Distinct from
- * the per-project `~/.worm/multiverses/<name>/config.json` — this file holds
+ * the per-project `~/.worm/projects/<name>/config.json` — this file holds
  * preferences that apply across every project on this machine (currently
  * just the editor used by `worm warp --open`).
  */

@@ -6,7 +6,7 @@ export const GLOBAL_ROOT_NAME = ".worm";
 export const LOCAL_ROOT_NAME = ".worm";
 export const SHARED_DIR_NAME = "shared";
 export const CONFIG_FILE_NAME = "config.json";
-export const MULTIVERSES_DIR_NAME = "multiverses";
+export const PROJECTS_DIR_NAME = "projects";
 export const TEMPLATES_DIR_NAME = "templates";
 export const DEFAULT_TEMPLATE_NAME = "default";
 export const SCRIPTS_DIR_NAME = "scripts";
@@ -25,8 +25,16 @@ export function globalRoot(): string {
   return path.join(os.homedir(), GLOBAL_ROOT_NAME);
 }
 
-export function globalMultiversesDir(): string {
-  return path.join(globalRoot(), MULTIVERSES_DIR_NAME);
+export function globalProjectsDir(): string {
+  return path.join(globalRoot(), PROJECTS_DIR_NAME);
+}
+
+/**
+ * Pre-rename location of the per-project profiles (`~/.worm/multiverses/`).
+ * Retained only so `init` can migrate an existing home to `projects/` in place.
+ */
+export function legacyGlobalProjectsDir(): string {
+  return path.join(globalRoot(), "multiverses");
 }
 
 export function globalSharedDir(): string {
@@ -48,7 +56,7 @@ export function globalManagedLinksFile(): string {
 }
 
 export function globalProjectDir(projectName: string): string {
-  return path.join(globalMultiversesDir(), projectName);
+  return path.join(globalProjectsDir(), projectName);
 }
 
 export function globalProjectConfig(projectName: string): string {
@@ -78,7 +86,7 @@ export function globalProjectLogsDir(projectName: string): string {
 
 /**
  * The canonical Claude memory store for a project, in the profile
- * (`~/.worm/multiverses/<name>/.claude/memory`). The shareMemory recipe links
+ * (`~/.worm/projects/<name>/.claude/memory`). The shareMemory recipe links
  * every slot's `~/.claude/projects/<slug>/memory` at this one dir, so memory is
  * shared across slots AND durable across a slot-0 reclone.
  */
@@ -156,7 +164,7 @@ export function localLogsDir(slot0Root: string): string {
 
 /**
  * Path to the managed-link manifest. Lives in the PROFILE
- * (`~/.worm/multiverses/<name>/.managed-links.json`) so it's durable per project
+ * (`~/.worm/projects/<name>/.managed-links.json`) so it's durable per project
  * and survives a slot-0 reclone. `worm sync` records the symlinks it creates
  * here so prune/GC only ever touches links it owns — never real user files.
  */

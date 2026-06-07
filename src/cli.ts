@@ -34,7 +34,7 @@ program
 program
   .command("clone <url> [path]")
   .description("Clone a repo and bind it as Slot 0 (the recommended entry point).")
-  .option("-n, --name <name>", "Override the multiverse name (default: derived from the URL).")
+  .option("-n, --name <name>", "Override the project name (default: derived from the URL).")
   .option("-t, --template <dir>", "Seed from a custom template directory.")
   .option("-f, --force", "Overwrite existing profile fields when they conflict.")
   .option("--skip-hook", "Skip the on_create hook that warms up Slot 0.")
@@ -44,7 +44,7 @@ program
 
 program
   .command("init")
-  .description("Bind the current git clone as Slot 0 of a wormhole multiverse.")
+  .description("Bind the current git clone as Slot 0 of a worm project.")
   .option("-n, --name <name>", "Override the project name (default: basename of the repo root).")
   .option("-t, --template <dir>", "Seed from a custom template directory (config.json + optional scripts/).")
   .option("-f, --force", "Overwrite existing profile fields when they conflict.")

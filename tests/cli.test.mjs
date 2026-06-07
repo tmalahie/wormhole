@@ -25,7 +25,7 @@ test("first `worm init` lazily provisions the global root", async (t) => {
   assert.match(r.stdout, /First run/);
 
   for (const rel of [
-    "multiverses",
+    "projects",
     "shared",
     "shared/global-rules.md",
     "templates/default/config.json",
@@ -36,19 +36,41 @@ test("first `worm init` lazily provisions the global root", async (t) => {
   }
 });
 
+test("worm init migrates a legacy multiverses/ home to projects/ in place", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+
+  // Simulate a pre-rename home: a profile under the old multiverses/ dir.
+  const legacyProfile = path.join(sb.wormHome, "multiverses", "old-project");
+  await mkdir(legacyProfile, { recursive: true });
+  await writeFile(path.join(legacyProfile, "marker.txt"), "keep me\n");
+
+  const r = await sb.worm(["init"]);
+  assert.equal(r.exitCode, 0, r.stderr);
+  assert.match(r.stdout, /Migrated/);
+
+  // The profile (and its contents) moved under projects/; multiverses/ is gone.
+  const moved = await readFile(
+    path.join(sb.wormHome, "projects", "old-project", "marker.txt"),
+    "utf8"
+  );
+  assert.equal(moved.trim(), "keep me");
+  await assert.rejects(stat(path.join(sb.wormHome, "multiverses")), /ENOENT/);
+});
+
 test("worm init binds Slot 0: symlinks, excludes .worm, seeds manifest, idempotent", async (t) => {
   const sb = await createSandbox();
   t.after(() => sb.cleanup());
 
   const r1 = await sb.worm(["init"]);
   assert.equal(r1.exitCode, 0, r1.stderr);
-  assert.match(r1.stdout, /bound to the Multiverse \(Slot 0\)/);
+  assert.match(r1.stdout, /is now bound as Slot 0/);
 
   const configLink = await readlink(path.join(sb.projectRoot, ".worm", "config.json"));
-  assert.match(configLink, /multiverses\/.+\/config\.json$/);
+  assert.match(configLink, /projects\/.+\/config\.json$/);
 
   const scriptsLink = await readlink(path.join(sb.projectRoot, ".worm", "scripts"));
-  assert.match(scriptsLink, /multiverses\/.+\/scripts$/);
+  assert.match(scriptsLink, /projects\/.+\/scripts$/);
 
   // .worm/ self-ignores AND is excluded locally from Slot 0's git view.
   const localIgnore = await readFile(path.join(sb.projectRoot, ".worm", ".gitignore"), "utf8");
@@ -59,7 +81,7 @@ test("worm init binds Slot 0: symlinks, excludes .worm, seeds manifest, idempote
   // Managed-link manifest is seeded in the PROFILE (durable; survives a reclone).
   const manifest = JSON.parse(
     await readFile(
-      path.join(sb.wormHome, "multiverses", path.basename(sb.projectRoot), ".managed-links.json"),
+      path.join(sb.wormHome, "projects", path.basename(sb.projectRoot), ".managed-links.json"),
       "utf8"
     )
   );
@@ -72,7 +94,7 @@ test("worm init binds Slot 0: symlinks, excludes .worm, seeds manifest, idempote
 
   const r2 = await sb.worm(["init"]);
   assert.equal(r2.exitCode, 0, r2.stderr);
-  assert.match(r2.stdout, /Reused global profile/);
+  assert.match(r2.stdout, /Reused profile/);
   assert.doesNotMatch(r2.stdout, /First run/, "global init should not run twice");
 });
 
@@ -165,12 +187,12 @@ test("shared_paths are linked into Slot 0 and each new universe", async (t) => {
   // two-hop is gone).
   const slot0Link = await readlink(path.join(sb.projectRoot, ".env"));
   assert.ok(path.isAbsolute(slot0Link), "slot links are absolute");
-  assert.match(slot0Link, /multiverses\/.+\/\.env$/);
+  assert.match(slot0Link, /projects\/.+\/\.env$/);
 
   await sb.worm(["universe", "add", "feature-a", "--skip-hook"]);
   const root = await realpath(sb.projectRoot);
   const sibLink = await readlink(path.join(siblingPath(root, 1), ".env"));
-  assert.match(sibLink, /multiverses\/.+\/\.env$/);
+  assert.match(sibLink, /projects\/.+\/\.env$/);
   // No stale .worm/shared remains.
   await assert.rejects(stat(path.join(sb.projectRoot, ".worm", "shared")), /ENOENT/);
 });
@@ -191,7 +213,7 @@ test("worm sync reconciles links and prunes removed shared_paths via the manifes
 
   // Drop .env from the config, then sync — the managed link should be pruned.
   const name = path.basename(sb.projectRoot);
-  const cfgPath = path.join(sb.wormHome, "multiverses", name, "config.json");
+  const cfgPath = path.join(sb.wormHome, "projects", name, "config.json");
   await writeFile(cfgPath, JSON.stringify({ shared_paths: [], hooks: {} }));
 
   const r = await sb.worm(["sync"]);
@@ -326,7 +348,7 @@ test("syncPermissions wires session dispatcher entries and runs through the disp
   // Triggering session-start through the dispatcher unions the slot's permissions
   // with the canonical global-profile store (hermetic — pure node, no docker).
   const canonical = path.join(
-    sb.wormHome, "multiverses", path.basename(await realpath(sb.projectRoot)), ".claude", "settings.local.json"
+    sb.wormHome, "projects", path.basename(await realpath(sb.projectRoot)), ".claude", "settings.local.json"
   );
   await mkdir(path.dirname(canonical), { recursive: true });
   await writeFile(canonical, JSON.stringify({ permissions: { allow: ["Bash(ls:*)"] } }));
@@ -529,7 +551,7 @@ test("shareMemory seeds the profile and links every slot's memory at it", async 
   const root = await realpath(sb.projectRoot);
   const name = path.basename(root);
   const projectsDir = path.join(sb.wormHome, ".claude", "projects");
-  const profileMemory = path.join(sb.wormHome, "multiverses", name, ".claude", "memory");
+  const profileMemory = path.join(sb.wormHome, "projects", name, ".claude", "memory");
 
   // A pre-existing real memory dir at Slot 0 is migrated into the profile store.
   const slot0Memory = path.join(projectsDir, claudeSlug(root), "memory");
@@ -850,7 +872,7 @@ test("config is strict: legacy keys are rejected, not silently migrated", async 
   await sb.worm(["init"]);
 
   const name = path.basename(sb.projectRoot);
-  const cfgPath = path.join(sb.wormHome, "multiverses", name, "config.json");
+  const cfgPath = path.join(sb.wormHome, "projects", name, "config.json");
 
   // A pre-Strategy-3 / pre-recipes shape. With back-compat removed, loading this
   // must fail loudly (single-user project — no legacy normalizer).
@@ -880,7 +902,7 @@ test("WORM_HOME takes precedence over HOME", async (t) => {
   });
   assert.equal(r.exitCode, 0, r.stderr);
 
-  await stat(path.join(sb.wormHome, "multiverses"));
+  await stat(path.join(sb.wormHome, "projects"));
   await assert.rejects(stat(path.join(sb.projectRoot, "fake-home", ".worm")), /ENOENT/);
 });
 
@@ -997,11 +1019,11 @@ test("worm destroy --force removes siblings, .worm/, and the global profile; Slo
 
   const r = await sb.worm(["destroy", "--force"]);
   assert.equal(r.exitCode, 0, r.stderr);
-  assert.match(r.stdout, /multiverse is no more/);
+  assert.match(r.stdout, /project is no more/);
 
   await assert.rejects(stat(path.join(sb.projectRoot, ".worm")), /ENOENT/);
   await assert.rejects(stat(sib), /ENOENT/, "sibling worktree removed");
-  await assert.rejects(stat(path.join(sb.wormHome, "multiverses", "demo")), /ENOENT/);
+  await assert.rejects(stat(path.join(sb.wormHome, "projects", "demo")), /ENOENT/);
 
   // Slot 0 itself (the repo + its .git) is untouched.
   const gitStat = await stat(path.join(sb.projectRoot, ".git"));
@@ -1027,7 +1049,7 @@ test("worm destroy errors clearly when project isn't bound", async (t) => {
 
   const r = await sb.worm(["destroy", "--force"]);
   assert.notEqual(r.exitCode, 0);
-  assert.match(r.stderr, /not bound/);
+  assert.match(r.stderr, /not a worm-bound project/);
 });
 
 test("default scripts/setup.sh is created and executable", async (t) => {
@@ -1148,7 +1170,7 @@ test("init produces the consolidated layout (recipes/logs symlinks into the prof
   t.after(() => sb.cleanup());
   await sb.worm(["init"]);
 
-  const profile = path.join(sb.wormHome, "multiverses", path.basename(sb.projectRoot));
+  const profile = path.join(sb.wormHome, "projects", path.basename(sb.projectRoot));
   // .worm/recipes and .worm/logs are absolute symlinks into the profile.
   assert.ok(path.isAbsolute(await readlink(path.join(sb.projectRoot, ".worm", "recipes"))));
   assert.equal(
@@ -1187,7 +1209,7 @@ test("shared_paths can pull a tail from a named external store; edits land in th
   const docsLink = path.join(sb.projectRoot, ".claude", "docs");
   assert.equal(await realpath(docsLink), await realpath(path.join(teamRepo, ".claude", "docs")));
   assert.equal(await readFile(path.join(docsLink, "guide.md"), "utf8"), "TEAM\n");
-  assert.match(await readlink(path.join(sb.projectRoot, ".env")), /multiverses\/.+\/\.env$/);
+  assert.match(await readlink(path.join(sb.projectRoot, ".env")), /projects\/.+\/\.env$/);
 
   // Editing through the slot lands in the team repo (intended — two repos wired).
   await writeFile(path.join(docsLink, "new.md"), "added\n");
@@ -1266,7 +1288,7 @@ test("a project can reference a store declared in the global config", async (t) 
   await sb.worm(["init"]); // provisions ~/.worm
   // Global config declares the store; the project references it.
   await writeFile(path.join(sb.wormHome, "config.json"), JSON.stringify({ stores: { org: { root: ext } } }));
-  const profileCfg = path.join(sb.wormHome, "multiverses", path.basename(sb.projectRoot), "config.json");
+  const profileCfg = path.join(sb.wormHome, "projects", path.basename(sb.projectRoot), "config.json");
   await writeFile(profileCfg, JSON.stringify({ shared_paths: [{ path: "shared", store: "org" }], hooks: {} }));
 
   const r = await sb.worm(["sync"]);

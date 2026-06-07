@@ -11,7 +11,7 @@ cli.ts
 
 ## The model in one paragraph
 
-A worm project is a **normal git clone**. **Slot 0 is the primary working tree itself** (`~/git/<repo>/`, never renamed). Extra slots are permanent sibling worktrees at `~/git/<repo>-<N>`, added on demand. The pool is **emergent** — it's whatever `git worktree list` reports, not a fixed count. There is no bare container and no spawn/teardown: you `git switch` branches in place. The `.worm/` directory at Slot 0 is (almost) all **pointers into the profile** (`~/.worm/multiverses/<name>/`): `config.json`, `scripts`, `recipes`, and `logs` are symlinks, plus a local `.gitignore`. The durable per-project state (recipe artifacts, logs, the managed-link manifest) lives in the profile and survives a slot-0 reclone.
+A worm project is a **normal git clone**. **Slot 0 is the primary working tree itself** (`~/git/<repo>/`, never renamed). Extra slots are permanent sibling worktrees at `~/git/<repo>-<N>`, added on demand. The pool is **emergent** — it's whatever `git worktree list` reports, not a fixed count. There is no bare container and no spawn/teardown: you `git switch` branches in place. The `.worm/` directory at Slot 0 is (almost) all **pointers into the profile** (`~/.worm/projects/<name>/`): `config.json`, `scripts`, `recipes`, and `logs` are symlinks, plus a local `.gitignore`. The durable per-project state (recipe artifacts, logs, the managed-link manifest) lives in the profile and survives a slot-0 reclone.
 
 ## Layers
 
@@ -74,15 +74,15 @@ These are easy to break and hard to debug — keep them in mind when touching th
 
 2. **The pool is emergent.** `scanUniverses` reads `git worktree list`; a slot is Slot 0 (path === root) or a sibling matching `<repo>-<N>` one level up. No `universes_count`.
 
-3. **Symlinks point at the profile (absolute).** Post-consolidation, `.worm/` is (almost) all pointers into `~/.worm/multiverses/<name>/`: `config.json`, `scripts`, `recipes`, and `logs` are symlinks, and each slot's shared-path tunnels link **straight at the profile source** (`<slot>/<tail>` → `profile/<tail>`, absolute — the old `.worm/shared` two-hop is gone). `core/layout.ts:ensureLocalLayout` establishes this and migrates an old project in place.
+3. **Symlinks point at the profile (absolute).** Post-consolidation, `.worm/` is (almost) all pointers into `~/.worm/projects/<name>/`: `config.json`, `scripts`, `recipes`, and `logs` are symlinks, and each slot's shared-path tunnels link **straight at the profile source** (`<slot>/<tail>` → `profile/<tail>`, absolute — the old `.worm/shared` two-hop is gone). `core/layout.ts:ensureLocalLayout` establishes this and migrates an old project in place.
 
-4. **The managed-link manifest is the source of truth for injected links.** It lives in the **profile** (`~/.worm/multiverses/<name>/.managed-links.json`), so `readManifest`/`writeManifest` take the project name. `sync`/`rm`/`destroy` only touch links recorded there, and the prune skips a link that became a real file. Strip managed links before `git worktree remove`.
+4. **The managed-link manifest is the source of truth for injected links.** It lives in the **profile** (`~/.worm/projects/<name>/.managed-links.json`), so `readManifest`/`writeManifest` take the project name. `sync`/`rm`/`destroy` only touch links recorded there, and the prune skips a link that became a real file. Strip managed links before `git worktree remove`.
 
 5. **All paths route through `core/paths.ts`.** No string concatenation of path segments elsewhere. The `<repo>-<N>` naming lives on one constant (`SLOT_DIR_INFIX`).
 
 6. **Commands are idempotent.** Re-running `init`, `sync`, or `universe add` on the same input produces the same end state. `sync` is fully declarative.
 
-7. **Templates are seeded, not symlinked.** Each multiverse owns its own copy of `config.json` and `scripts/setup.sh` after creation — editing a template later does not affect existing projects.
+7. **Templates are seeded, not symlinked.** Each project owns its own copy of `config.json` and `scripts/setup.sh` after creation — editing a template later does not affect existing projects.
 
 8. **Never destroy Slot 0.** `universe rm` refuses it; `destroy` sweeps only siblings.
 

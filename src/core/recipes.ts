@@ -258,7 +258,7 @@ const shareHistoryRecipe: Recipe<ShareHistoryRecipeConfig> = {
 
 // --- the shareMemory recipe --------------------------------------------------
 // Links every slot's Claude *memory* dir at ONE canonical store in the PROFILE
-// (~/.worm/multiverses/<name>/.claude/memory), so all slots read & write one
+// (~/.worm/projects/<name>/.claude/memory), so all slots read & write one
 // shared memory that survives a slot-0 reclone. Unlike shareHistory — whose
 // canonical store IS Slot 0, so Slot 0 is left alone — the store here lives in
 // the profile, so Slot 0 is linked too. Purely imperative (onSlotCreate).

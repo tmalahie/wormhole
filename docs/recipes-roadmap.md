@@ -41,7 +41,7 @@ This doc lists the pain points and the directions we settled on so a future pass
   script, two versions, purely because each project froze its own copy and nobody `rm`'d the stale one.
   This is the propagation bug below (§5/§6) caught in the wild — and the motivation for the spine.
 - **Two parallel file-generation systems exist.** Recipe artifacts (above) AND ad-hoc profile templates
-  like `~/.worm/multiverses/mkpc/scripts/docker-compose.override.template.yml`, which uses hand-rolled
+  like `~/.worm/projects/mkpc/scripts/docker-compose.override.template.yml`, which uses hand-rolled
   `{{NAME}}` / `{{PORT}}` placeholders rendered by the project's `setup.sh`. Same underlying problem
   ("write a file that depends on parameters"), solved twice, differently.
 

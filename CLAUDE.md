@@ -42,7 +42,7 @@ Keep that in mind when reviewing changes: a "clever" addition that breaks idempo
 ### User-facing output
 - Every line of CLI output goes through `logger.*`. Do not call `console.log` / `console.error` directly outside of `cli.ts` and the json branch of `status.ts`.
 - Tone: `info` for intent, `step` for substeps, `success` at the end, `warn` for recoverable issues, `error` only via thrown `WormError`.
-- **Vocabulary is themed.** Keep it consistent: `🪐` multiverse, `🌌` add a universe, `🚀` active slot / switch, `💫` collapse (remove a universe), `🔗` shared "anomaly"/tunnel, `🪢` worktree, `⚡` hook, `🎯` target, `🛸` init / binding Slot 0, `📐` template, `🌱` sprouted local placeholder, `📝` gitignore write, `🧹` swept links, `💥` broken / error, `✨` success, `💡` hint. New messages should pick from this palette rather than introducing a new emoji per command.
+- **Vocabulary is themed.** Keep it consistent: `🪐` wormhole / global root, `🌌` add a universe, `🚀` active slot / switch, `💫` collapse (remove a universe), `🔗` shared "anomaly"/tunnel, `🪢` worktree, `⚡` hook, `🎯` target, `🛸` init / binding Slot 0, `📐` template, `🌱` sprouted local placeholder, `📝` gitignore write, `🧹` swept links, `💥` broken / error, `✨` success, `💡` hint. New messages should pick from this palette rather than introducing a new emoji per command.
 
 ### Paths
 - All filesystem locations come from `src/core/paths.ts`. If you need a new one, add a function there — never concatenate path segments at the call site. The slot-dir naming (`<repo>-<N>`) is centralised on `SLOT_DIR_INFIX`; the builder (`siblingWorktreeDir`), the parser (`universe.ts`), and shell completion all derive from it.
@@ -53,9 +53,9 @@ Keep that in mind when reviewing changes: a "clever" addition that breaks idempo
 
 ### Symlinks
 - Use `ensureSymlink()` from `src/core/symlinks.ts`. It's idempotent and refuses to clobber real files. Don't call `fs.symlink` directly.
-- `.worm/` is (almost) all pointers into the profile (`~/.worm/multiverses/<name>/`): `config.json`, `scripts`, `recipes`, and `logs` are symlinks; durable state (recipe artifacts, logs, the manifest) lives in the profile. `core/layout.ts:ensureLocalLayout` establishes this; it runs on init/sync/universe-add.
+- `.worm/` is (almost) all pointers into the profile (`~/.worm/projects/<name>/`): `config.json`, `scripts`, `recipes`, and `logs` are symlinks; durable state (recipe artifacts, logs, the manifest) lives in the profile. `core/layout.ts:ensureLocalLayout` establishes this; it runs on init/sync/universe-add.
 - Each slot's shared-path tunnels link **straight at the profile source** (`<slot>/<tail>` → `profile/<tail>`, **absolute** — the old `.worm/shared` two-hop is gone). All cross-repo links pass `{ relative: false }`.
-- Shared-path links are tracked in the **managed-link manifest**, now in the **profile** (`~/.worm/multiverses/<name>/.managed-links.json`), so `readManifest`/`writeManifest`/`reconcileSlotLinks` take the **project name** (not slot0Root). Reconcile/prune through `core/links.ts` so worm only ever touches links it created — never structural wiring or real user files. The prune is deref-guarded: a managed link that became a real file is left alone.
+- Shared-path links are tracked in the **managed-link manifest**, now in the **profile** (`~/.worm/projects/<name>/.managed-links.json`), so `readManifest`/`writeManifest`/`reconcileSlotLinks` take the **project name** (not slot0Root). Reconcile/prune through `core/links.ts` so worm only ever touches links it created — never structural wiring or real user files. The prune is deref-guarded: a managed link that became a real file is left alone.
 
 ### Slot edge cases
 - **Slot 0 is a real working tree**, so git would otherwise see `.worm/` as untracked. `init.ts:ensureGitExclude` adds `/.worm/` to `.git/info/exclude` (local, not the tracked `.gitignore`).
@@ -64,7 +64,7 @@ Keep that in mind when reviewing changes: a "clever" addition that breaks idempo
 
 ### Idempotency
 - `init`, `sync`, and `universe add`/`rm` may be re-run after partial failure. Always reach for `ensureDir`, `ensureSymlink`, and `writeTextIfMissing` rather than raw create operations. If you write something destructively, gate it behind `--force`. `sync` is declarative — running it twice is a no-op.
-- `worm init` lazily provisions `~/.worm/` on first run (detected via the existence of `~/.worm/multiverses/`, not the root itself — the root can be pre-created in sandboxes). Do not bypass `ensureGlobalRoot` from other commands; if a future command needs the global root, call it from `init` flows only.
+- `worm init` lazily provisions `~/.worm/` on first run (detected via the existence of `~/.worm/projects/`, not the root itself — the root can be pre-created in sandboxes). A pre-rename home (`~/.worm/multiverses/`) is migrated to `projects/` in place by `migrateLegacyProfiles` before the first-run check. Do not bypass `ensureGlobalRoot` from other commands; if a future command needs the global root, call it from `init` flows only.
 
 ### Hooks
 - User-supplied commands always run through `runShell()` (not `run()`), with `inheritStdio: true`. They get the full shell, including pipes and `&&`.
@@ -73,11 +73,11 @@ Keep that in mind when reviewing changes: a "clever" addition that breaks idempo
 - The default `on_create` invokes `bash "$WORM_PROJECT_ROOT/.worm/scripts/setup.sh"`. Users edit `setup.sh` rather than the JSON config. Don't change the hook-command default without also updating the seeded `setup.sh` template.
 
 ### Config
-- `ConfigSchema` (`src/types.ts`) is `.strict()` and there is **no legacy normalization** — `core/config.ts` parses configs as-is, so an unknown or renamed key is a hard `Invalid config` error. This is a single-user tool; when you change the schema, migrate the on-disk profiles under `~/.worm/multiverses/<name>/config.json` (and the template) in the same change rather than adding a back-compat shim. The config shape: `{ shared_paths, stores, hooks: { on_create?, on_remove? }, recipes: { <name>: <recipe-config> } }`. A `shared_paths` entry is `string | { path, store? }` (bare = profile store); `stores` is `{ <name>: { root, url? } }` — `core/stores.ts:resolveStoreLinks` maps each entry to a source (profile by default, else the named store's root, cloning from `url` on demand), so `reconcileSlotLinks` consumes resolved `{ tail, source, sprout }` links, not raw paths.
+- `ConfigSchema` (`src/types.ts`) is `.strict()` and there is **no legacy normalization** — `core/config.ts` parses configs as-is, so an unknown or renamed key is a hard `Invalid config` error. This is a single-user tool; when you change the schema, migrate the on-disk profiles under `~/.worm/projects/<name>/config.json` (and the template) in the same change rather than adding a back-compat shim. The config shape: `{ shared_paths, stores, hooks: { on_create?, on_remove? }, recipes: { <name>: <recipe-config> } }`. A `shared_paths` entry is `string | { path, store? }` (bare = profile store); `stores` is `{ <name>: { root, url? } }` — `core/stores.ts:resolveStoreLinks` maps each entry to a source (profile by default, else the named store's root, cloning from `url` on demand), so `reconcileSlotLinks` consumes resolved `{ tail, source, sprout }` links, not raw paths.
 
 ### Templates
-- `~/.worm/templates/default/` is seeded on first global init by [src/core/templates.ts](src/core/templates.ts). Each new multiverse is bootstrapped from a template (CLI `--template <dir>` > global default > built-in `DEFAULT_CONFIG`).
-- After bootstrap each multiverse owns its files — templates are **copied**, never symlinked. Editing the template later won't affect existing projects. If you need to update an existing project, edit `~/.worm/multiverses/<name>/` directly. (Template configs are parsed with `ConfigSchema` directly — like every config now — so a template must use the current schema.)
+- `~/.worm/templates/default/` is seeded on first global init by [src/core/templates.ts](src/core/templates.ts). Each new project is bootstrapped from a template (CLI `--template <dir>` > global default > built-in `DEFAULT_CONFIG`).
+- After bootstrap each project owns its files — templates are **copied**, never symlinked. Editing the template later won't affect existing projects. If you need to update an existing project, edit `~/.worm/projects/<name>/` directly. (Template configs are parsed with `ConfigSchema` directly — like every config now — so a template must use the current schema.)
 
 ## Don'ts
 

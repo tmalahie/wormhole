@@ -12,7 +12,7 @@ Almost everything worm does to wire a slot is **one operation**: make `<scope-ro
 `<store>/<tail>`.
 
 - **Today** there is exactly one scope (a project slot) and one *implicit* store (the project profile,
-  `~/.worm/multiverses/<project>/`). `shared_paths` is a list of `<tail>`s.
+  `~/.worm/projects/<project>/`). `shared_paths` is a list of `<tail>`s.
 - **Generalize both axes:**
   - **Scopes:** the project slot (each worktree, as today) **and** `HOME` (`~/`) for machine-global
     setup that belongs to no project.
@@ -61,10 +61,10 @@ profile. Not "delete it," not "leave it" — thin it.
 
 ```
 ~/git/<repo>/.worm/
-  config.json -> ~/.worm/multiverses/<repo>/config.json     (unchanged pointer)
-  scripts     -> ~/.worm/multiverses/<repo>/scripts          (unchanged pointer)
-  recipes     -> ~/.worm/multiverses/<repo>/recipes          (was real files → now a symlink)
-  logs        -> ~/.worm/multiverses/<repo>/logs             (was real files → now a symlink)
+  config.json -> ~/.worm/projects/<repo>/config.json     (unchanged pointer)
+  scripts     -> ~/.worm/projects/<repo>/scripts          (unchanged pointer)
+  recipes     -> ~/.worm/projects/<repo>/recipes          (was real files → now a symlink)
+  logs        -> ~/.worm/projects/<repo>/logs             (was real files → now a symlink)
   .managed-links.json                                        (stays local)
   .gitignore = *                                             (unchanged)
 ```
@@ -106,7 +106,7 @@ external/team repos and the global shared dir are **named stores**. (Rejected: d
 `externalResources` block — it's a parallel system alongside `shared_paths`.)
 
 ```jsonc
-// ~/.worm/multiverses/<repo>/config.json
+// ~/.worm/projects/<repo>/config.json
 {
   "stores": {
     "team": { "url": "git@github.com:org/shared", "root": "~/git/team-shared" }

@@ -18,12 +18,12 @@ export async function runStatus(options: StatusOptions = {}): Promise<void> {
     return;
   }
 
-  renderMultiverse(root, slots);
+  renderStatus(root, slots);
 }
 
-function renderMultiverse(root: string, slots: UniverseSlot[]): void {
+function renderStatus(root: string, slots: UniverseSlot[]): void {
   const projectName = path.basename(root);
-  logger.raw(`🪐 ${pc.bold("MULTIVERSE STATUS")} — ${pc.bold(projectName)}  ${pc.dim(root)}`);
+  logger.raw(`🪐 ${pc.bold("WORMHOLE STATUS")} — ${pc.bold(projectName)}  ${pc.dim(root)}`);
   logger.raw("");
 
   const labelWidth = Math.max(0, ...slots.map((s) => universeLabel(s).length));

@@ -25,7 +25,7 @@ export async function runDestroy(options: DestroyOptions = {}): Promise<void> {
   try {
     projectName = await readProjectName(root);
   } catch {
-    throw new WormError("This project is not bound to a wormhole multiverse.", {
+    throw new WormError("This directory is not a worm-bound project.", {
       hint: "Nothing to destroy. If you have leftover .worm/ state, remove it manually.",
     });
   }
@@ -34,7 +34,7 @@ export async function runDestroy(options: DestroyOptions = {}): Promise<void> {
   const siblings = slots.filter((s) => !s.isPrimary);
   const globalProfile = globalProjectDir(projectName);
 
-  logger.info(`💥 About to destroy the ${logger.bold(projectName)} multiverse:`);
+  logger.info(`💥 About to destroy the ${logger.bold(projectName)} project:`);
   if (siblings.length > 0) {
     logger.raw(`  • Remove ${siblings.length} sibling universe${siblings.length === 1 ? "" : "s"}:`);
     for (const s of siblings) {
@@ -82,7 +82,7 @@ export async function runDestroy(options: DestroyOptions = {}): Promise<void> {
     logger.step(`🧹 removed ${logger.dim(globalProfile)}`);
   }
 
-  logger.success(`💥 The ${projectName} multiverse is no more.`);
+  logger.success(`💥 The ${projectName} project is no more.`);
 }
 
 function confirm(question: string): Promise<boolean> {

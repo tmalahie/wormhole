@@ -14,12 +14,13 @@ import {
   saveGlobalConfig,
 } from "../core/config.js";
 import {
-  globalMultiversesDir,
   globalProjectConfig,
   globalProjectDir,
   globalProjectScriptsDir,
+  globalProjectsDir,
   globalRoot,
   globalSharedDir,
+  legacyGlobalProjectsDir,
   localConfigFile,
   localRoot,
   localScriptsDir,
@@ -58,7 +59,7 @@ export async function runInit(options: InitOptions = {}): Promise<void> {
 }
 
 /**
- * Bind a normal git clone as Slot 0 of a worm multiverse. Shared between
+ * Bind a normal git clone as Slot 0 of a worm project. Shared between
  * `worm init` (current repo) and `worm clone` (freshly cloned repo).
  */
 export async function bindProject(
@@ -78,7 +79,7 @@ export async function bindProject(
 
   const projectName = options.name ?? deriveProjectName(projectRoot);
   logger.info(
-    `🛸 Anchoring ${logger.bold(projectName)} to the Multiverse (${logger.dim(projectRoot)})`
+    `🛸 Binding ${logger.bold(projectName)} as Slot 0 (${logger.dim(projectRoot)})`
   );
 
   const existed = await globalProfileExists(projectName);
@@ -156,12 +157,18 @@ export async function bindProject(
 
   logger.success(
     existed
-      ? `Reused global profile; refreshed layout for ${projectName}.`
-      : `${projectName} is now bound to the Multiverse (Slot 0).`
+      ? `Reused profile; refreshed layout for ${projectName} (Slot 0).`
+      : `${projectName} is now bound as Slot 0.`
   );
   logger.raw("");
   logger.raw(
-    `Add a parallel universe with ${logger.bold("worm universe add <branch>")}; inspect with ${logger.bold("worm status")}.`
+    `💡 Your profile lives at ${logger.dim(globalProjectDir(projectName))}`
+  );
+  logger.raw(
+    `   Edit ${logger.bold("config.json")} (shared_paths, hooks, recipes) and ${logger.bold("scripts/setup.sh")} (warm-up commands) there.`
+  );
+  logger.raw(
+    `   Spin up a parallel universe with ${logger.bold("worm universe add <branch>")}; inspect with ${logger.bold("worm status")}.`
   );
 }
 
@@ -185,12 +192,18 @@ async function ensureGitExclude(repoRoot: string, entry: string): Promise<void> 
 
 async function ensureGlobalRoot(): Promise<void> {
   const root = globalRoot();
+  await ensureDir(root);
+
+  // Migrate a pre-rename home (`multiverses/` → `projects/`) in place. The
+  // profile contents move untouched; each project's `.worm/` symlinks now point
+  // at the old path, so they're refreshed on the next `worm init`/`worm sync`.
+  await migrateLegacyProfiles();
+
   // Detect first run by an inner marker rather than the root itself — the root
   // may have been pre-created (sandboxes, tests, mounted volumes).
-  const firstRun = !(await pathExists(globalMultiversesDir()));
+  const firstRun = !(await pathExists(globalProjectsDir()));
 
-  await ensureDir(root);
-  await ensureDir(globalMultiversesDir());
+  await ensureDir(globalProjectsDir());
   await ensureDir(globalSharedDir());
   await seedBuiltInDefaultTemplate();
 
@@ -201,14 +214,33 @@ async function ensureGlobalRoot(): Promise<void> {
 
   await writeTextIfMissing(
     path.join(root, "README.md"),
-    "# wormhole personal repo\n\nThis directory is managed by the `worm` CLI.\nIt holds per-project profiles (multiverses/), shared rules (shared/), and templates (templates/).\n"
+    "# wormhole personal repo\n\nThis directory is managed by the `worm` CLI.\nIt holds per-project profiles (projects/), shared rules (shared/), and templates (templates/).\n"
   );
 
   await initGitRepoIfNeeded(root);
 
   if (firstRun) {
-    logger.info(`🪐 First run — created your Multiverse at ${logger.dim(root)}`);
+    logger.info(`🪐 First run — created your wormhole at ${logger.dim(root)}`);
   }
+}
+
+/**
+ * Rename a pre-`projects/` home (`~/.worm/multiverses/`) to the current layout.
+ * Single-user tool: we move the profiles rather than carry a back-compat shim.
+ * Only fires when the old dir exists and the new one doesn't, so it's a no-op
+ * on fresh homes and idempotent once migrated.
+ */
+async function migrateLegacyProfiles(): Promise<void> {
+  const legacy = legacyGlobalProjectsDir();
+  const current = globalProjectsDir();
+  if (!(await pathExists(legacy)) || (await pathExists(current))) return;
+  await fs.rename(legacy, current);
+  logger.info(
+    `🪐 Migrated ${logger.dim("~/.worm/multiverses")} → ${logger.dim("~/.worm/projects")}`
+  );
+  logger.raw(
+    `   Re-run ${logger.bold("worm sync")} in each project to refresh its links.`
+  );
 }
 
 async function initGitRepoIfNeeded(root: string): Promise<void> {
@@ -235,7 +267,7 @@ async function prepareGlobalProfile(
   const config = existed ? await loadGlobalProjectConfig(projectName) : template.config;
 
   // Only write the config if it doesn't exist yet, or if --force is given, to
-  // preserve user edits to ~/.worm/multiverses/<project>/config.json on re-run.
+  // preserve user edits to ~/.worm/projects/<project>/config.json on re-run.
   const configPath = globalProjectConfig(projectName);
   const configExisted = await pathExists(configPath);
   if (!configExisted || options.force) {

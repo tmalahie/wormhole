@@ -84,7 +84,7 @@ export async function isBareCloneContainer(projectRoot: string): Promise<boolean
 
 /**
  * Resolve the canonical project name by inspecting the `.worm/config.json`
- * symlink — its target is `~/.worm/multiverses/<name>/config.json`, so the
+ * symlink — its target is `~/.worm/projects/<name>/config.json`, so the
  * parent dir's basename is the name.
  */
 export async function readProjectName(projectRoot: string): Promise<string> {

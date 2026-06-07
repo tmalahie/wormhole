@@ -93,26 +93,26 @@ For a project named `mkpc` with two extra universes:
 │   ├── .git/                          ← standard git directory (the common dir for all slots)
 │   ├── .worm/                         ← thin wiring: (almost) all pointers (git-excluded locally)
 │   │   ├── .gitignore                 ← single line: `*`
-│   │   ├── config.json                → ~/.worm/multiverses/mkpc/config.json
-│   │   ├── scripts/                   → ~/.worm/multiverses/mkpc/scripts/   (setup.sh lives here)
-│   │   ├── recipes/                   → ~/.worm/multiverses/mkpc/recipes/   (materialized artifacts)
-│   │   └── logs/                      → ~/.worm/multiverses/mkpc/logs/      (recipe-hook logs)
-│   └── .env                           → ~/.worm/multiverses/mkpc/.env       (a tunnel, on Slot 0)
+│   │   ├── config.json                → ~/.worm/projects/mkpc/config.json
+│   │   ├── scripts/                   → ~/.worm/projects/mkpc/scripts/   (setup.sh lives here)
+│   │   ├── recipes/                   → ~/.worm/projects/mkpc/recipes/   (materialized artifacts)
+│   │   └── logs/                      → ~/.worm/projects/mkpc/logs/      (recipe-hook logs)
+│   └── .env                           → ~/.worm/projects/mkpc/.env       (a tunnel, on Slot 0)
 ├── mkpc-1/                            ← sibling universe (worm universe add …)
-│   └── .env                           → ~/.worm/multiverses/mkpc/.env
+│   └── .env                           → ~/.worm/projects/mkpc/.env
 └── mkpc-2/                            ← another sibling universe
 
 ~/.worm/                              ← your agents' meta-repo (a git repo)
-└── multiverses/mkpc/                 ← mkpc's PROFILE — the durable state, survives a reclone
+└── projects/mkpc/                 ← mkpc's PROFILE — the durable state, survives a reclone
     ├── config.json  .env  scripts/  recipes/  logs/
     └── .managed-links.json           ← manifest of the symlinks worm created per slot
 ```
 
-Slots are **permanent** — there's no spawn/teardown, so they stay warm (your `node_modules`, build state, etc. just persist in each one). Sibling worktrees live one level up so Slot 0's `git status` never sees them, and `.worm/` is hidden from git locally. A project's `.worm/` is almost entirely **symlinks into its profile** (`~/.worm/multiverses/<project>/`), where the durable state lives; each slot's shared files link **straight at the profile** (absolute, one hop), recorded in the profile's manifest so `worm sync` can add/prune them safely.
+Slots are **permanent** — there's no spawn/teardown, so they stay warm (your `node_modules`, build state, etc. just persist in each one). Sibling worktrees live one level up so Slot 0's `git status` never sees them, and `.worm/` is hidden from git locally. A project's `.worm/` is almost entirely **symlinks into its profile** (`~/.worm/projects/<project>/`), where the durable state lives; each slot's shared files link **straight at the profile** (absolute, one hop), recorded in the profile's manifest so `worm sync` can add/prune them safely.
 
 ## Configuration
 
-Each project gets a config at `~/.worm/multiverses/<project-name>/config.json`. The built-in default is intentionally minimal — projects start with no shared files, so worm doesn't presume your stack:
+Each project gets a config at `~/.worm/projects/<project-name>/config.json`. The built-in default is intentionally minimal — projects start with no shared files, so worm doesn't presume your stack:
 
 ```json
 {
@@ -127,7 +127,7 @@ Each project gets a config at `~/.worm/multiverses/<project-name>/config.json`. 
 
 Edit the file (or pre-seed a `--template <dir>`) to add what your project needs.
 
-- **`shared_paths`** — files tunnelled into every slot. Each entry is either a bare path, pulled from the project **profile** (`~/.worm/multiverses/<project>/<path>`, sprouting an empty placeholder if absent), or `{ "path": ".claude/docs", "store": "team" }` to pull it from a named **store** instead. Each slot gets an absolute symlink straight at the source. Common entries: `.env`, `CLAUDE.local.md`, `.mcp.json`. Run `worm sync` after changing this list.
+- **`shared_paths`** — files tunnelled into every slot. Each entry is either a bare path, pulled from the project **profile** (`~/.worm/projects/<project>/<path>`, sprouting an empty placeholder if absent), or `{ "path": ".claude/docs", "store": "team" }` to pull it from a named **store** instead. Each slot gets an absolute symlink straight at the source. Common entries: `.env`, `CLAUDE.local.md`, `.mcp.json`. Run `worm sync` after changing this list.
 - **`stores`** — named external sources for `shared_paths`, e.g. `{ "team": { "root": "~/git/team-shared", "url": "git@github.com:org/team-shared" } }`. A `shared_paths` entry with `"store": "team"` links from that store's `root` instead of the profile — so team docs/commands can live in a **separate git repo**, shared with your team and editable in place (your edits land as changes in that repo). If `root` is missing and a `url` is given, `worm sync` clones it on demand. Declare stores per project here, or machine-wide in `~/.worm/config.json` (project stores win on a name clash).
 - **`hooks`** — `on_create` runs inside a slot to warm it up: when Slot 0 is bound (`init` / `clone`), when a sibling is created (`universe add`), and on `switch`. `on_remove` runs before a slot is removed. The default `on_create` invokes `.worm/scripts/setup.sh` — drop your install commands there (`npm install`, `pip install -r requirements.txt`, …) instead of editing the JSON. A non-zero `on_create` warns but doesn't abort; a non-zero `on_remove` aborts the removal unless `--force`. Pass `--skip-hook` to any of these commands to bind/switch without running the hook (e.g. on an already-warm checkout).
 - **`recipes`** — composable capabilities, keyed by name (provider-style). A recipe is **enabled iff its key is present**; each value is validated by that recipe's own schema. Two kinds of thing back a recipe, kept deliberately separate:
@@ -140,7 +140,7 @@ Edit the file (or pre-seed a `--template <dir>`) to add what your project needs.
   - **`sandbox`** — `{ "backend": "docker", "image": "node:22-bookworm", "tools": [], "neverSandbox": [...], "exemptDirs": [], "autostart": true, "autostop": false }`. Materializes a Dockerfile (from `image` + `tools`), a compose file, and a sandbox policy (the interceptor itself ships with worm), then wires each slot so its container auto-starts (`autostart`) and filesystem-mutating commands are redirected into it (mounted at the same path via `$SANDBOX_DIR`). See [docs/strategy-3-spec.md](docs/strategy-3-spec.md) §6.
   - **`syncPermissions`** (`{}`) — wires `SessionStart`/`SessionEnd` hooks that union the `permissions` block of each slot's `settings.local.json` with a canonical store shared across slots (approve a command once, every slot learns it). Merge-preserving — it never touches other recipes' hooks.
   - **`shareHistory`** (`{}`) — symlinks each sibling slot's Claude history dir (`~/.claude/projects/<slot-slug>`) to Slot 0's, so all slots share one conversation history. Refuses to clobber a real history dir (warns instead).
-  - **`shareMemory`** (`{}`) — symlinks every slot's Claude memory dir (`~/.claude/projects/<slot-slug>/memory`) at one canonical store in the profile (`~/.worm/multiverses/<name>/.claude/memory`), so all slots share one memory that's **durable across a Slot 0 reclone**. Because the store is the profile (not Slot 0), **Slot 0 is linked too**; on first run it seeds the store from an existing memory dir, and refuses to clobber a real one once the store exists (warns instead).
+  - **`shareMemory`** (`{}`) — symlinks every slot's Claude memory dir (`~/.claude/projects/<slot-slug>/memory`) at one canonical store in the profile (`~/.worm/projects/<name>/.claude/memory`), so all slots share one memory that's **durable across a Slot 0 reclone**. Because the store is the profile (not Slot 0), **Slot 0 is linked too**; on first run it seeds the store from an existing memory dir, and refuses to clobber a real one once the store exists (warns instead).
 
 ### Hook environment
 
