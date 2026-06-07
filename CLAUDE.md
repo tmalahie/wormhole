@@ -64,7 +64,7 @@ Keep that in mind when reviewing changes: a "clever" addition that breaks idempo
 
 ### Idempotency
 - `init`, `sync`, and `universe add`/`rm` may be re-run after partial failure. Always reach for `ensureDir`, `ensureSymlink`, and `writeTextIfMissing` rather than raw create operations. If you write something destructively, gate it behind `--force`. `sync` is declarative — running it twice is a no-op.
-- `worm init` lazily provisions `~/.worm/` on first run (detected via the existence of `~/.worm/projects/`, not the root itself — the root can be pre-created in sandboxes). A pre-rename home (`~/.worm/multiverses/`) is migrated to `projects/` in place by `migrateLegacyProfiles` before the first-run check. Do not bypass `ensureGlobalRoot` from other commands; if a future command needs the global root, call it from `init` flows only.
+- `worm init` lazily provisions `~/.worm/` on first run (detected via the existence of `~/.worm/projects/`, not the root itself — the root can be pre-created in sandboxes). Do not bypass `ensureGlobalRoot` from other commands; if a future command needs the global root, call it from `init` flows only.
 
 ### Hooks
 - User-supplied commands always run through `runShell()` (not `run()`), with `inheritStdio: true`. They get the full shell, including pipes and `&&`.

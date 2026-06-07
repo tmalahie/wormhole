@@ -29,14 +29,6 @@ export function globalProjectsDir(): string {
   return path.join(globalRoot(), PROJECTS_DIR_NAME);
 }
 
-/**
- * Pre-rename location of the per-project profiles (`~/.worm/multiverses/`).
- * Retained only so `init` can migrate an existing home to `projects/` in place.
- */
-export function legacyGlobalProjectsDir(): string {
-  return path.join(globalRoot(), "multiverses");
-}
-
 export function globalSharedDir(): string {
   return path.join(globalRoot(), SHARED_DIR_NAME);
 }

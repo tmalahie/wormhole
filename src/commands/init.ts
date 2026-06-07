@@ -20,7 +20,6 @@ import {
   globalProjectsDir,
   globalRoot,
   globalSharedDir,
-  legacyGlobalProjectsDir,
   localConfigFile,
   localRoot,
   localScriptsDir,
@@ -194,11 +193,6 @@ async function ensureGlobalRoot(): Promise<void> {
   const root = globalRoot();
   await ensureDir(root);
 
-  // Migrate a pre-rename home (`multiverses/` → `projects/`) in place. The
-  // profile contents move untouched; each project's `.worm/` symlinks now point
-  // at the old path, so they're refreshed on the next `worm init`/`worm sync`.
-  await migrateLegacyProfiles();
-
   // Detect first run by an inner marker rather than the root itself — the root
   // may have been pre-created (sandboxes, tests, mounted volumes).
   const firstRun = !(await pathExists(globalProjectsDir()));
@@ -222,25 +216,6 @@ async function ensureGlobalRoot(): Promise<void> {
   if (firstRun) {
     logger.info(`🪐 First run — created your wormhole at ${logger.dim(root)}`);
   }
-}
-
-/**
- * Rename a pre-`projects/` home (`~/.worm/multiverses/`) to the current layout.
- * Single-user tool: we move the profiles rather than carry a back-compat shim.
- * Only fires when the old dir exists and the new one doesn't, so it's a no-op
- * on fresh homes and idempotent once migrated.
- */
-async function migrateLegacyProfiles(): Promise<void> {
-  const legacy = legacyGlobalProjectsDir();
-  const current = globalProjectsDir();
-  if (!(await pathExists(legacy)) || (await pathExists(current))) return;
-  await fs.rename(legacy, current);
-  logger.info(
-    `🪐 Migrated ${logger.dim("~/.worm/multiverses")} → ${logger.dim("~/.worm/projects")}`
-  );
-  logger.raw(
-    `   Re-run ${logger.bold("worm sync")} in each project to refresh its links.`
-  );
 }
 
 async function initGitRepoIfNeeded(root: string): Promise<void> {

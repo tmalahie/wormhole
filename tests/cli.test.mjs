@@ -36,28 +36,6 @@ test("first `worm init` lazily provisions the global root", async (t) => {
   }
 });
 
-test("worm init migrates a legacy multiverses/ home to projects/ in place", async (t) => {
-  const sb = await createSandbox();
-  t.after(() => sb.cleanup());
-
-  // Simulate a pre-rename home: a profile under the old multiverses/ dir.
-  const legacyProfile = path.join(sb.wormHome, "multiverses", "old-project");
-  await mkdir(legacyProfile, { recursive: true });
-  await writeFile(path.join(legacyProfile, "marker.txt"), "keep me\n");
-
-  const r = await sb.worm(["init"]);
-  assert.equal(r.exitCode, 0, r.stderr);
-  assert.match(r.stdout, /Migrated/);
-
-  // The profile (and its contents) moved under projects/; multiverses/ is gone.
-  const moved = await readFile(
-    path.join(sb.wormHome, "projects", "old-project", "marker.txt"),
-    "utf8"
-  );
-  assert.equal(moved.trim(), "keep me");
-  await assert.rejects(stat(path.join(sb.wormHome, "multiverses")), /ENOENT/);
-});
-
 test("worm init binds Slot 0: symlinks, excludes .worm, seeds manifest, idempotent", async (t) => {
   const sb = await createSandbox();
   t.after(() => sb.cleanup());
