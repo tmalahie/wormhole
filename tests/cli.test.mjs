@@ -515,6 +515,67 @@ test("shareHistory refuses to clobber a real history dir", async (t) => {
   assert.match(r.stderr + r.stdout, /real history dir/);
 });
 
+test("shareMemory seeds the profile and links every slot's memory at it", async (t) => {
+  const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
+  t.after(() => rm(templateDir, { recursive: true, force: true }));
+  await writeFile(
+    path.join(templateDir, "config.json"),
+    JSON.stringify({ shared_paths: [], hooks: {}, recipes: { shareMemory: {} } })
+  );
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await createBranch(sb.projectRoot, "feature-a");
+
+  const root = await realpath(sb.projectRoot);
+  const name = path.basename(root);
+  const projectsDir = path.join(sb.wormHome, ".claude", "projects");
+  const profileMemory = path.join(sb.wormHome, "multiverses", name, ".claude", "memory");
+
+  // A pre-existing real memory dir at Slot 0 is migrated into the profile store.
+  const slot0Memory = path.join(projectsDir, claudeSlug(root), "memory");
+  await mkdir(slot0Memory, { recursive: true });
+  await writeFile(path.join(slot0Memory, "MEMORY.md"), "remember\n");
+
+  await sb.worm(["init", "--template", templateDir]);
+
+  // Seeded into the profile, and Slot 0's memory is now an absolute symlink to it.
+  assert.equal(await readFile(path.join(profileMemory, "MEMORY.md"), "utf8"), "remember\n");
+  assert.equal(await readlink(slot0Memory), profileMemory, "Slot 0 memory → profile (absolute)");
+
+  // A sibling's memory dir is linked at the SAME profile store, so memory is shared.
+  await sb.worm(["universe", "add", "feature-a", "--skip-hook"]);
+  const sibMemory = path.join(projectsDir, claudeSlug(siblingPath(root, 1)), "memory");
+  assert.equal(await readlink(sibMemory), profileMemory, "sibling memory → profile");
+});
+
+test("shareMemory refuses to clobber a real memory dir when the profile store exists", async (t) => {
+  const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
+  t.after(() => rm(templateDir, { recursive: true, force: true }));
+  await writeFile(
+    path.join(templateDir, "config.json"),
+    JSON.stringify({ shared_paths: [], hooks: {}, recipes: { shareMemory: {} } })
+  );
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await createBranch(sb.projectRoot, "feature-b");
+
+  const root = await realpath(sb.projectRoot);
+  // init links Slot 0 → the (now-existing) profile store; a sibling that already
+  // has a REAL memory dir can no longer be seeded into it, so it must be skipped.
+  await sb.worm(["init", "--template", templateDir]);
+
+  const sibReal = path.join(
+    sb.wormHome, ".claude", "projects", claudeSlug(siblingPath(root, 1)), "memory"
+  );
+  await mkdir(sibReal, { recursive: true });
+  await writeFile(path.join(sibReal, "keep.md"), "x\n");
+
+  const r = await sb.worm(["universe", "add", "feature-b", "--skip-hook"]);
+  assert.equal(r.exitCode, 0, "real dir is a warning, not a fatal error");
+  await stat(path.join(sibReal, "keep.md")); // the real dir and its contents survive
+  assert.match(r.stderr + r.stdout, /real memory dir/);
+});
+
 test("the dispatcher logs recipe hooks under .worm/logs", async (t) => {
   const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
   t.after(() => rm(templateDir, { recursive: true, force: true }));

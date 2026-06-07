@@ -76,6 +76,16 @@ export function globalProjectLogsDir(projectName: string): string {
   return path.join(globalProjectDir(projectName), LOGS_DIR_NAME);
 }
 
+/**
+ * The canonical Claude memory store for a project, in the profile
+ * (`~/.worm/multiverses/<name>/.claude/memory`). The shareMemory recipe links
+ * every slot's `~/.claude/projects/<slug>/memory` at this one dir, so memory is
+ * shared across slots AND durable across a slot-0 reclone.
+ */
+export function globalProjectMemoryDir(projectName: string): string {
+  return path.join(globalProjectDir(projectName), ".claude", "memory");
+}
+
 export function globalTemplatesDir(): string {
   return path.join(globalRoot(), TEMPLATES_DIR_NAME);
 }

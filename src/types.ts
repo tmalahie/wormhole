@@ -29,15 +29,17 @@ export const SandboxRecipeSchema = z
   })
   .strict();
 
-// syncPermissions / shareHistory have no options yet — presence is the signal.
+// syncPermissions / shareHistory / shareMemory have no options yet — presence is the signal.
 export const SyncPermissionsRecipeSchema = z.object({}).strict();
 export const ShareHistoryRecipeSchema = z.object({}).strict();
+export const ShareMemoryRecipeSchema = z.object({}).strict();
 
 export const RecipesSchema = z
   .object({
     sandbox: SandboxRecipeSchema.optional(),
     syncPermissions: SyncPermissionsRecipeSchema.optional(),
     shareHistory: ShareHistoryRecipeSchema.optional(),
+    shareMemory: ShareMemoryRecipeSchema.optional(),
   })
   .strict()
   .default({});
@@ -82,6 +84,7 @@ export type RecipesConfig = z.infer<typeof RecipesSchema>;
 export type SandboxRecipeConfig = z.infer<typeof SandboxRecipeSchema>;
 export type SyncPermissionsRecipeConfig = z.infer<typeof SyncPermissionsRecipeSchema>;
 export type ShareHistoryRecipeConfig = z.infer<typeof ShareHistoryRecipeSchema>;
+export type ShareMemoryRecipeConfig = z.infer<typeof ShareMemoryRecipeSchema>;
 
 export const DEFAULT_CONFIG: Config = ConfigSchema.parse({
   hooks: { on_create: 'bash "$WORM_PROJECT_ROOT/.worm/scripts/setup.sh"' },

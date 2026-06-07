@@ -17,6 +17,7 @@ import { ensureSymlink } from "./symlinks.js";
 import { hookEnv } from "./hooks.js";
 import {
   globalProjectFile,
+  globalProjectMemoryDir,
   localLogsDir,
   localRecipeDir,
   packagedRecipeScript,
@@ -27,6 +28,7 @@ import type {
   RecipesConfig,
   SandboxRecipeConfig,
   ShareHistoryRecipeConfig,
+  ShareMemoryRecipeConfig,
   SyncPermissionsRecipeConfig,
   UniverseSlot,
 } from "../types.js";
@@ -254,7 +256,64 @@ const shareHistoryRecipe: Recipe<ShareHistoryRecipeConfig> = {
   },
 };
 
-const REGISTRY: Recipe<any>[] = [sandboxRecipe, syncPermissionsRecipe, shareHistoryRecipe];
+// --- the shareMemory recipe --------------------------------------------------
+// Links every slot's Claude *memory* dir at ONE canonical store in the PROFILE
+// (~/.worm/multiverses/<name>/.claude/memory), so all slots read & write one
+// shared memory that survives a slot-0 reclone. Unlike shareHistory — whose
+// canonical store IS Slot 0, so Slot 0 is left alone — the store here lives in
+// the profile, so Slot 0 is linked too. Purely imperative (onSlotCreate).
+
+/** Move a real `memory/` dir into the profile to seed the shared store, with an
+ *  EXDEV fallback (copy+remove) for a profile on a different filesystem. */
+async function seedMemory(src: string, dest: string): Promise<void> {
+  await ensureDir(path.dirname(dest));
+  try {
+    await fs.rename(src, dest);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "EXDEV") throw err;
+    await fs.cp(src, dest, { recursive: true });
+    await fs.rm(src, { recursive: true, force: true });
+  }
+}
+
+const shareMemoryRecipe: Recipe<ShareMemoryRecipeConfig> = {
+  name: "shareMemory",
+  select: (recipes) => recipes.shareMemory,
+  async onSlotCreate({ slot, projectName }) {
+    const projectsDir = path.join(os.homedir(), ".claude", "projects");
+    const slotMemory = path.join(projectsDir, claudeSlug(slot.path), "memory");
+    const canonical = globalProjectMemoryDir(projectName);
+
+    if ((await pathExists(slotMemory)) && !(await isSymlink(slotMemory))) {
+      // A real memory dir: seed the empty profile store from it on first run,
+      // else refuse to clobber — the user merges the two by hand.
+      if (await pathExists(canonical)) {
+        logger.warn(
+          `${slot.name}: ${slotMemory} is a real memory dir — merge it into ${canonical} by hand; skipping.`
+        );
+        return;
+      }
+      await seedMemory(slotMemory, canonical);
+      logger.step(`🌱 ${slot.name}: seeded shared memory into the profile`);
+    } else {
+      // Ensure the canonical store exists so the link resolves to a real dir.
+      await ensureDir(canonical);
+    }
+
+    const res = await ensureSymlink(slotMemory, canonical, { relative: false, type: "dir" });
+    if (res.created) logger.step(`🔗 ${slot.name}: Claude memory → profile`);
+  },
+};
+
+// shareMemory is registered AFTER shareHistory so that, when both are enabled, a
+// sibling's whole project dir is already a symlink to Slot 0's before shareMemory
+// touches its memory subdir (it then resolves to Slot 0's link — a no-op).
+const REGISTRY: Recipe<any>[] = [
+  sandboxRecipe,
+  syncPermissionsRecipe,
+  shareHistoryRecipe,
+  shareMemoryRecipe,
+];
 
 function enabledRecipes(recipes: RecipesConfig): Array<{ recipe: Recipe<any>; cfg: unknown }> {
   const out: Array<{ recipe: Recipe<any>; cfg: unknown }> = [];
