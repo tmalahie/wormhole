@@ -56,6 +56,19 @@ test("worm init binds Slot 0: symlinks, excludes .worm, seeds manifest, idempote
   const exclude = await readFile(path.join(sb.projectRoot, ".git", "info", "exclude"), "utf8");
   assert.match(exclude, /^\/\.worm\/$/m);
 
+  // The profile carries a .gitignore so secrets (e.g. a shared .env) never get
+  // committed to the personal ~/.worm repo. The repo's own files are untouched.
+  const profileIgnore = await readFile(
+    path.join(sb.wormHome, "projects", path.basename(sb.projectRoot), ".gitignore"),
+    "utf8"
+  );
+  assert.match(profileIgnore, /^\.env$/m);
+  await assert.rejects(
+    stat(path.join(sb.projectRoot, ".gitignore")),
+    /ENOENT/,
+    "worm must not create a .gitignore in the user's actual repo"
+  );
+
   // Managed-link manifest is seeded in the PROFILE (durable; survives a reclone).
   const manifest = JSON.parse(
     await readFile(

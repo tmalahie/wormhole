@@ -1,6 +1,7 @@
 import path from "node:path";
 import { ensureSymlink } from "./symlinks.js";
 import {
+  globalProjectDir,
   globalProjectLogsDir,
   globalProjectRecipesDir,
   localLogsDir,
@@ -22,6 +23,12 @@ export async function ensureLocalLayout(projectRoot: string, projectName: string
   await writeTextIfMissing(
     path.join(globalProjectLogsDir(projectName), ".gitignore"),
     "*\n!.gitignore\n"
+  );
+  // Secrets pulled into the profile (e.g. a shared `.env`) must never be
+  // committed to the personal ~/.worm repo. Seed a project-level ignore.
+  await writeTextIfMissing(
+    path.join(globalProjectDir(projectName), ".gitignore"),
+    ".env\n"
   );
 }
 
