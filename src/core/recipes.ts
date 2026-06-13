@@ -41,8 +41,9 @@ import type {
  *
  * Hooks are INVERTED: a slot's `.claude/settings.local.json` holds ONE static
  * entry per hook event — `node "<cli>" hook trigger <event>` — installed once.
- * At trigger time the dispatcher (`runRecipeHooks` / `runRecipeFilters`, invoked
- * by `worm hook trigger`) resolves the live slot, asks each enabled recipe for
+ * At trigger time the dispatcher (`runRecipeHooks` / `runRecipeFilters` /
+ * `runRecipeContext`, invoked by `worm hook trigger`) resolves the live slot,
+ * asks each enabled recipe for
  * its commands for that event, injects env (the WORM_* vars + WORM_LOG_DIR), and
  * owns logging. So enabling/disabling/updating a recipe is a pure config change —
  * settings.local.json never churns, and identifiers can't go stale.
@@ -92,24 +93,36 @@ export interface Recipe<C = unknown> {
 // --- hook events & the dispatcher contract -----------------------------------
 
 /** worm's normalized hook events (mapped to the agent's settings keys below). */
-export type HookEvent = "pre-tool-use" | "session-start" | "session-end";
+export type HookEvent =
+  | "pre-tool-use"
+  | "user-prompt-submit"
+  | "session-start"
+  | "session-end";
+
+/**
+ * How the dispatcher treats an event's stdin/stdout:
+ * - `filter`: reads the tool input on stdin, stdout is a permission decision;
+ *   the first `deny` is forwarded to the agent (PreToolUse).
+ * - `context`: reads the hook input on stdin, stdout is extra context injected
+ *   ahead of the prompt; the dispatcher wraps it in the event's JSON envelope
+ *   (UserPromptSubmit).
+ * - `run`: fire-and-log, stdout captured to a log file (Session*).
+ */
+export type HookKind = "filter" | "context" | "run";
 
 interface HookEventMeta {
   /** The Claude Code settings.local.json event key. */
   claudeEvent: string;
   /** Settings matcher (PreToolUse gates Bash); omitted → no matcher. */
   matcher?: string;
-  /**
-   * Filter events read the tool input on stdin and emit a permission decision
-   * on stdout (PreToolUse). Run events are fire-and-log (Session*).
-   */
-  filter: boolean;
+  kind: HookKind;
 }
 
 export const HOOK_EVENTS: Record<HookEvent, HookEventMeta> = {
-  "pre-tool-use": { claudeEvent: "PreToolUse", matcher: "Bash", filter: true },
-  "session-start": { claudeEvent: "SessionStart", filter: false },
-  "session-end": { claudeEvent: "SessionEnd", filter: false },
+  "pre-tool-use": { claudeEvent: "PreToolUse", matcher: "Bash", kind: "filter" },
+  "user-prompt-submit": { claudeEvent: "UserPromptSubmit", kind: "context" },
+  "session-start": { claudeEvent: "SessionStart", kind: "run" },
+  "session-end": { claudeEvent: "SessionEnd", kind: "run" },
 };
 
 /**
@@ -235,6 +248,14 @@ function claudeSlug(absPath: string): string {
 const shareHistoryRecipe: Recipe<ShareHistoryRecipeConfig> = {
   name: "shareHistory",
   select: (recipes) => recipes.shareHistory,
+  // Every slot shares ONE history, so a single chat can hop between worktrees as
+  // you `worm switch`. This UserPromptSubmit hook warns the model when the
+  // conversation's cwd changes between prompts. Worm-owned, config-independent
+  // code → packaged once, not copied per project (like the sandbox interceptor).
+  hooks() {
+    const script = packagedRecipeScript("shareHistory", "inject-cwd-on-switch.js");
+    return { "user-prompt-submit": [{ command: `node "${script}"` }] };
+  },
   async onSlotCreate({ slot, slot0Root }) {
     const projectsDir = path.join(os.homedir(), ".claude", "projects");
     const canonicalSlug = claudeSlug(slot0Root);
@@ -475,6 +496,42 @@ export async function runRecipeFilters(
     }
   }
   return null;
+}
+
+/**
+ * Run every enabled recipe's CONTEXT-event commands (user-prompt-submit) against
+ * the hook input on stdin, collecting each command's stdout. Returns the
+ * event's JSON envelope wrapping the joined output (the agent injects
+ * `additionalContext` ahead of the prompt), or null when nothing was emitted.
+ * The dispatcher owns the protocol envelope so recipe scripts only print text.
+ */
+export async function runRecipeContext(
+  ctx: DispatchContext,
+  recipes: RecipesConfig,
+  event: HookEvent,
+  input: string
+): Promise<string | null> {
+  const logDir = localLogsDir(ctx.slot0Root);
+  const parts: string[] = [];
+  for (const { recipe, cfg } of enabledRecipes(recipes)) {
+    const cmds = recipe.hooks?.(wireContext(ctx), cfg)?.[event] ?? [];
+    for (const hc of cmds) {
+      const res = await runShell(hc.command, {
+        cwd: ctx.slot.path,
+        env: dispatchEnv(ctx, recipe.name, logDir),
+        input,
+      });
+      const text = res.stdout.trim();
+      if (text) parts.push(text);
+    }
+  }
+  if (parts.length === 0) return null;
+  return JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: HOOK_EVENTS[event].claudeEvent,
+      additionalContext: parts.join("\n\n"),
+    },
+  });
 }
 
 // worm recognises its own hook entries by the dispatcher marker (see above).

@@ -515,6 +515,47 @@ test("shareHistory refuses to clobber a real history dir", async (t) => {
   assert.match(r.stderr + r.stdout, /real history dir/);
 });
 
+test("shareHistory warns on a cwd switch via a UserPromptSubmit hook", async (t) => {
+  const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
+  t.after(() => rm(templateDir, { recursive: true, force: true }));
+  await writeFile(
+    path.join(templateDir, "config.json"),
+    JSON.stringify({ shared_paths: [], hooks: {}, recipes: { shareHistory: {} } })
+  );
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init", "--template", templateDir]);
+
+  // Slot 0 gets a static UserPromptSubmit dispatcher entry (no matcher).
+  const s0 = JSON.parse(
+    await readFile(path.join(sb.projectRoot, ".claude", "settings.local.json"), "utf8")
+  );
+  assert.match(s0.hooks.UserPromptSubmit[0].hooks[0].command, /hook trigger user-prompt-submit/);
+
+  // A transcript whose last entry has a DIFFERENT cwd → the dispatcher emits the
+  // UserPromptSubmit envelope with a worktree-switch reminder.
+  const transcript = path.join(sb.wormHome, "transcript.jsonl");
+  const prevCwd = siblingPath(sb.projectRoot, 1);
+  await writeFile(
+    transcript,
+    JSON.stringify({ type: "user", cwd: prevCwd, message: { content: "earlier" } }) + "\n"
+  );
+  const input = JSON.stringify({ cwd: sb.projectRoot, transcript_path: transcript, prompt: "now" });
+  const r = await sb.worm(["hook", "trigger", "user-prompt-submit"], { input });
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.hookSpecificOutput.hookEventName, "UserPromptSubmit");
+  assert.match(out.hookSpecificOutput.additionalContext, /working directory switched/);
+  assert.match(
+    out.hookSpecificOutput.additionalContext,
+    new RegExp(escapeRegex(sb.projectRoot))
+  );
+
+  // Unchanged cwd → silent (no context injected).
+  const same = JSON.stringify({ cwd: prevCwd, transcript_path: transcript, prompt: "again" });
+  const r2 = await sb.worm(["hook", "trigger", "user-prompt-submit"], { input: same });
+  assert.equal(r2.stdout.trim(), "", "no reminder when cwd is unchanged");
+});
+
 test("shareMemory seeds the profile and links every slot's memory at it", async (t) => {
   const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
   t.after(() => rm(templateDir, { recursive: true, force: true }));

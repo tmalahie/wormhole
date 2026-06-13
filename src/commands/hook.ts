@@ -6,6 +6,7 @@ import { localLogsDir, SLOT_DIR_INFIX } from "../core/paths.js";
 import { ensureDir, fs } from "../utils/fs.js";
 import {
   HOOK_EVENTS,
+  runRecipeContext,
   runRecipeFilters,
   runRecipeHooks,
   type DispatchContext,
@@ -30,14 +31,19 @@ export async function runHookTrigger(rawEvent: string): Promise<void> {
   if (!meta) return; // unknown event → no-op
   const event = rawEvent as HookEvent;
 
-  if (meta.filter) {
-    // Read the tool input first so a resolution failure can't lose it.
+  if (meta.kind !== "run") {
+    // stdin-driven events (filter + context). Read the input first so a
+    // resolution failure can't lose it; then forward the dispatcher's stdout
+    // verbatim (a permission decision, or the prompt-context envelope).
     const input = await readStdin();
     try {
       const ctx = await resolveContext(false);
       const { recipes } = await loadLocalConfig(ctx.slot0Root);
-      const decision = await runRecipeFilters(ctx, recipes, event, input);
-      if (decision) process.stdout.write(decision);
+      const out =
+        meta.kind === "filter"
+          ? await runRecipeFilters(ctx, recipes, event, input)
+          : await runRecipeContext(ctx, recipes, event, input);
+      if (out) process.stdout.write(out);
     } catch (err) {
       await recordDispatchError(err);
     }
