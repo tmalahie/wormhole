@@ -43,4 +43,7 @@ export const logger = {
   cyan(message: string): string {
     return pc.cyan(message);
   },
+  white(message: string): string {
+    return pc.white(message);
+  },
 };

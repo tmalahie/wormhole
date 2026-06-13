@@ -142,6 +142,7 @@ test("worm universe add creates a sibling worktree; status shows the pool", asyn
   const r = await sb.worm(["universe", "add", "feature-a", "--skip-hook"]);
   assert.equal(r.exitCode, 0, r.stderr);
   assert.match(r.stdout, /Universe 1 is live/);
+  assert.match(r.stdout, /alias: worm tp 1/, "introduces the teleport shortcut");
 
   const root = await realpath(sb.projectRoot);
   const sib = siblingPath(root, 1);
@@ -214,6 +215,131 @@ test("worm sync reconciles links and prunes removed shared_paths via the manifes
   // Idempotent.
   const r2 = await sb.worm(["sync"]);
   assert.equal(r2.exitCode, 0, r2.stderr);
+});
+
+test("worm init adopts existing local files into the profile and creates symlinks", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+
+  // Create a template that expects .mcp.json and .env as shared_paths
+  const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
+  t.after(() => rm(templateDir, { recursive: true, force: true }));
+  await writeFile(
+    path.join(templateDir, "config.json"),
+    JSON.stringify({ shared_paths: [".mcp.json", ".env"], hooks: {} })
+  );
+
+  // Manually create local files (simulating an existing repo) before init
+  await writeFile(path.join(sb.projectRoot, ".mcp.json"), '{"key":"local"}');
+  await writeFile(path.join(sb.projectRoot, ".env"), "SECRET=local");
+
+  // Init with the template — should adopt the existing local files
+  const initResult = await sb.worm(["init", "--template", templateDir]);
+  assert.equal(initResult.exitCode, 0, initResult.stderr);
+  assert.match(initResult.stdout, /Adopting.*into the profile/);
+
+  // Verify files are now symlinks pointing to the profile
+  const mcpPath = path.join(sb.projectRoot, ".mcp.json");
+  const envPath = path.join(sb.projectRoot, ".env");
+  const mcpLink = await readlink(mcpPath);
+  const envLink = await readlink(envPath);
+  assert.match(mcpLink, /projects\/.+\/\.mcp\.json$/);
+  assert.match(envLink, /projects\/.+\/\.env$/);
+
+  // Verify file contents were preserved
+  const mcpContent = await readFile(mcpPath, "utf8");
+  const envContent = await readFile(envPath, "utf8");
+  assert.equal(mcpContent, '{"key":"local"}');
+  assert.equal(envContent, "SECRET=local");
+
+  // Running sync should be a no-op (already adopted)
+  const syncResult = await sb.worm(["sync"]);
+  assert.equal(syncResult.exitCode, 0, syncResult.stderr);
+  assert.doesNotMatch(syncResult.stdout, /move\+link/, "no adoption on second sync");
+});
+
+test("adoption pulls a whole directory shared_path into the profile, preserving contents", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+
+  const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
+  t.after(() => rm(templateDir, { recursive: true, force: true }));
+  await writeFile(
+    path.join(templateDir, "config.json"),
+    JSON.stringify({ shared_paths: [".claude"], hooks: {} })
+  );
+
+  // A real local directory (with a nested file) before init.
+  await mkdir(path.join(sb.projectRoot, ".claude"), { recursive: true });
+  await writeFile(path.join(sb.projectRoot, ".claude", "commands.md"), "# my command\n");
+
+  const r = await sb.worm(["init", "--template", templateDir]);
+  assert.equal(r.exitCode, 0, r.stderr);
+
+  // The directory is now a symlink into the profile, contents intact.
+  const claudeLink = await readlink(path.join(sb.projectRoot, ".claude"));
+  assert.match(claudeLink, /projects\/.+\/\.claude$/);
+  const nested = await readFile(path.join(sb.projectRoot, ".claude", "commands.md"), "utf8");
+  assert.equal(nested, "# my command\n");
+
+  // Re-running is a clean no-op (the slot path is already a symlink).
+  const r2 = await sb.worm(["sync"]);
+  assert.equal(r2.exitCode, 0, r2.stderr);
+  assert.doesNotMatch(r2.stdout, /move\+link/);
+});
+
+test("adoption refuses when a real file exists in BOTH the slot and the profile (conflict)", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+
+  await sb.worm(["init"]); // default config: no shared_paths
+
+  const name = path.basename(sb.projectRoot);
+  const cfgPath = path.join(sb.wormHome, "projects", name, "config.json");
+
+  // A pre-existing profile copy AND a differing slot copy of the same path.
+  await writeFile(path.join(sb.wormHome, "projects", name, "notes.md"), "PROFILE\n");
+  await writeFile(path.join(sb.projectRoot, "notes.md"), "SLOT\n");
+  await writeFile(cfgPath, JSON.stringify({ shared_paths: ["notes.md"], hooks: {} }));
+
+  const r = await sb.worm(["sync", "--yes"]);
+  assert.notEqual(r.exitCode, 0, "should refuse to clobber either copy");
+  assert.match(r.stderr, /Cannot adopt/);
+  assert.match(r.stderr, /differs from the profile/);
+
+  // Nothing was moved: both copies are intact.
+  assert.equal(await readFile(path.join(sb.projectRoot, "notes.md"), "utf8"), "SLOT\n");
+  assert.equal(
+    await readFile(path.join(sb.wormHome, "projects", name, "notes.md"), "utf8"),
+    "PROFILE\n"
+  );
+});
+
+test("adoption refuses when the same shared path is a real file in multiple slots", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+
+  await createBranch(sb.projectRoot, "feature-a");
+  await sb.worm(["init"]);
+  const add = await sb.worm(["universe", "add", "feature-a", "--skip-hook"]);
+  assert.equal(add.exitCode, 0, add.stderr);
+  const root = await realpath(sb.projectRoot);
+
+  const name = path.basename(sb.projectRoot);
+  const cfgPath = path.join(sb.wormHome, "projects", name, "config.json");
+  await writeFile(cfgPath, JSON.stringify({ shared_paths: ["shared.txt"], hooks: {} }));
+
+  // Two slots each hold a real, differing file at the same shared path.
+  await writeFile(path.join(root, "shared.txt"), "slot0\n");
+  await writeFile(path.join(siblingPath(root, 1), "shared.txt"), "slot1\n");
+
+  const r = await sb.worm(["sync", "--yes"]);
+  assert.notEqual(r.exitCode, 0, "should refuse rather than silently overwrite one");
+  assert.match(r.stderr, /multiple slots/);
+
+  // Both copies survive untouched.
+  assert.equal(await readFile(path.join(root, "shared.txt"), "utf8"), "slot0\n");
+  assert.equal(await readFile(path.join(siblingPath(root, 1), "shared.txt"), "utf8"), "slot1\n");
 });
 
 test("recipes: empty provisions nothing; sandbox generates Dockerfile + compose", async (t) => {
@@ -806,6 +932,61 @@ test("worm switch changes the current slot in place; refuses a branch held elsew
   const blocked = await sb.worm(["switch", "feature-b", "--skip-hook"]);
   assert.notEqual(blocked.exitCode, 0);
   assert.match(blocked.stderr, /already checked out/);
+});
+
+test("universe add --create spins up a missing branch", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init"]);
+
+  const r = await sb.worm(["universe", "add", "feat/new", "--create", "--skip-hook"]);
+  assert.equal(r.exitCode, 0, r.stderr);
+  assert.match(r.stdout, /created branch/);
+
+  const root = await realpath(sb.projectRoot);
+  assert.ok((await stat(siblingPath(root, 1))).isDirectory());
+  const state = JSON.parse((await sb.worm(["status", "--json"])).stdout);
+  assert.ok(state.slots.some((s) => s.branch === "feat/new"), "branch is checked out in a slot");
+});
+
+test("universe add on a missing branch errors in a non-interactive shell (no --create)", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init"]);
+
+  // No TTY in tests → the prompt is skipped and the original error stands.
+  const r = await sb.worm(["universe", "add", "ghost", "--skip-hook"]);
+  assert.notEqual(r.exitCode, 0);
+  assert.match(r.stderr, /does not exist/);
+  assert.match(r.stderr, /--create/);
+});
+
+test("worm cd / worm tp without shell-init explain how to enable it", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init"]);
+
+  // When the shell function is installed it intercepts cd/tp before the binary;
+  // reaching the binary means the integration is missing → a helpful error.
+  for (const alias of ["cd", "tp"]) {
+    const r = await sb.worm([alias, "0"]);
+    assert.notEqual(r.exitCode, 0, `${alias} should error without shell integration`);
+    assert.match(r.stderr, /shell integration/);
+    assert.match(r.stderr, /worm shell-init/);
+  }
+});
+
+test("worm switch --create makes a missing branch in place", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init"]);
+
+  const r = await sb.worm(["switch", "feat/x", "--create", "--skip-hook"]);
+  assert.equal(r.exitCode, 0, r.stderr);
+  assert.match(r.stdout, /created branch/);
+
+  const state = JSON.parse((await sb.worm(["status", "--json"])).stdout);
+  assert.equal(state.slots[0].branch, "feat/x");
 });
 
 test("on_create hook runs setup.sh with WORM_* env vars on universe add", async (t) => {

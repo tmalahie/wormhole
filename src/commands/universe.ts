@@ -1,5 +1,6 @@
 import { logger } from "../utils/logger.js";
 import { WormError } from "../utils/errors.js";
+import { confirm } from "../utils/prompt.js";
 import { findSlot0Root, readProjectName } from "../core/project.js";
 import { loadLocalConfig } from "../core/config.js";
 import {
@@ -10,6 +11,7 @@ import {
   universeLabel,
 } from "../core/universe.js";
 import {
+  branchExists,
   dirtyFiles,
   pruneWorktrees,
   worktreeAdd,
@@ -63,11 +65,30 @@ export async function runUniverseAdd(
   const index = nextFreeIndex(slots);
   const target = siblingWorktreeDir(root, index);
 
+  // If the branch is missing, offer to create it ([Y/n], default yes) — `--create`
+  // (or a non-interactive shell) skips straight to creating / erroring.
+  const exists = await branchExists(root, branch);
+  let create = options.create ?? false;
+  if (!exists && !create) {
+    if (!process.stdin.isTTY) {
+      throw new WormError(`Branch "${branch}" does not exist.`, {
+        hint: `Pass --create to spin it up, or create it first with \`git branch ${branch}\`.`,
+      });
+    }
+    const ok = await confirm(`🌱 Branch "${branch}" does not exist. Create it?`, true);
+    if (!ok) {
+      logger.info("Aborted.");
+      return;
+    }
+    create = true;
+  }
+
   logger.info(
     `🌌 Adding ${logger.bold(`Universe ${index}`)} on ${logger.bold(branch)} (${logger.dim(target)})`
   );
 
-  await worktreeAdd(root, target, branch, { createIfMissing: options.create });
+  await worktreeAdd(root, target, branch, { createIfMissing: create });
+  if (!exists) logger.step(`🌱 created branch ${logger.bold(branch)}`);
   logger.step(`🪢 worktree opened at ${logger.dim(target)}`);
 
   const projectName = await readProjectName(root);
@@ -105,7 +126,9 @@ export async function runUniverseAdd(
 
   logger.success(`Universe ${index} is live on ${logger.bold(branch)}.`);
   logger.raw("");
-  logger.raw(`  🎯 cd ${target}`);
+  logger.raw(
+    `  🎯 cd ${target} ${logger.dim("(alias:")} ${logger.white(`worm tp ${index}`)}${logger.dim(")")}`
+  );
 }
 
 export async function runUniverseRemove(

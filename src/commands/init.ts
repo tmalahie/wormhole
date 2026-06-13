@@ -36,7 +36,14 @@ import {
   seedBuiltInDefaultTemplate,
   type ResolvedTemplate,
 } from "../core/templates.js";
-import { readManifest, reconcileSlotLinks, writeManifest } from "../core/links.js";
+import {
+  readManifest,
+  reconcileSlotLinks,
+  writeManifest,
+  planAdoption,
+  executeAdoption,
+  formatAdoptionMove,
+} from "../core/links.js";
 import { resolveStoreLinks } from "../core/stores.js";
 import { ensureLocalLayout } from "../core/layout.js";
 
@@ -117,9 +124,30 @@ export async function bindProject(
   await ensureGitExclude(projectRoot, "/.worm/");
 
   // Reconcile Slot 0's wormhole tunnels (links straight into the profile) and
-  // seed the manifest.
+  // seed the manifest. First, adopt any existing local files into the profile.
   const manifest = await readManifest(projectName);
   const links = await resolveStoreLinks(config, projectName);
+
+  // Plan and execute adoption (move slot-local files into profile, then symlink).
+  const adoptionPlan = await planAdoption(projectRoot, links);
+  if (adoptionPlan.operations.length > 0) {
+    if (adoptionPlan.hasConflicts) {
+      const conflicts = adoptionPlan.operations
+        .filter((o) => o.type === "conflict")
+        .map((o) => `  ${o.tail} — ${o.conflictReason}`)
+        .join("\n");
+      throw new WormError(
+        `Cannot adopt — a real file exists in both Slot 0 and the profile:\n${conflicts}`,
+        { hint: "Keep the copy you want (delete the other), then re-run `worm init`." }
+      );
+    }
+    logger.info("🛸 Adopting existing files into the profile:");
+    for (const op of adoptionPlan.operations) {
+      if (op.type === "move") logger.raw(`  ${formatAdoptionMove(op)}`);
+    }
+    await executeAdoption(projectRoot, adoptionPlan.operations);
+  }
+
   await reconcileSlotLinks(projectRoot, links, manifest);
   await writeManifest(projectName, manifest);
 

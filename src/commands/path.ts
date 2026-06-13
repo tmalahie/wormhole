@@ -24,3 +24,18 @@ export async function runPath(ref: string | undefined): Promise<void> {
   }
   process.stdout.write(slot.path + "\n");
 }
+
+/**
+ * `worm cd`/`worm tp` only change the parent shell's cwd through the `worm()`
+ * function installed by `worm shell-init`; that wrapper intercepts them before
+ * they reach the binary. So if this runs at all, the integration is missing —
+ * explain how to set it up rather than failing with a raw "unknown command".
+ */
+export function runShellAlias(alias: "cd" | "tp", ref: string): never {
+  throw new WormError(
+    `\`worm ${alias}\` needs worm's shell integration to change your current directory.`,
+    {
+      hint: `Add \`eval "$(worm shell-init)"\` to your ~/.zshrc or ~/.bashrc, then reload your shell. One-off without it: cd "$(worm path ${ref})"`,
+    }
+  );
+}

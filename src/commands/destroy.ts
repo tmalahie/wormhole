@@ -1,6 +1,6 @@
-import readline from "node:readline";
 import { logger } from "../utils/logger.js";
 import { WormError } from "../utils/errors.js";
+import { confirm } from "../utils/prompt.js";
 import { fs, pathExists } from "../utils/fs.js";
 import { gitToplevel, readProjectName } from "../core/project.js";
 import { scanUniverses } from "../core/universe.js";
@@ -83,17 +83,4 @@ export async function runDestroy(options: DestroyOptions = {}): Promise<void> {
   }
 
   logger.success(`💥 The ${projectName} project is no more.`);
-}
-
-function confirm(question: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    const rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout,
-    });
-    rl.question(`${question} [y/N] `, (answer) => {
-      rl.close();
-      resolve(/^y(es)?$/i.test(answer.trim()));
-    });
-  });
 }

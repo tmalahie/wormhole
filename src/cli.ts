@@ -4,7 +4,7 @@ import { isWormError } from "./utils/errors.js";
 import { runInit } from "./commands/init.js";
 import { runStatus } from "./commands/status.js";
 import { runConfig } from "./commands/config.js";
-import { runPath } from "./commands/path.js";
+import { runPath, runShellAlias } from "./commands/path.js";
 import { runShellInit } from "./commands/shell-init.js";
 import { runDestroy } from "./commands/destroy.js";
 import { runClone } from "./commands/clone.js";
@@ -90,6 +90,7 @@ program
   .command("sync")
   .description("Reconcile shared-path links across every slot (declarative, idempotent).")
   .option("--global", "Reconcile HOME-scope links (~/.worm/config.json shared_paths) instead of the project.")
+  .option("-y, --yes", "Skip the confirmation prompt when adoption moves are detected.")
   .action(async (opts) => {
     await runSync(opts);
   });
@@ -127,6 +128,20 @@ program
   .description("Print the worktree path for a branch or slot index. Used by `worm cd` / `worm tp`.")
   .action(async (ref: string) => {
     await runPath(ref);
+  });
+
+program
+  .command("cd <ref>")
+  .description("cd into a slot's worktree (branch or index). Requires `worm shell-init`.")
+  .action((ref: string) => {
+    runShellAlias("cd", ref);
+  });
+
+program
+  .command("tp <ref>")
+  .description("Teleport into a slot's worktree (branch or index). Requires `worm shell-init`.")
+  .action((ref: string) => {
+    runShellAlias("tp", ref);
   });
 
 program

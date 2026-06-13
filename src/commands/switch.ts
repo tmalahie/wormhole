@@ -1,10 +1,11 @@
 import path from "node:path";
 import { logger } from "../utils/logger.js";
 import { WormError } from "../utils/errors.js";
+import { confirm } from "../utils/prompt.js";
 import { findSlot0Root } from "../core/project.js";
 import { loadLocalConfig } from "../core/config.js";
 import { scanUniverses, universeLabel } from "../core/universe.js";
-import { switchBranch } from "../core/git.js";
+import { branchExists, switchBranch } from "../core/git.js";
 import { hookEnv, runHook } from "../core/hooks.js";
 
 export interface SwitchOptions {
@@ -51,7 +52,26 @@ export async function runSwitch(
     );
   }
 
-  await switchBranch(here.path, branch, { create: options.create });
+  // If the branch is missing, offer to create it ([Y/n], default yes) — `--create`
+  // (or a non-interactive shell) skips straight to creating / erroring.
+  const exists = await branchExists(root, branch);
+  let create = options.create ?? false;
+  if (!exists && !create) {
+    if (!process.stdin.isTTY) {
+      throw new WormError(`Branch "${branch}" does not exist.`, {
+        hint: `Pass --create to create it, or run \`git branch ${branch}\` first.`,
+      });
+    }
+    const ok = await confirm(`🌱 Branch "${branch}" does not exist. Create it?`, true);
+    if (!ok) {
+      logger.info("Aborted.");
+      return;
+    }
+    create = true;
+  }
+
+  await switchBranch(here.path, branch, { create });
+  if (!exists) logger.step(`🌱 created branch ${logger.bold(branch)}`);
   logger.step(`🚀 ${here.name} → ${branch}`);
 
   if (!options.skipHook && config.hooks.on_create) {

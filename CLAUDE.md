@@ -42,7 +42,7 @@ Keep that in mind when reviewing changes: a "clever" addition that breaks idempo
 ### User-facing output
 - Every line of CLI output goes through `logger.*`. Do not call `console.log` / `console.error` directly outside of `cli.ts` and the json branch of `status.ts`.
 - Tone: `info` for intent, `step` for substeps, `success` at the end, `warn` for recoverable issues, `error` only via thrown `WormError`.
-- **Vocabulary is themed.** Keep it consistent: `🪐` wormhole / global root, `🌌` add a universe, `🚀` active slot / switch, `💫` collapse (remove a universe), `🔗` shared "anomaly"/tunnel, `🪢` worktree, `⚡` hook, `🎯` target, `🛸` init / binding Slot 0, `📐` template, `🌱` sprouted local placeholder, `📝` gitignore write, `🧹` swept links, `💥` broken / error, `✨` success, `💡` hint. New messages should pick from this palette rather than introducing a new emoji per command.
+- **Vocabulary is themed.** Keep it consistent: `🪐` wormhole / global root, `🌌` add a universe, `🚀` active slot / switch, `💫` collapse (remove a universe), `🔗` shared "anomaly"/tunnel, `🪢` worktree, `⚡` hook, `🎯` target, `🛸` init / binding Slot 0, `🌀` adopt (move a real slot file into the profile + link it), `📐` template, `🌱` sprouted local placeholder, `📝` gitignore write, `🧹` swept links, `💥` broken / error, `✨` success, `💡` hint. New messages should pick from this palette rather than introducing a new emoji per command.
 
 ### Paths
 - All filesystem locations come from `src/core/paths.ts`. If you need a new one, add a function there — never concatenate path segments at the call site. The slot-dir naming (`<repo>-<N>`) is centralised on `SLOT_DIR_INFIX`; the builder (`siblingWorktreeDir`), the parser (`universe.ts`), and shell completion all derive from it.

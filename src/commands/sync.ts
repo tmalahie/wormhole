@@ -1,5 +1,7 @@
 import path from "node:path";
 import { logger } from "../utils/logger.js";
+import { WormError } from "../utils/errors.js";
+import { confirm } from "../utils/prompt.js";
 import { findSlot0Root, readProjectName } from "../core/project.js";
 import { loadLocalConfig } from "../core/config.js";
 import { scanUniverses } from "../core/universe.js";
@@ -7,7 +9,13 @@ import {
   readManifest,
   reconcileSlotLinks,
   writeManifest,
+  planAdoption,
+  executeAdoption,
+  formatAdoptionMove,
+  tildeify,
+  type AdoptionOperation,
 } from "../core/links.js";
+import type { UniverseSlot } from "../types.js";
 import { applyRecipeWiring, materializeRecipes } from "../core/recipes.js";
 import { resolveStoreLinks } from "../core/stores.js";
 import { ensureLocalLayout } from "../core/layout.js";
@@ -21,6 +29,8 @@ import {
 export interface SyncOptions {
   /** Reconcile HOME-scope shared links (~/.worm/config.json) instead of a project. */
   global?: boolean;
+  /** Skip the confirmation prompt when adoption moves are detected. */
+  yes?: boolean;
 }
 
 /**
@@ -28,6 +38,9 @@ export interface SyncOptions {
  * ensures each slot's wormhole tunnels (shared_paths) match the config, prunes
  * managed links that are no longer declared, and drops manifest entries for
  * slots that no longer exist. Idempotent. Does NOT create or remove slots.
+ *
+ * Detects files that exist in slots but should be in the profile (adoption
+ * candidates) and shows a plan before executing. With `--yes`, skips confirmation.
  *
  * With `--global`, reconciles the HOME scope instead: `~/<tail>` →
  * `~/.worm/shared/<tail>` for each tail in the global config's `shared_paths`.
@@ -47,6 +60,81 @@ export async function runSync(options: SyncOptions = {}): Promise<void> {
   const manifest = await readManifest(projectName);
   // Resolve shared_paths to concrete sources once (clones any missing store).
   const links = await resolveStoreLinks(config, projectName);
+
+  // Plan adoption (move slot-local files into the profile, then symlink) for
+  // every slot, then execute once the whole plan is confirmed conflict-free.
+  const allOperations: Array<{ slot: UniverseSlot; operations: AdoptionOperation[] }> = [];
+  for (const slot of slots) {
+    const plan = await planAdoption(slot.path, links);
+    if (plan.operations.length > 0) {
+      allOperations.push({ slot, operations: plan.operations });
+    }
+  }
+
+  if (allOperations.length > 0) {
+    // Per-slot conflicts: a real file/dir exists in both the slot and the profile.
+    const conflicts = allOperations.flatMap(({ slot, operations }) =>
+      operations
+        .filter((o) => o.type === "conflict")
+        .map((o) => `  ${slot.name}: ${o.tail} — ${o.conflictReason}`)
+    );
+    if (conflicts.length > 0) {
+      throw new WormError(
+        `Cannot adopt — a real file exists in both the slot and the profile:\n${conflicts.join("\n")}`,
+        { hint: "Keep the copy you want (delete the other), then re-run `worm sync`." }
+      );
+    }
+
+    // Cross-slot conflicts: two slots each hold a real file for the same shared
+    // path. Adopting both would silently overwrite one in the profile, so refuse.
+    const claimants = new Map<string, string[]>();
+    for (const { slot, operations } of allOperations) {
+      for (const op of operations) {
+        if (op.type !== "move") continue;
+        const names = claimants.get(op.sourcePath) ?? [];
+        names.push(slot.name);
+        claimants.set(op.sourcePath, names);
+      }
+    }
+    const collisions = [...claimants.entries()].filter(([, names]) => names.length > 1);
+    if (collisions.length > 0) {
+      const detail = collisions
+        .map(([source, names]) => `  ${tildeify(source)} — claimed by slots ${names.join(", ")}`)
+        .join("\n");
+      throw new WormError(
+        `Cannot adopt — the same shared path is a real file in multiple slots:\n${detail}`,
+        { hint: "Keep one copy (let the others become symlinks), then re-run `worm sync`." }
+      );
+    }
+
+    logger.info("🛸 About to run the following operations:");
+    for (const { operations } of allOperations) {
+      for (const op of operations) {
+        if (op.type === "move") logger.raw(`  ${formatAdoptionMove(op)}`);
+      }
+    }
+    logger.raw("");
+
+    if (!options.yes) {
+      if (!process.stdin.isTTY) {
+        throw new WormError(
+          "Adoption operations detected but running non-interactively.",
+          {
+            hint: 'Re-run with `--yes` to automatically adopt, or resolve conflicts manually.',
+          }
+        );
+      }
+      const ok = await confirm("Proceed?", true);
+      if (!ok) {
+        logger.info("Aborted.");
+        return;
+      }
+    }
+
+    for (const { slot, operations } of allOperations) {
+      await executeAdoption(slot.path, operations);
+    }
+  }
 
   let created = 0;
   let pruned = 0;

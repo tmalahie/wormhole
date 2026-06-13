@@ -68,9 +68,9 @@ worm universe rm my-other-feature
 | `worm clone <url> [path] [--name X] [--template <dir>] [--skip-hook]` | Recommended entry point. Normal-clones `<url>`, binds it as Slot 0, and warms it via `on_create`. |
 | `worm init [--name X] [--template <dir>] [--skip-hook]` | Bind the current git clone as Slot 0 and warm it via `on_create`. Lazily creates `~/.worm/` on first use. Idempotent. |
 | `worm status [--json]` | List every slot in the pool (Slot 0 + siblings) and the branch each is on. |
-| `worm universe add <branch> [--create] [--skip-hook]` | Create a permanent sibling worktree on `<branch>` at `<repo>-<N>`, link shared paths, run `on_create`. Refuses a branch already checked out in another slot. |
+| `worm universe add <branch> [--create] [--skip-hook]` | Create a permanent sibling worktree on `<branch>` at `<repo>-<N>`, link shared paths, run `on_create`. Refuses a branch already checked out in another slot. If `<branch>` doesn't exist, prompts to create it (`--create` skips the prompt). |
 | `worm universe rm <ref> [--force] [--skip-hook]` | Remove a sibling universe — `<ref>` is a slot index or a branch. Refuses Slot 0; refuses uncommitted changes unless `--force`; runs `on_remove`. |
-| `worm switch <branch> [--create] [--skip-hook]` | `git switch <branch>` in the current slot and re-run the warm-up hook. (Plain `git switch` works too — this just adds the hook + the "branch held elsewhere" guard.) |
+| `worm switch <branch> [--create] [--skip-hook]` | `git switch <branch>` in the current slot and re-run the warm-up hook. If `<branch>` doesn't exist, prompts to create it (`--create` skips the prompt). (Plain `git switch` works too — this just adds the hook + the "branch held elsewhere" guard.) |
 | `worm sync` | Declaratively reconcile shared-path links across all slots: create missing tunnels, prune removed ones, clone any missing store. Idempotent. |
 | `worm sync --global` | Reconcile **HOME-scope** links from `~/.worm/config.json`'s `shared_paths` (e.g. `~/.claude/commands` → `~/.worm/shared/.claude/commands`) — machine-wide setup, independent of any project. |
 | `worm template render <file> [KEY=VALUE …]` | Render a `{{var}}` template file to stdout (worm's templating primitive; leaves shell `${VAR}` untouched). For setup scripts that want to drop hand-rolled sed. |
