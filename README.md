@@ -14,6 +14,16 @@ The worktree pool used to be the whole story; now it's the backend. The product 
 
 > Built around **Claude Code** today (the recipes wire Claude's hooks and settings) on a deliberately agent-agnostic core — the pool, tunnels, and lifecycle hooks don't care which agent you run. Opening the recipe set and wiring other agents are the next iterations — see [Roadmap](#roadmap).
 
+## Video - Overview & Demo
+
+_(in French, English version incoming!)_
+
+<p>
+  <a href="https://youtu.be/0i4cv8mDx18">
+    <img src="https://github.com/user-attachments/assets/1fd2e1f7-8fc8-4a80-951c-95c536c36d32" alt="Watch the video" width="600">
+  </a>
+</p>
+
 ---
 
 ## Install
