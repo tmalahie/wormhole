@@ -1,8 +1,26 @@
 {
-  "name": "wormhole",
+  "name": "worm-cli",
   "version": "0.1.0",
   "description": "Manage warm, parallel git worktree environments for AI coding agents.",
   "type": "module",
+  "license": "MIT",
+  "author": "Tim Malahieude <tim@arcads.ai>",
+  "homepage": "https://github.com/tmalahie/wormhole#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tmalahie/wormhole.git"
+  },
+  "bugs": {
+    "url": "https://github.com/tmalahie/wormhole/issues"
+  },
+  "keywords": [
+    "git",
+    "worktree",
+    "cli",
+    "ai",
+    "coding-agents",
+    "developer-tools"
+  ],
   "bin": {
     "worm": "./dist/cli.js"
   },
@@ -17,7 +35,8 @@
     "test": "node --test tests/*.test.mjs",
     "predemo": "pnpm build",
     "demo": "bash scripts/demo.sh",
-    "worm": "node ./dist/cli.js"
+    "worm": "node ./dist/cli.js",
+    "prepublishOnly": "pnpm build"
   },
   "engines": {
     "node": ">=20"

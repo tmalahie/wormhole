@@ -29,12 +29,21 @@ _(in French, English version incoming!)_
 ## Install
 
 ```bash
+npm install -g worm-cli    # exposes the `worm` binary
+```
+
+Requires Node ≥ 20 and git ≥ 2.31.
+
+<details>
+<summary>From source</summary>
+
+```bash
 pnpm install
 pnpm build
 pnpm link --global    # exposes the `worm` binary
 ```
 
-Requires Node ≥ 20 and git ≥ 2.31.
+</details>
 
 ### Shell integration (recommended)
 
