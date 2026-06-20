@@ -1,6 +1,6 @@
 import path from "node:path";
 import { ensureSymlink } from "./symlinks.js";
-import { managedLinksFile } from "./paths.js";
+import { detachedLinksFile, managedLinksFile } from "./paths.js";
 import { logger } from "../utils/logger.js";
 import {
   ensureDir,
@@ -56,6 +56,48 @@ export async function writeManifest(
   await writeJson(managedLinksFile(projectName), manifest);
 }
 
+/** Per-slot tails the user localised via `worm detach` (resolved slot path → tails). */
+export type DetachRegistry = Record<string, string[]>;
+
+export async function readDetached(projectName: string): Promise<DetachRegistry> {
+  const file = detachedLinksFile(projectName);
+  if (!(await pathExists(file))) return {};
+  try {
+    return (await readJson<DetachRegistry>(file)) ?? {};
+  } catch {
+    return {};
+  }
+}
+
+export async function writeDetached(
+  projectName: string,
+  registry: DetachRegistry
+): Promise<void> {
+  await writeJson(detachedLinksFile(projectName), registry);
+}
+
+/**
+ * Self-heal one slot's detach list: keep only tails that are still a real
+ * (non-symlink) file on disk. Deleting the local file is the way to re-attach —
+ * the tunnel comes back on the next `worm sync`. Mutates `registry` in place and
+ * returns the live detached tails for this slot.
+ */
+export async function liveDetached(
+  slotPath: string,
+  registry: DetachRegistry
+): Promise<string[]> {
+  const key = path.resolve(slotPath);
+  const want = registry[key] ?? [];
+  const live: string[] = [];
+  for (const tail of want) {
+    const lp = path.join(slotPath, tail);
+    if ((await pathExists(lp)) && !(await isSymlink(lp))) live.push(tail);
+  }
+  if (live.length > 0) registry[key] = live;
+  else delete registry[key];
+  return live;
+}
+
 /**
  * Reconcile one slot's wormhole tunnels against `desired` (already resolved to
  * concrete sources by `resolveStoreLinks`), mutating `manifest` in place. Each
@@ -77,6 +119,9 @@ export async function reconcileSlotLinks(
   const pruned: string[] = [];
   const skipped: string[] = [];
   const missing: string[] = [];
+  // Tails worm actually maintains as symlinks this run — what the manifest stores
+  // (so a detached/real-file tail drops out of management cleanly).
+  const managed: string[] = [];
 
   for (const link of desired) {
     let sourceExists = await pathExists(link.source);
@@ -92,8 +137,16 @@ export async function reconcileSlotLinks(
       continue;
     }
     const linkPath = path.join(slotPath, link.tail);
+    // Deref-guard (create side): a real (non-symlink) file here is a slot-local
+    // override — `worm detach` made it real, or the user dropped a file in. Never
+    // clobber it (ensureSymlink would throw) and stop tracking it as managed.
+    if ((await pathExists(linkPath)) && !(await isSymlink(linkPath))) {
+      skipped.push(link.tail);
+      continue;
+    }
     const res = await ensureSymlink(linkPath, link.source, { relative: false });
     if (res.created) created.push(link.tail);
+    managed.push(link.tail);
   }
 
   const desiredTails = desired.map((d) => d.tail);
@@ -108,7 +161,7 @@ export async function reconcileSlotLinks(
     }
   }
 
-  manifest[key] = desiredTails;
+  manifest[key] = managed;
   return { created, pruned, skipped, missing };
 }
 

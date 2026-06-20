@@ -10,6 +10,8 @@ import { runDestroy } from "./commands/destroy.js";
 import { runClone } from "./commands/clone.js";
 import { runCompletion } from "./commands/completion.js";
 import { runSync } from "./commands/sync.js";
+import { runWire } from "./commands/wire.js";
+import { runDetach } from "./commands/detach.js";
 import { runSwitch } from "./commands/switch.js";
 import { runUniverseAdd, runUniverseRemove } from "./commands/universe.js";
 import { runHookTrigger } from "./commands/hook.js";
@@ -93,6 +95,20 @@ program
   .option("-y, --yes", "Skip the confirmation prompt when adoption moves are detected.")
   .action(async (opts) => {
     await runSync(opts);
+  });
+
+program
+  .command("wire [path]")
+  .description("Apply the cognitive layer (tunnels, env, recipes) to a worktree worm didn't create (default: cwd).")
+  .action(async (pathArg: string | undefined) => {
+    await runWire(pathArg);
+  });
+
+program
+  .command("detach <file>")
+  .description("Sever a shared-path tunnel in the current worktree only — replace the symlink with a local copy.")
+  .action(async (file: string) => {
+    await runDetach(file);
   });
 
 const template = program

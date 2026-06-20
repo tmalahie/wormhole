@@ -1735,3 +1735,118 @@ test("env: index-based offset gives clean sequential ports (front/back per workt
   assert.equal(sib.FRONT, "13000");
   assert.equal(sib.BACK, "13001");
 });
+
+// --- worm wire / worm detach -------------------------------------------------
+
+test("worm wire applies the cognitive layer to an externally-created worktree", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await createBranch(sb.projectRoot, "feature-a");
+
+  const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
+  t.after(() => rm(templateDir, { recursive: true, force: true }));
+  await writeFile(
+    path.join(templateDir, "config.json"),
+    JSON.stringify({
+      shared_paths: [".env"],
+      env: { vars: { PORT: "{{ 8080 + offset }}" } },
+      hooks: {},
+    })
+  );
+  await sb.worm(["init", "--template", templateDir]);
+
+  // A worktree worm did NOT create, at a non-sibling path (à la Conductor).
+  const extParent = await mkdtemp(path.join(tmpdir(), "worm-ext-"));
+  t.after(() => rm(extParent, { recursive: true, force: true }));
+  const extPath = path.join(extParent, "conductor-wt");
+  await execa("git", ["worktree", "add", extPath, "feature-a"], { cwd: sb.projectRoot });
+
+  // Before wiring: no tunnel, no env file.
+  await assert.rejects(readlink(path.join(extPath, ".env")), "no tunnel before wire");
+
+  const r = await sb.worm(["wire", extPath]);
+  assert.equal(r.exitCode, 0, r.stderr);
+
+  const extReal = await realpath(extPath);
+  const link = await readlink(path.join(extReal, ".env"));
+  assert.match(link, /projects\/.+\/\.env$/, "shared_path tunnel linked into the profile");
+  const env = parseDotenv(await readFile(path.join(extReal, ".env.worm"), "utf8"));
+  assert.equal(env.PORT, String(8080 + portOffset("feature-a")), "branch-stable env generated");
+
+  // Idempotent.
+  const r2 = await sb.worm(["wire", extPath]);
+  assert.equal(r2.exitCode, 0, r2.stderr);
+});
+
+test("worm detach localises a tunnel in one slot and survives sync", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await createBranch(sb.projectRoot, "feature-a");
+
+  const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
+  t.after(() => rm(templateDir, { recursive: true, force: true }));
+  await writeFile(
+    path.join(templateDir, "config.json"),
+    JSON.stringify({ shared_paths: [".env"], hooks: {} })
+  );
+  await sb.worm(["init", "--template", templateDir]);
+
+  // Give the shared source some content, and add a sibling that shares it.
+  const name = path.basename(sb.projectRoot);
+  await writeFile(path.join(sb.wormHome, "projects", name, ".env"), "SHARED=1\n");
+  await sb.worm(["universe", "add", "feature-a", "--skip-hook"]);
+  const root = await realpath(sb.projectRoot);
+
+  // Detach .env in Slot 0 (cwd defaults to projectRoot).
+  const r = await sb.worm(["detach", ".env"]);
+  assert.equal(r.exitCode, 0, r.stderr);
+
+  // Slot 0: now a real file with the copied content; the sibling keeps the link.
+  await assert.rejects(readlink(path.join(root, ".env")), "Slot 0 .env is no longer a symlink");
+  assert.equal(await readFile(path.join(root, ".env"), "utf8"), "SHARED=1\n");
+  await readlink(path.join(siblingPath(root, 1), ".env")); // resolves → still a tunnel
+
+  // Local edits survive a sync (deref-guard: a real file is never relinked).
+  await writeFile(path.join(root, ".env"), "LOCAL=1\n");
+  const r2 = await sb.worm(["sync"]);
+  assert.equal(r2.exitCode, 0, r2.stderr);
+  await assert.rejects(readlink(path.join(root, ".env")), "still a real file after sync");
+  assert.equal(await readFile(path.join(root, ".env"), "utf8"), "LOCAL=1\n", "local edit preserved");
+});
+
+test("worm detach refuses a file that isn't a managed tunnel", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init"]); // default config: no shared_paths
+
+  const r = await sb.worm(["detach", ".env"]);
+  assert.notEqual(r.exitCode, 0);
+  assert.match(r.stderr, /isn't a worm-managed link/);
+});
+
+test("worm detach is reversible: delete the local file and sync re-links it", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+
+  const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
+  t.after(() => rm(templateDir, { recursive: true, force: true }));
+  await writeFile(
+    path.join(templateDir, "config.json"),
+    JSON.stringify({ shared_paths: [".env"], hooks: {} })
+  );
+  await sb.worm(["init", "--template", templateDir]);
+  const name = path.basename(sb.projectRoot);
+  await writeFile(path.join(sb.wormHome, "projects", name, ".env"), "SHARED=1\n");
+  const root = await realpath(sb.projectRoot);
+
+  await sb.worm(["detach", ".env"]);
+  await assert.rejects(readlink(path.join(root, ".env")), "detached → real file");
+
+  // Re-attach by removing the local file, then syncing.
+  await rm(path.join(root, ".env"));
+  const r = await sb.worm(["sync"]);
+  assert.equal(r.exitCode, 0, r.stderr);
+  const link = await readlink(path.join(root, ".env")); // tunnel restored
+  assert.match(link, /projects\/.+\/\.env$/);
+  assert.equal(await readFile(path.join(root, ".env"), "utf8"), "SHARED=1\n");
+});

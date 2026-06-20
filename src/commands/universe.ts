@@ -24,9 +24,11 @@ import { applyEnv } from "../core/env.js";
 import { ensureLocalLayout } from "../core/layout.js";
 import { hookEnv, runHook } from "../core/hooks.js";
 import {
+  readDetached,
   readManifest,
   reconcileSlotLinks,
   stripSlotLinks,
+  writeDetached,
   writeManifest,
 } from "../core/links.js";
 import type { UniverseSlot } from "../types.js";
@@ -195,6 +197,12 @@ export async function runUniverseRemove(
   await stripSlotLinks(slot.path, manifest);
   delete manifest[slot.path];
   await writeManifest(projectName, manifest);
+  // Drop any detach records for the vanished slot so they don't leak.
+  const detached = await readDetached(projectName);
+  if (detached[slot.path]) {
+    delete detached[slot.path];
+    await writeDetached(projectName, detached);
+  }
   logger.step("🧹 swept wormhole symlinks");
 
   await worktreeRemove(root, slot.path, { force: options.force });

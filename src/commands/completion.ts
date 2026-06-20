@@ -36,6 +36,8 @@ const COMMANDS = [
   "universe",
   "switch",
   "sync",
+  "wire",
+  "detach",
   "status",
   "cd",
   "tp",

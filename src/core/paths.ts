@@ -14,6 +14,7 @@ export const RECIPES_DIR_NAME = "recipes";
 export const LOGS_DIR_NAME = "logs";
 export const SETUP_SCRIPT_NAME = "setup.sh";
 export const MANAGED_LINKS_FILE_NAME = ".managed-links.json";
+export const DETACHED_LINKS_FILE_NAME = ".detached-links.json";
 /** Joins the repo basename and slot index for sibling worktree dirs: `<repo>-<N>`. */
 export const SLOT_DIR_INFIX = "-";
 
@@ -162,6 +163,16 @@ export function localLogsDir(slot0Root: string): string {
  */
 export function managedLinksFile(projectName: string): string {
   return globalProjectFile(projectName, MANAGED_LINKS_FILE_NAME);
+}
+
+/**
+ * Path to the detach registry (`~/.worm/projects/<name>/.detached-links.json`):
+ * per-slot tails the user localised with `worm detach`. Adoption and reconcile
+ * skip these so a detached file stays a slot-local real copy across syncs —
+ * disambiguating an intentional override from a file waiting to be adopted.
+ */
+export function detachedLinksFile(projectName: string): string {
+  return globalProjectFile(projectName, DETACHED_LINKS_FILE_NAME);
 }
 
 /**

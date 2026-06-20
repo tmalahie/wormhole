@@ -9,6 +9,9 @@ import {
   readManifest,
   reconcileSlotLinks,
   writeManifest,
+  readDetached,
+  writeDetached,
+  liveDetached,
   planAdoption,
   executeAdoption,
   formatAdoptionMove,
@@ -64,11 +67,30 @@ export async function runSync(options: SyncOptions = {}): Promise<void> {
   // Resolve shared_paths to concrete sources once (clones any missing store).
   const links = await resolveStoreLinks(config, projectName);
 
+  // Detach registry: per-slot tails the user localised. Self-heal each live
+  // slot (a deleted local file re-attaches), GC vanished slots, then exclude
+  // detached tails per slot from BOTH adoption and reconcile so a detached file
+  // stays a local copy instead of being adopted or relinked.
+  const detached = await readDetached(projectName);
+  const detachedBySlot = new Map<string, string[]>();
+  for (const slot of slots) {
+    detachedBySlot.set(path.resolve(slot.path), await liveDetached(slot.path, detached));
+  }
+  const liveKeys = new Set(slots.map((s) => path.resolve(s.path)));
+  for (const key of Object.keys(detached)) {
+    if (!liveKeys.has(key)) delete detached[key];
+  }
+  await writeDetached(projectName, detached);
+  const slotLinks = (slot: UniverseSlot) => {
+    const d = detachedBySlot.get(path.resolve(slot.path)) ?? [];
+    return d.length > 0 ? links.filter((l) => !d.includes(l.tail)) : links;
+  };
+
   // Plan adoption (move slot-local files into the profile, then symlink) for
   // every slot, then execute once the whole plan is confirmed conflict-free.
   const allOperations: Array<{ slot: UniverseSlot; operations: AdoptionOperation[] }> = [];
   for (const slot of slots) {
-    const plan = await planAdoption(slot.path, links);
+    const plan = await planAdoption(slot.path, slotLinks(slot));
     if (plan.operations.length > 0) {
       allOperations.push({ slot, operations: plan.operations });
     }
@@ -142,7 +164,7 @@ export async function runSync(options: SyncOptions = {}): Promise<void> {
   let created = 0;
   let pruned = 0;
   for (const slot of slots) {
-    const res = await reconcileSlotLinks(slot.path, links, manifest);
+    const res = await reconcileSlotLinks(slot.path, slotLinks(slot), manifest);
     created += res.created.length;
     pruned += res.pruned.length;
     for (const rel of res.created) logger.step(`🔗 ${slot.name}: linked ${rel}`);
