@@ -26,7 +26,8 @@ import {
 } from "../core/paths.js";
 import { ensureSymlink } from "../core/symlinks.js";
 import { applyRecipeWiring, materializeRecipes } from "../core/recipes.js";
-import { currentBranch } from "../core/git.js";
+import { currentBranch, ensureGitExclude } from "../core/git.js";
+import { applyEnv } from "../core/env.js";
 import { hookEnv, runHook } from "../core/hooks.js";
 import { run } from "../utils/exec.js";
 import type { UniverseSlot } from "../types.js";
@@ -151,6 +152,11 @@ export async function bindProject(
   await reconcileSlotLinks(projectRoot, links, manifest);
   await writeManifest(projectName, manifest);
 
+  // Generate Slot 0's per-worktree env file (no-op unless `env` is configured).
+  const slot0Branch = (await currentBranch(projectRoot)) ?? "";
+  const envRes = await applyEnv(projectRoot, config, { name: "main", index: 0 }, slot0Branch);
+  if (envRes?.written) logger.step(`📝 generated ${envRes.file}`);
+
   // Materialize enabled recipes' artifacts (a no-op when none are enabled).
   const recipeFiles = await materializeRecipes(projectRoot, projectName, config.recipes);
   for (const file of recipeFiles) logger.step(`📦 recipes/${file}`);
@@ -197,24 +203,6 @@ export async function bindProject(
   logger.raw(
     `   Spin up a parallel universe with ${logger.bold("worm universe add <branch>")}; inspect with ${logger.bold("worm status")}.`
   );
-}
-
-async function ensureGitExclude(repoRoot: string, entry: string): Promise<void> {
-  const excludePath = path.join(repoRoot, ".git", "info", "exclude");
-  try {
-    let content = "";
-    try {
-      content = await fs.readFile(excludePath, "utf8");
-    } catch {
-      // no existing exclude file
-    }
-    if (content.split("\n").includes(entry)) return;
-    await ensureDir(path.dirname(excludePath));
-    const sep = content.length > 0 && !content.endsWith("\n") ? "\n" : "";
-    await fs.writeFile(excludePath, content + sep + entry + "\n", "utf8");
-  } catch {
-    // Non-fatal: a linked worktree's .git is a file, or perms — skip silently.
-  }
 }
 
 async function ensureGlobalRoot(): Promise<void> {

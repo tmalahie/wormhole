@@ -62,6 +62,22 @@ export const SharedPathSchema = z.union([
   z.object({ path: z.string().min(1), store: z.string().min(1).optional() }).strict(),
 ]);
 
+// Per-worktree environment file. Unlike `shared_paths` (one source symlinked
+// everywhere — IDENTICAL content), `env` generates a DIFFERENT dotenv file per
+// worktree, with values derived from a STABLE hash of the branch (so a given
+// branch always gets the same port/offset, even with ephemeral worktrees).
+// `file` is the generated filename (gitignored automatically); `vars` values are
+// integer arithmetic over `index` (slot number — positional), `offset`/`hash`
+// (branch-stable), plus the text vars `slot` / `branch` — e.g.
+// `{{ 3000 + index * 10000 }}` or `{{ 8080 + offset }}`. Templates remain for
+// advanced cases; this is the zero-file-to-maintain path for the common one.
+export const EnvSchema = z
+  .object({
+    file: z.string().min(1).default(".env.worm"),
+    vars: z.record(z.string(), z.string()).default({}),
+  })
+  .strict();
+
 export const ConfigSchema = z
   .object({
     // The "wormhole tunnels": files symlinked from each slot back into a store
@@ -71,12 +87,15 @@ export const ConfigSchema = z
     // Named external stores referenceable by `shared_paths` (project stores
     // override same-named global ones in ~/.worm/config.json).
     stores: z.record(z.string(), StoreSchema).default({}),
+    // Optional per-worktree env file (absent → feature off). See EnvSchema.
+    env: EnvSchema.optional(),
     hooks: HooksSchema.default({}),
     recipes: RecipesSchema,
   })
   .strict();
 
 export type Config = z.infer<typeof ConfigSchema>;
+export type EnvConfig = z.infer<typeof EnvSchema>;
 export type StoreConfig = z.infer<typeof StoreSchema>;
 export type SharedPathConfig = z.infer<typeof SharedPathSchema>;
 export type Hooks = z.infer<typeof HooksSchema>;

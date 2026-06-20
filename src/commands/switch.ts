@@ -6,6 +6,7 @@ import { findSlot0Root } from "../core/project.js";
 import { loadLocalConfig } from "../core/config.js";
 import { scanUniverses, universeLabel } from "../core/universe.js";
 import { branchExists, switchBranch } from "../core/git.js";
+import { applyEnv } from "../core/env.js";
 import { hookEnv, runHook } from "../core/hooks.js";
 
 export interface SwitchOptions {
@@ -73,6 +74,11 @@ export async function runSwitch(
   await switchBranch(here.path, branch, { create });
   if (!exists) logger.step(`🌱 created branch ${logger.bold(branch)}`);
   logger.step(`🚀 ${here.name} → ${branch}`);
+
+  // Branch changed → the stable per-branch env values change too; regenerate
+  // before the warm-up hook so setup.sh sees the new ports/offset.
+  const envRes = await applyEnv(here.path, config, here, branch);
+  if (envRes?.written) logger.step(`📝 regenerated ${envRes.file}`);
 
   if (!options.skipHook && config.hooks.on_create) {
     const result = await runHook("on_create", config.hooks.on_create, {

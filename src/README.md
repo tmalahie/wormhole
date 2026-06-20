@@ -44,7 +44,8 @@ Domain primitives. Pure functions where possible; the only side effects are file
 | `project.ts` | `findSlot0Root()` (via `git rev-parse --git-common-dir`) is the root resolver used by every command but `init`/`clone`, which use `gitToplevel()`. Retains a legacy `isBareCloneContainer` detector for a future `worm migrate`. |
 | `config.ts` | Load / save / validate `Config` via zod (`.strict()`, parsed as-is — no legacy normalization). |
 | `templates.ts` | Seed `~/.worm/templates/default/` and resolve a template (override → global default → built-in) into a `Config` + `scripts/`. |
-| `git.ts` | Typed wrappers for `git worktree {add,remove,list,prune}`, `switchBranch`, `currentBranch`, branch lookups, `dirtyFiles`. Parses porcelain output. |
+| `git.ts` | Typed wrappers for `git worktree {add,remove,list,prune}`, `switchBranch`, `currentBranch`, branch lookups, `dirtyFiles`. Parses porcelain output. Also `gitCommonDir` + `ensureGitExclude` (idempotent add to the shared `info/exclude`, used for `.worm/` and each slot's generated env file). |
+| `env.ts` | The per-worktree `env` block: `stableHash`/`portOffset` (deterministic, branch-keyed), the value evaluator (integer arithmetic over `index`/`offset`/`hash`, plus text `slot`/`branch`), `renderEnvFile`, `applyEnv` (write-if-changed + git-exclude), and `assertNoEnvCollision`. Distinct from `utils/template.ts` — only this evaluator does arithmetic inside `{{ … }}`. |
 | `symlinks.ts` | `ensureSymlink()` — idempotent, prefers relative paths, refuses to overwrite real files. |
 | `links.ts` | The managed-link manifest (in the profile): `reconcileSlotLinks` (links each slot's tails straight at their resolved source, absolute; sprouts a missing profile source, skips a missing external one; create/prune, deref-guarded) and `stripSlotLinks` (before worktree removal). |
 | `stores.ts` | `resolveStoreLinks` maps `shared_paths` to concrete sources: bare/`{path}` → the profile store; `{path, store}` → that named store's `root` (project `stores` override global `~/.worm/config.json` ones), cloning a missing root from its `url` on demand. |
@@ -64,7 +65,7 @@ Cross-cutting helpers. No domain knowledge here.
 | `template.ts` | `renderTemplate(tmpl, vars)` — strict `{{var}}` substitution (worm's one rendering primitive; leaves shell `${VAR}` untouched). Used by recipe scaffolds and `worm template render`. |
 
 ### `types.ts`
-Shared types and the canonical `ConfigSchema` (zod) + `DEFAULT_CONFIG` + `RecipesSchema` / `SandboxRecipeSchema` + `StoreSchema` / `SharedPathSchema` (the `string | {path, store}` union). Everything that touches config imports from here.
+Shared types and the canonical `ConfigSchema` (zod) + `DEFAULT_CONFIG` + `RecipesSchema` / `SandboxRecipeSchema` + `StoreSchema` / `SharedPathSchema` (the `string | {path, store}` union) + `EnvSchema` (the optional per-worktree `env` block). Everything that touches config imports from here.
 
 ## Key invariants
 

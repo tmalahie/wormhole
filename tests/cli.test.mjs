@@ -1547,3 +1547,191 @@ test("worm template render rejects a bad KEY=VALUE arg", async (t) => {
   assert.notEqual(r.exitCode, 0);
   assert.match(r.stderr, /expected KEY=VALUE/);
 });
+
+// --- per-worktree env files (the `env` config block) -------------------------
+
+// Mirrors core/env.ts:stableHash/portOffset — pins the stable-port contract so a
+// hash-algorithm change is a conscious, test-breaking decision (a given branch
+// must always map to the same port).
+function portOffset(branch) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < branch.length; i++) {
+    h ^= branch.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0) % 1000;
+}
+
+function parseDotenv(text) {
+  const out = {};
+  for (const line of text.split("\n")) {
+    const t = line.trim();
+    if (!t || t.startsWith("#")) continue;
+    const eq = t.indexOf("=");
+    if (eq !== -1) out[t.slice(0, eq)] = t.slice(eq + 1);
+  }
+  return out;
+}
+
+test("env: generates a per-worktree dotenv with stable per-branch ports, gitignored", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await createBranch(sb.projectRoot, "feature-a");
+
+  const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
+  t.after(() => rm(templateDir, { recursive: true, force: true }));
+  await writeFile(
+    path.join(templateDir, "config.json"),
+    JSON.stringify({
+      shared_paths: [],
+      env: {
+        file: ".env.worm",
+        vars: { PORT: "{{ 8080 + offset }}", SLOT: "{{ slot }}", BRANCH: "{{ branch }}" },
+      },
+      hooks: {},
+    })
+  );
+
+  await sb.worm(["init", "--template", templateDir]);
+
+  const slot0 = parseDotenv(await readFile(path.join(sb.projectRoot, ".env.worm"), "utf8"));
+  assert.equal(slot0.SLOT, "main");
+  assert.equal(slot0.BRANCH, "main");
+  assert.equal(slot0.PORT, String(8080 + portOffset("main")));
+
+  // The generated file must be git-excluded (never shows up as untracked).
+  const status = await execa(
+    "git",
+    ["status", "--porcelain", "--untracked-files=all"],
+    { cwd: sb.projectRoot }
+  );
+  assert.doesNotMatch(status.stdout, /\.env\.worm/, "generated env file must be git-excluded");
+
+  // A sibling on another branch gets its own, branch-derived values.
+  await sb.worm(["universe", "add", "feature-a", "--skip-hook"]);
+  const root = await realpath(sb.projectRoot);
+  const sib = parseDotenv(await readFile(path.join(siblingPath(root, 1), ".env.worm"), "utf8"));
+  assert.equal(sib.SLOT, "1");
+  assert.equal(sib.BRANCH, "feature-a");
+  assert.equal(sib.PORT, String(8080 + portOffset("feature-a")));
+});
+
+test("env: values are stable per branch across re-sync and switch", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await createBranch(sb.projectRoot, "feature-a");
+  await createBranch(sb.projectRoot, "feature-b");
+
+  const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
+  t.after(() => rm(templateDir, { recursive: true, force: true }));
+  // `file` omitted → defaults to .env.worm.
+  await writeFile(
+    path.join(templateDir, "config.json"),
+    JSON.stringify({ shared_paths: [], env: { vars: { PORT: "{{ 3000 + offset }}" } }, hooks: {} })
+  );
+
+  await sb.worm(["init", "--template", templateDir]);
+  const envPath = path.join(sb.projectRoot, ".env.worm");
+  const first = await readFile(envPath, "utf8");
+
+  // Re-sync must not churn the file (declarative, content-stable).
+  await sb.worm(["sync"]);
+  assert.equal(await readFile(envPath, "utf8"), first, "sync must not rewrite an unchanged env file");
+
+  // The port follows the BRANCH, not the slot — switching reproduces it.
+  await sb.worm(["universe", "add", "feature-a", "--skip-hook"]);
+  const root = await realpath(sb.projectRoot);
+  const sibEnv = path.join(siblingPath(root, 1), ".env.worm");
+  const portA = parseDotenv(await readFile(sibEnv, "utf8")).PORT;
+  assert.equal(portA, String(3000 + portOffset("feature-a")));
+
+  await sb.worm(["switch", "feature-b", "--skip-hook"], { cwd: siblingPath(root, 1) });
+  assert.equal(
+    parseDotenv(await readFile(sibEnv, "utf8")).PORT,
+    String(3000 + portOffset("feature-b"))
+  );
+
+  await sb.worm(["switch", "feature-a", "--skip-hook"], { cwd: siblingPath(root, 1) });
+  assert.equal(parseDotenv(await readFile(sibEnv, "utf8")).PORT, portA, "same branch → same port");
+});
+
+test("env: a file also listed in shared_paths is refused with a hint", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+
+  const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
+  t.after(() => rm(templateDir, { recursive: true, force: true }));
+  // Start clean (no collision) so init succeeds.
+  await writeFile(
+    path.join(templateDir, "config.json"),
+    JSON.stringify({
+      shared_paths: [".env"],
+      env: { file: ".env.worm", vars: { PORT: "{{ 8080 + offset }}" } },
+      hooks: {},
+    })
+  );
+  await sb.worm(["init", "--template", templateDir]);
+
+  // Make env.file collide with the shared_path, then sync.
+  const name = path.basename(sb.projectRoot);
+  const cfgPath = path.join(sb.wormHome, "projects", name, "config.json");
+  await writeFile(
+    cfgPath,
+    JSON.stringify({
+      shared_paths: [".env"],
+      env: { file: ".env", vars: { PORT: "{{ 8080 + offset }}" } },
+      hooks: {},
+    })
+  );
+
+  const r = await sb.worm(["sync"]);
+  assert.notEqual(r.exitCode, 0);
+  assert.match(r.stderr, /also listed in shared_paths/);
+});
+
+test("env: an unknown {{ … }} expression fails cleanly", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+
+  const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
+  t.after(() => rm(templateDir, { recursive: true, force: true }));
+  await writeFile(
+    path.join(templateDir, "config.json"),
+    JSON.stringify({ shared_paths: [], env: { vars: { X: "{{ bogus }}" } }, hooks: {} })
+  );
+
+  const r = await sb.worm(["init", "--template", templateDir]);
+  assert.notEqual(r.exitCode, 0);
+  assert.match(r.stderr, /unknown variable/);
+});
+
+test("env: index-based offset gives clean sequential ports (front/back per worktree)", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await createBranch(sb.projectRoot, "feature-a");
+
+  const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
+  t.after(() => rm(templateDir, { recursive: true, force: true }));
+  // The arcads-monorepo convention: front 3000 / back 3001, +10000 per slot.
+  await writeFile(
+    path.join(templateDir, "config.json"),
+    JSON.stringify({
+      shared_paths: [],
+      env: {
+        vars: { FRONT: "{{ 3000 + index * 10000 }}", BACK: "{{ 3001 + index * 10000 }}" },
+      },
+      hooks: {},
+    })
+  );
+
+  await sb.worm(["init", "--template", templateDir]);
+  const slot0 = parseDotenv(await readFile(path.join(sb.projectRoot, ".env.worm"), "utf8"));
+  assert.equal(slot0.FRONT, "3000");
+  assert.equal(slot0.BACK, "3001");
+
+  await sb.worm(["universe", "add", "feature-a", "--skip-hook"]);
+  const root = await realpath(sb.projectRoot);
+  const sib = parseDotenv(await readFile(path.join(siblingPath(root, 1), ".env.worm"), "utf8"));
+  assert.equal(sib.FRONT, "13000");
+  assert.equal(sib.BACK, "13001");
+});

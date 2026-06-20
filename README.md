@@ -148,6 +148,11 @@ Edit the file (or pre-seed a `--template <dir>`) to add what your project needs.
 
 - **`shared_paths`** — files tunnelled into every slot. Each entry is either a bare path, pulled from the project **profile** (`~/.worm/projects/<project>/<path>`, sprouting an empty placeholder if absent), or `{ "path": ".claude/docs", "store": "team" }` to pull it from a named **store** instead. Each slot gets an absolute symlink straight at the source. Common entries: `.env`, `CLAUDE.local.md`, `.mcp.json`. Run `worm sync` after changing this list.
 - **`stores`** — named external sources for `shared_paths`, e.g. `{ "team": { "root": "~/git/team-shared", "url": "git@github.com:org/team-shared" } }`. A `shared_paths` entry with `"store": "team"` links from that store's `root` instead of the profile — so team docs/commands can live in a **separate git repo**, shared with your team and editable in place (your edits land as changes in that repo). If `root` is missing and a `url` is given, `worm sync` clones it on demand. Declare stores per project here, or machine-wide in `~/.worm/config.json` (project stores win on a name clash).
+- **`env`** — a per-worktree dotenv file (off unless present). Unlike `shared_paths` (one source symlinked identically everywhere), `env` writes a **different** file into each slot. Shape: `{ "file": ".env.worm", "vars": { "FRONT": "{{ 3000 + index * 10000 }}" } }`. `file` (default `.env.worm`) is the generated filename, gitignored automatically. Each `vars` value is an integer **arithmetic expression** (`+ - * / %`, parentheses) over two offset bases — pick the one that fits:
+  - **`index`** — the slot number (positional). `{{ 3000 + index * 10000 }}` → `3000`, `13000`, `23000`. Clean and sequential; stable for a fixed pool, but drifts if worktrees are ephemeral (the slot number isn't tied to the branch).
+  - **`offset`** / **`hash`** — derived from a **stable hash of the branch**. `{{ 8080 + offset }}` gives the same port for a given branch on any machine and any slot order (`offset` ∈ 0–999), at the cost of non-sequential values. The ephemeral-worktree-safe choice.
+
+  Plus the text vars `{{ slot }}` / `{{ branch }}` (e.g. `DB_NAME=app_{{ slot }}`). Multiple components just share the same basis: `FRONT={{ 3000 + index * 10000 }}`, `BACK={{ 3001 + index * 10000 }}`. Regenerated on `init`, `universe add`, `switch`, and `sync` (rewritten only when the content changes), and may not also appear in `shared_paths` (worm refuses the clash). For advanced cases (a real config file with holes) keep using `worm template render` in `setup.sh`; `env` is the zero-file-to-maintain path for the common one.
 - **`hooks`** — `on_create` runs inside a slot to warm it up: when Slot 0 is bound (`init` / `clone`), when a sibling is created (`universe add`), and on `switch`. `on_remove` runs before a slot is removed. The default `on_create` invokes `.worm/scripts/setup.sh` — drop your install commands there (`npm install`, `pip install -r requirements.txt`, …) instead of editing the JSON. A non-zero `on_create` warns but doesn't abort; a non-zero `on_remove` aborts the removal unless `--force`. Pass `--skip-hook` to any of these commands to bind/switch without running the hook (e.g. on an already-warm checkout).
 - **`recipes`** — composable capabilities, keyed by name (provider-style). A recipe is **enabled iff its key is present**; each value is validated by that recipe's own schema. Two kinds of thing back a recipe, kept deliberately separate:
   - **Worm-owned code ships with the binary** — config-independent scripts (the sandbox interceptor, the permission-sync script) parameterized at run time, so they live **once** and a fix propagates by upgrading `worm`, with nothing to re-materialize per project.
@@ -169,9 +174,11 @@ Hook commands (and any script they invoke, like `setup.sh`) receive:
 |---|---|
 | `WORM_PROJECT_ROOT` | Absolute path to Slot 0 (the primary working tree). |
 | `WORM_SLOT` | Slot name being acted on (`main` for Slot 0, `<N>` for siblings). |
-| `WORM_SLOT_INDEX` | The numeric, 0-based slot index. Handy for derived values: `PORT=$((8080 + WORM_SLOT_INDEX))`. |
+| `WORM_SLOT_INDEX` | The numeric, 0-based slot index. Handy for derived values: `PORT=$((8080 + WORM_SLOT_INDEX))` (positional — stable only for a fixed pool). |
 | `WORM_BRANCH` | Branch name. |
 | `WORM_WORKTREE` | This slot's worktree path (equals `WORM_PROJECT_ROOT` for Slot 0). |
+| `WORM_BRANCH_HASH` | Stable 32-bit hash of the branch — same value across machines and slot reordering. |
+| `WORM_PORT_OFFSET` | Stable per-branch offset in 0–999. `PORT=$((8080 + WORM_PORT_OFFSET))` is the ephemeral-worktree-safe alternative to `WORM_SLOT_INDEX` (same basis as the `env` block's `{{ offset }}`). |
 
 ### Templates
 

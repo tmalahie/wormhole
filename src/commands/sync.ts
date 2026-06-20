@@ -18,6 +18,7 @@ import {
 import type { UniverseSlot } from "../types.js";
 import { applyRecipeWiring, materializeRecipes } from "../core/recipes.js";
 import { resolveStoreLinks } from "../core/stores.js";
+import { applyEnv, assertNoEnvCollision } from "../core/env.js";
 import { ensureLocalLayout } from "../core/layout.js";
 import { loadGlobalConfig } from "../core/global-config.js";
 import {
@@ -52,6 +53,8 @@ export async function runSync(options: SyncOptions = {}): Promise<void> {
   }
   const root = await findSlot0Root();
   const config = await loadLocalConfig(root);
+  // Fail fast on a misconfigured env block (file also declared as a shared_path).
+  assertNoEnvCollision(config);
   const projectName = await readProjectName(root);
   // Ensure the consolidated layout (recipes/logs symlinks into the profile,
   // manifest in the profile); migrates an old project in place.
@@ -150,6 +153,9 @@ export async function runSync(options: SyncOptions = {}): Promise<void> {
     for (const rel of res.missing) {
       logger.warn(`${slot.name}: ${rel} — store source not found yet; not linked.`);
     }
+    // Refresh this slot's per-worktree env file (no-op unless `env` is configured).
+    const envRes = await applyEnv(slot.path, config, slot, slot.branch ?? "");
+    if (envRes?.written) logger.step(`📝 ${slot.name}: generated ${envRes.file}`);
   }
 
   // Garbage-collect manifest entries for slots that no longer exist.

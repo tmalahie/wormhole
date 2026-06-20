@@ -20,6 +20,7 @@ import {
 import { siblingWorktreeDir } from "../core/paths.js";
 import { applyRecipeWiring, materializeRecipes } from "../core/recipes.js";
 import { resolveStoreLinks } from "../core/stores.js";
+import { applyEnv } from "../core/env.js";
 import { ensureLocalLayout } from "../core/layout.js";
 import { hookEnv, runHook } from "../core/hooks.js";
 import {
@@ -97,6 +98,11 @@ export async function runUniverseAdd(
   const links = await resolveStoreLinks(config, projectName);
   await reconcileSlotLinks(target, links, manifest);
   await writeManifest(projectName, manifest);
+
+  // Generate this slot's per-worktree env file before the warm-up hook runs, so
+  // setup.sh can read it (no-op unless `env` is configured).
+  const envRes = await applyEnv(target, config, { name: String(index), index }, branch);
+  if (envRes?.written) logger.step(`📝 generated ${envRes.file}`);
 
   if (!options.skipHook && config.hooks.on_create) {
     const slot: UniverseSlot = {
