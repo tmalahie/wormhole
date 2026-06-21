@@ -141,8 +141,15 @@ export async function pruneWorktrees(repoRoot: string): Promise<void> {
   await run("git", ["worktree", "prune"], { cwd: repoRoot });
 }
 
-/** Whether the repo at `cwd` has at least one git remote configured. */
-export async function gitHasRemote(cwd: string): Promise<boolean> {
+/**
+ * Whether the repo at `cwd` has a remote. With `name`, checks that SPECIFIC
+ * remote exists (matches what autosync fetches from); without, any remote.
+ */
+export async function gitHasRemote(cwd: string, name?: string): Promise<boolean> {
+  if (name) {
+    const { exitCode } = await run("git", ["remote", "get-url", name], { cwd });
+    return exitCode === 0;
+  }
   const { stdout, exitCode } = await run("git", ["remote"], { cwd });
   return exitCode === 0 && stdout.trim().length > 0;
 }

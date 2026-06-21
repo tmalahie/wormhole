@@ -222,12 +222,17 @@ async function runGlobalSync(): Promise<void> {
     logger.step("⚡ wired global recipe hooks → ~/.claude/settings.json");
   }
   // Independent of whether the wiring changed this run: as long as autosync is
-  // enabled without a remote it silently no-ops, so surface the reminder every
-  // sync (a second already-wired `worm sync --global` shouldn't swallow it).
-  if (recipes.autosync && !(await gitHasRemote(globalRoot()))) {
-    logger.warn(
-      "autosync is enabled but ~/.worm has no git remote — it will no-op until you add one (e.g. `git -C ~/.worm remote add origin <url>`)."
-    );
+  // enabled without the remote it targets, it silently no-ops, so surface the
+  // reminder every sync (a second already-wired `worm sync --global` shouldn't
+  // swallow it). Check the SPECIFIC remote autosync uses — a differently-named
+  // remote present wouldn't help it.
+  if (recipes.autosync) {
+    const remote = recipes.autosync.remote;
+    if (!(await gitHasRemote(globalRoot(), remote))) {
+      logger.warn(
+        `autosync is enabled but ~/.worm has no git remote "${remote}" — it will no-op until you add one (e.g. \`git -C ~/.worm remote add ${remote} <url>\`).`
+      );
+    }
   }
 
   if (desired.length === 0 && Object.keys(manifest).length === 0) {

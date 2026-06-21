@@ -140,7 +140,14 @@ function stamp() {
 // lock that still bears OUR id.
 function takeLock() {
   fs.mkdirSync(LOCK_DIR); // throws EEXIST unless we won
-  fs.writeFileSync(LOCK_OWNER_FILE, LOCK_OWNER);
+  try {
+    fs.writeFileSync(LOCK_OWNER_FILE, LOCK_OWNER);
+  } catch (err) {
+    // Owner-write failed — don't leave an ownerless lock dir that release can
+    // never reclaim (it'd sit until the stale-steal grace). Roll back and rethrow.
+    fs.rmSync(LOCK_DIR, { recursive: true, force: true });
+    throw err;
+  }
 }
 
 function acquireLock() {
@@ -203,6 +210,9 @@ function sync(branch) {
   // COMMIT BEFORE INTEGRATING (both modes): a committed change survives a rebase
   // conflict (we abort and it's still on HEAD), whereas an autostash pop-conflict
   // would strand it. A failed commit aborts the whole run — never push over it.
+  // NOTE: this means even pull (session-start) now no-ops on a commit failure
+  // (e.g. unset git identity) where it used to fetch/rebase regardless — safer,
+  // but a behavior change from the old `rebase --autostash` pull path.
   if (!commitIfDirty()) return;
 
   if (mode === "pull") {
