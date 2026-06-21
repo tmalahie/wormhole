@@ -19,6 +19,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { notify as osNotify } from "../_lib/notify.js";
 
 const remote = process.argv[2] || "origin";
 const debounceMin = Number(process.argv[3] || "0");
@@ -69,23 +70,7 @@ function recordConflict(detail) {
     // best effort
   }
   console.error(`autosync: CONFLICT — ${detail}. ~/.worm left clean; resolve by hand.`);
-  notifyUser("worm autosync conflict", `${detail}. Run: cd ${home} && git status`);
-}
-
-function notifyUser(title, message) {
-  if (!notify) return;
-  try {
-    if (process.platform === "darwin") {
-      spawnSync("osascript", [
-        "-e",
-        `display notification ${JSON.stringify(message)} with title ${JSON.stringify(title)}`,
-      ]);
-    } else if (process.platform === "linux") {
-      spawnSync("notify-send", [title, message]);
-    }
-  } catch {
-    // notifications are best-effort
-  }
+  if (notify) osNotify({ title: "worm autosync conflict", message: `${detail}. Run: cd ${home} && git status` });
 }
 
 /**

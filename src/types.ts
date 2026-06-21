@@ -29,10 +29,16 @@ export const SandboxRecipeSchema = z
   })
   .strict();
 
-// syncPermissions / shareHistory / shareMemory have no options yet — presence is the signal.
+// These recipes have no options yet — presence is the signal.
 export const SyncPermissionsRecipeSchema = z.object({}).strict();
 export const ShareHistoryRecipeSchema = z.object({}).strict();
 export const ShareMemoryRecipeSchema = z.object({}).strict();
+// GLOBAL-scope (like autosync), declared in ~/.worm/config.json:
+// `notifyPendingInput` — OS notification when input from you is pending (a
+//   finished response to read, or a permission to approve).
+// `syncGlobalPermissions` — version-control the global ~/.claude permissions block.
+export const NotifyPendingInputRecipeSchema = z.object({}).strict();
+export const SyncGlobalPermissionsRecipeSchema = z.object({}).strict();
 
 // autosync is a GLOBAL-scope recipe (the others are project-scope): declared in
 // the GLOBAL ~/.worm/config.json `recipes` block and wired by `worm sync --global`
@@ -55,6 +61,8 @@ export const RecipesSchema = z
     shareHistory: ShareHistoryRecipeSchema.optional(),
     shareMemory: ShareMemoryRecipeSchema.optional(),
     autosync: AutosyncSchema.optional(),
+    notifyPendingInput: NotifyPendingInputRecipeSchema.optional(),
+    syncGlobalPermissions: SyncGlobalPermissionsRecipeSchema.optional(),
   })
   .strict()
   .default({});
@@ -120,6 +128,8 @@ export type SyncPermissionsRecipeConfig = z.infer<typeof SyncPermissionsRecipeSc
 export type ShareHistoryRecipeConfig = z.infer<typeof ShareHistoryRecipeSchema>;
 export type ShareMemoryRecipeConfig = z.infer<typeof ShareMemoryRecipeSchema>;
 export type AutosyncConfig = z.infer<typeof AutosyncSchema>;
+export type NotifyPendingInputRecipeConfig = z.infer<typeof NotifyPendingInputRecipeSchema>;
+export type SyncGlobalPermissionsRecipeConfig = z.infer<typeof SyncGlobalPermissionsRecipeSchema>;
 
 export const DEFAULT_CONFIG: Config = ConfigSchema.parse({
   hooks: { on_create: 'bash "$WORM_PROJECT_ROOT/.worm/scripts/setup.sh"' },

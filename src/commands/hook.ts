@@ -36,12 +36,15 @@ export async function runHookTrigger(
   if (!meta) return; // unknown event → no-op
   const event = rawEvent as HookEvent;
 
-  // Global dispatch: machine-wide recipes (autosync) from ~/.worm/config.json,
-  // with NO project resolution — this hook fires from anywhere, even non-worm dirs.
+  // Global dispatch: machine-wide recipes (autosync, notify, syncGlobalPermissions)
+  // from ~/.worm/config.json, with NO project resolution — this hook fires from
+  // anywhere, even non-worm dirs. Read stdin first so the payload reaches recipes
+  // that need it (notify); read it even for run events (the project path doesn't).
   if (options.global) {
+    const input = await readStdin();
     try {
       const recipes = (await loadGlobalConfig()).recipes ?? {};
-      await runGlobalRecipeHooks(recipes, event);
+      await runGlobalRecipeHooks(recipes, event, input);
     } catch (err) {
       await recordDispatchError(err);
     }

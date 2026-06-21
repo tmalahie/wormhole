@@ -26,10 +26,12 @@ import {
 } from "./paths.js";
 import type {
   AutosyncConfig,
+  NotifyPendingInputRecipeConfig,
   RecipesConfig,
   SandboxRecipeConfig,
   ShareHistoryRecipeConfig,
   ShareMemoryRecipeConfig,
+  SyncGlobalPermissionsRecipeConfig,
   SyncPermissionsRecipeConfig,
   UniverseSlot,
 } from "../types.js";
@@ -106,7 +108,8 @@ export type HookEvent =
   | "user-prompt-submit"
   | "session-start"
   | "session-end"
-  | "stop";
+  | "stop"
+  | "permission-request";
 
 /**
  * How the dispatcher treats an event's stdin/stdout:
@@ -135,6 +138,10 @@ export const HOOK_EVENTS: Record<HookEvent, HookEventMeta> = {
   // End of each agent turn — the reliable, frequent push trigger for autosync
   // (SessionEnd is best-effort and never fires for a session that's never closed).
   stop: { claudeEvent: "Stop", kind: "run" },
+  // Fires on a permission prompt — used by `notifyPendingInput` ("waiting for
+  // approval"). `run` kind: the dispatcher fires it and ignores its output, so it
+  // never affects the permission decision.
+  "permission-request": { claudeEvent: "PermissionRequest", kind: "run" },
 };
 
 /**
@@ -365,6 +372,41 @@ const autosyncRecipe: Recipe<AutosyncConfig> = {
   },
 };
 
+// --- the notifyPendingInput recipe (GLOBAL scope) --------------------------
+// OS notification when the main agent yields to you: "Response ready" on Stop,
+// "Waiting for approval" on PermissionRequest. Reads the hook payload on stdin
+// (forwarded by the global dispatch), so it can label + focus the right VS Code
+// window and debounce background-agent turns. macOS/terminal-notifier flavoured.
+const notifyPendingInputRecipe: Recipe<NotifyPendingInputRecipeConfig> = {
+  name: "notifyPendingInput",
+  scope: "global",
+  select: (recipes) => recipes.notifyPendingInput,
+  hooks() {
+    const script = packagedRecipeScript("notifyPendingInput", "notify-chat-event.js");
+    const command = `node "${script}"`;
+    return { stop: [{ command }], "permission-request": [{ command }] };
+  },
+};
+
+// --- the syncGlobalPermissions recipe (GLOBAL scope) -------------------------
+// The global analogue of syncPermissions: version-controls the `permissions` block
+// of ~/.claude/settings.json by merging it with a git-tracked canonical copy in
+// ~/.worm. Bidirectional + idempotent, so it runs on every session boundary/turn.
+const syncGlobalPermissionsRecipe: Recipe<SyncGlobalPermissionsRecipeConfig> = {
+  name: "syncGlobalPermissions",
+  scope: "global",
+  select: (recipes) => recipes.syncGlobalPermissions,
+  hooks() {
+    const script = packagedRecipeScript("syncGlobalPermissions", "sync-global-settings.js");
+    const command = `node "${script}"`;
+    return {
+      "session-start": [{ command }],
+      stop: [{ command }],
+      "session-end": [{ command }],
+    };
+  },
+};
+
 // shareMemory is registered AFTER shareHistory so that, when both are enabled, a
 // sibling's whole project dir is already a symlink to Slot 0's before shareMemory
 // touches its memory subdir (it then resolves to Slot 0's link — a no-op).
@@ -374,6 +416,8 @@ const REGISTRY: Recipe<any>[] = [
   shareHistoryRecipe,
   shareMemoryRecipe,
   autosyncRecipe,
+  notifyPendingInputRecipe,
+  syncGlobalPermissionsRecipe,
 ];
 
 function enabledRecipes(
@@ -520,13 +564,16 @@ export async function applyGlobalRecipeWiring(recipes: RecipesConfig): Promise<b
  */
 export async function runGlobalRecipeHooks(
   recipes: RecipesConfig,
-  event: HookEvent
+  event: HookEvent,
+  input = ""
 ): Promise<void> {
   const ctx = globalWireContext();
   for (const { recipe, cfg } of enabledRecipes(recipes, "global")) {
     const cmds = recipe.hooks?.(ctx, cfg)?.[event] ?? [];
     for (const hc of cmds) {
-      const res = await runShell(hc.command, { cwd: globalRoot(), env: process.env });
+      // Forward the hook payload on stdin (notifyPendingInput reads it); recipes
+      // that don't care (autosync, syncGlobalPermissions) simply ignore it.
+      const res = await runShell(hc.command, { cwd: globalRoot(), env: process.env, input });
       if (process.stdout.isTTY) {
         const out = `${res.stdout}${res.stderr}`.trim();
         if (out) process.stdout.write(out + "\n");

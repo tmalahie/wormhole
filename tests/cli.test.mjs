@@ -1945,6 +1945,71 @@ test("global autosync no-ops cleanly when ~/.worm has no remote", async (t) => {
   assert.equal(r.exitCode, 0, r.stderr);
 });
 
+test("worm sync --global wires the notifyPendingInput + syncGlobalPermissions global recipes", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init"]);
+  await writeFile(
+    path.join(sb.wormHome, "config.json"),
+    JSON.stringify({ recipes: { notifyPendingInput: {}, syncGlobalPermissions: {} } })
+  );
+
+  const r = await sb.worm(["sync", "--global"]);
+  assert.equal(r.exitCode, 0, r.stderr);
+
+  const s = JSON.parse(await readFile(path.join(sb.wormHome, ".claude", "settings.json"), "utf8"));
+  // syncGlobalPermissions → start/end/stop ; notifyPendingInput → stop/permission-request.
+  assert.match(s.hooks.SessionStart[0].hooks[0].command, /hook trigger --global session-start/);
+  assert.match(s.hooks.SessionEnd[0].hooks[0].command, /hook trigger --global session-end/);
+  assert.match(s.hooks.Stop[0].hooks[0].command, /hook trigger --global stop/);
+  assert.match(s.hooks.PermissionRequest[0].hooks[0].command, /hook trigger --global permission-request/);
+  // ONE dispatcher entry per event, even though two recipes both contribute `stop`.
+  assert.equal(s.hooks.Stop.length, 1);
+});
+
+test("syncGlobalPermissions merges the global permissions block bidirectionally", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init"]);
+  await writeFile(
+    path.join(sb.wormHome, "config.json"),
+    JSON.stringify({ recipes: { syncGlobalPermissions: {} } })
+  );
+
+  // Live global settings: a permission + a non-permission key that must survive.
+  const liveFile = path.join(sb.wormHome, ".claude", "settings.json");
+  await mkdir(path.dirname(liveFile), { recursive: true });
+  await writeFile(liveFile, JSON.stringify({ permissions: { allow: ["Bash(live)"] }, trustedDirectories: ["/x"] }));
+  // Canonical git-tracked copy holds a different rule.
+  const canonFile = path.join(sb.wormHome, "shared", ".claude", "settings.json");
+  await mkdir(path.dirname(canonFile), { recursive: true });
+  await writeFile(canonFile, JSON.stringify({ permissions: { allow: ["Bash(canon)"] } }));
+
+  await sb.worm(["hook", "trigger", "--global", "session-start"]);
+
+  const live = JSON.parse(await readFile(liveFile, "utf8"));
+  assert.deepEqual(new Set(live.permissions.allow), new Set(["Bash(live)", "Bash(canon)"]), "live ∪ canon");
+  assert.deepEqual(live.trustedDirectories, ["/x"], "non-permission keys preserved in the live file");
+  const canon = JSON.parse(await readFile(canonFile, "utf8"));
+  assert.deepEqual(new Set(canon.permissions.allow), new Set(["Bash(live)", "Bash(canon)"]));
+  assert.ok(!canon.trustedDirectories, "canonical holds permissions only");
+});
+
+test("notifyPendingInput runs through the global dispatch and exits cleanly (no fire on sub-agent events)", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init"]);
+  await writeFile(path.join(sb.wormHome, "config.json"), JSON.stringify({ recipes: { notifyPendingInput: {} } }));
+
+  // A sub-agent payload (agent_id present) → the script reads stdin and returns
+  // BEFORE notifying. Proves the dispatch routes + forwards stdin without firing
+  // a real notification during the suite.
+  const r = await sb.worm(["hook", "trigger", "--global", "stop"], {
+    input: JSON.stringify({ hook_event_name: "Stop", agent_id: "abc" }),
+  });
+  assert.equal(r.exitCode, 0, r.stderr);
+});
+
 test("worm detach is reversible: delete the local file and sync re-links it", async (t) => {
   const sb = await createSandbox();
   t.after(() => sb.cleanup());
