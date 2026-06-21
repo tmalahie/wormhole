@@ -35,9 +35,13 @@ export const ShareHistoryRecipeSchema = z.object({}).strict();
 export const ShareMemoryRecipeSchema = z.object({}).strict();
 // GLOBAL-scope (like autosync), declared in ~/.worm/config.json:
 // `notifyPendingInput` — OS notification when input from you is pending (a
-//   finished response to read, or a permission to approve).
+//   finished response to read, or a permission to approve). `editor` is the macOS
+//   app the notification click opens the project folder in (e.g. "Cursor",
+//   "Windsurf"); "" disables the click action.
 // `syncGlobalPermissions` — version-control the global ~/.claude permissions block.
-export const NotifyPendingInputRecipeSchema = z.object({}).strict();
+export const NotifyPendingInputRecipeSchema = z
+  .object({ editor: z.string().default("Visual Studio Code") })
+  .strict();
 export const SyncGlobalPermissionsRecipeSchema = z.object({}).strict();
 
 // autosync is a GLOBAL-scope recipe (the others are project-scope): declared in

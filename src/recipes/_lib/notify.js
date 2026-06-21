@@ -3,10 +3,12 @@
 // scripts import. Picks the best available backend and never throws (a failed
 // notification must never break a hook).
 //
-//   notify({ title, message, sound?, focusPath? })
+//   notify({ title, message, sound?, focusPath?, focusApp? })
 //
-// macOS: prefers `terminal-notifier` (supports a click action — focusing the VS
-// Code window for `focusPath`), else falls back to `osascript`. Linux: `notify-send`.
+// macOS: prefers `terminal-notifier` (supports a click action — opening
+// `focusPath` in `focusApp`, e.g. focusing the editor window for that folder),
+// else falls back to `osascript`. Linux: `notify-send`. `focusApp` is a macOS
+// application name (e.g. "Visual Studio Code", "Cursor"); empty → no click action.
 import { existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 
@@ -18,17 +20,17 @@ function findTerminalNotifier() {
   return which.status === 0 && which.stdout.trim() ? "terminal-notifier" : null;
 }
 
-export function notify({ title, message, sound = false, focusPath = "" } = {}) {
+export function notify({ title, message, sound = false, focusPath = "", focusApp = "" } = {}) {
   try {
     if (process.platform === "darwin") {
       const tn = findTerminalNotifier();
       if (tn) {
         const args = ["-title", title, "-message", message];
         if (sound) args.push("-sound", "default");
-        // Clicking raises the existing VS Code window rooted at focusPath (no new
-        // tab) — `open -a` goes through LaunchServices, reliable from the notifier.
-        if (focusPath) args.push("-execute", `open -a "Visual Studio Code" '${focusPath}'`);
-        else args.push("-activate", "com.microsoft.VSCode");
+        // Clicking opens focusPath in focusApp — for a folder-based editor (VS
+        // Code, Cursor, Windsurf…) `open -a` raises the existing window rooted at
+        // that folder (no new tab). Skipped when either is unset → plain notification.
+        if (focusApp && focusPath) args.push("-execute", `open -a "${focusApp}" '${focusPath}'`);
         spawnSync(tn, args, { stdio: "ignore" });
         return;
       }
