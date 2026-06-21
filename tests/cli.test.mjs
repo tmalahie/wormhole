@@ -999,7 +999,7 @@ test("on_create hook runs setup.sh with WORM_* env vars on universe add", async 
   const setupPath = path.join(sb.projectRoot, ".worm", "scripts", "setup.sh");
   await writeFile(
     setupPath,
-    `#!/usr/bin/env bash\necho "ROOT=$WORM_PROJECT_ROOT"\necho "SLOT=$WORM_SLOT"\necho "INDEX=$WORM_SLOT_INDEX"\necho "BRANCH=$WORM_BRANCH"\necho "WT=$WORM_WORKTREE"\n`
+    `#!/usr/bin/env bash\necho "ROOT=$WORM_PROJECT_ROOT"\necho "SLOT=$WORM_SLOT"\necho "INDEX=$WORM_SLOT_INDEX"\necho "BRANCH=$WORM_BRANCH"\necho "WT=$WORM_WORKTREE"\necho "PROFILE=$WORM_PROFILE"\n`
   );
   await chmod(setupPath, 0o755);
 
@@ -1011,6 +1011,9 @@ test("on_create hook runs setup.sh with WORM_* env vars on universe add", async 
   assert.match(r.stdout, /INDEX=1/);
   assert.match(r.stdout, /BRANCH=feature-a/);
   assert.match(r.stdout, new RegExp(`WT=${escapeRegex(siblingPath(root, 1))}`));
+  // WORM_PROFILE points at the durable profile dir (<WORM_HOME>/projects/<name>).
+  const profile = path.join(sb.wormHome, "projects", path.basename(sb.projectRoot));
+  assert.match(r.stdout, new RegExp(`PROFILE=${escapeRegex(profile)}`));
 });
 
 test("on_create hook warms Slot 0 on init; --skip-hook opts out", async (t) => {
@@ -1194,30 +1197,6 @@ test("worm shell-init prints a sourceable shell function", async (t) => {
   assert.match(r.stdout, /builtin cd/);
 });
 
-test("worm config round-trips through ~/.worm/config.json", async (t) => {
-  const sb = await createSandbox();
-  t.after(() => sb.cleanup());
-
-  await sb.worm(["init"]);
-
-  const empty = await sb.worm(["config", "editor"]);
-  assert.equal(empty.exitCode, 0, empty.stderr);
-  assert.match(empty.stdout, /\(unset\)/);
-
-  const set = await sb.worm(["config", "editor", "code"]);
-  assert.equal(set.exitCode, 0, set.stderr);
-
-  const persisted = JSON.parse(await readFile(path.join(sb.wormHome, "config.json"), "utf8"));
-  assert.equal(persisted.editor, "code");
-
-  const get = await sb.worm(["config", "editor"]);
-  assert.match(get.stdout, /^code$/m);
-
-  const bad = await sb.worm(["config", "made-up-key"]);
-  assert.notEqual(bad.exitCode, 0);
-  assert.match(bad.stderr, /Unknown config key/);
-});
-
 test("worm destroy --force removes siblings, .worm/, and the global profile; Slot 0 survives", async (t) => {
   const sb = await createSandbox();
   t.after(() => sb.cleanup());
@@ -1285,7 +1264,7 @@ test("worm sync --global links HOME-scope shared paths (existing + sprouted) and
   // Two global tails: one with an existing source, one to be sprouted.
   await writeFile(
     path.join(sb.wormHome, "config.json"),
-    JSON.stringify({ editor: "code", shared_paths: [".claude/commands", ".claude/skills"] })
+    JSON.stringify({ shared_paths: [".claude/commands", ".claude/skills"] })
   );
   await mkdir(path.join(sb.wormHome, "shared", ".claude", "commands"), { recursive: true });
   await writeFile(path.join(sb.wormHome, "shared", ".claude", "commands", "x.md"), "hi\n");
@@ -1374,7 +1353,7 @@ test("worm sync --global is a no-op with a hint when nothing is configured", asy
 
   const r = await sb.worm(["sync", "--global"]);
   assert.equal(r.exitCode, 0, r.stderr);
-  assert.match(r.stdout + r.stderr, /No global shared_paths/i);
+  assert.match(r.stdout + r.stderr, /Nothing global configured/i);
   await assert.rejects(stat(path.join(sb.wormHome, ".managed-links.json")), /ENOENT/, "no manifest fabricated");
 });
 
@@ -1546,4 +1525,565 @@ test("worm template render rejects a bad KEY=VALUE arg", async (t) => {
   const r = await sb.worm(["template", "render", tmpl, "noequals"]);
   assert.notEqual(r.exitCode, 0);
   assert.match(r.stderr, /expected KEY=VALUE/);
+});
+
+// --- per-worktree env files (the `env` config block) -------------------------
+
+// Mirrors core/env.ts:stableHash/portOffset — pins the stable-port contract so a
+// hash-algorithm change is a conscious, test-breaking decision (a given branch
+// must always map to the same port).
+function portOffset(branch) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < branch.length; i++) {
+    h ^= branch.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0) % 1000;
+}
+
+function parseDotenv(text) {
+  const out = {};
+  for (const line of text.split("\n")) {
+    const t = line.trim();
+    if (!t || t.startsWith("#")) continue;
+    const eq = t.indexOf("=");
+    if (eq !== -1) out[t.slice(0, eq)] = t.slice(eq + 1);
+  }
+  return out;
+}
+
+test("env: generates a per-worktree dotenv with stable per-branch ports, gitignored", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await createBranch(sb.projectRoot, "feature-a");
+
+  const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
+  t.after(() => rm(templateDir, { recursive: true, force: true }));
+  await writeFile(
+    path.join(templateDir, "config.json"),
+    JSON.stringify({
+      shared_paths: [],
+      env: {
+        file: ".env.worm",
+        vars: { PORT: "{{ 8080 + offset }}", SLOT: "{{ slot }}", BRANCH: "{{ branch }}" },
+      },
+      hooks: {},
+    })
+  );
+
+  await sb.worm(["init", "--template", templateDir]);
+
+  const slot0 = parseDotenv(await readFile(path.join(sb.projectRoot, ".env.worm"), "utf8"));
+  assert.equal(slot0.SLOT, "main");
+  assert.equal(slot0.BRANCH, "main");
+  assert.equal(slot0.PORT, String(8080 + portOffset("main")));
+
+  // The generated file must be git-excluded (never shows up as untracked).
+  const status = await execa(
+    "git",
+    ["status", "--porcelain", "--untracked-files=all"],
+    { cwd: sb.projectRoot }
+  );
+  assert.doesNotMatch(status.stdout, /\.env\.worm/, "generated env file must be git-excluded");
+
+  // A sibling on another branch gets its own, branch-derived values.
+  await sb.worm(["universe", "add", "feature-a", "--skip-hook"]);
+  const root = await realpath(sb.projectRoot);
+  const sib = parseDotenv(await readFile(path.join(siblingPath(root, 1), ".env.worm"), "utf8"));
+  assert.equal(sib.SLOT, "1");
+  assert.equal(sib.BRANCH, "feature-a");
+  assert.equal(sib.PORT, String(8080 + portOffset("feature-a")));
+});
+
+test("env: values are stable per branch across re-sync and switch", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await createBranch(sb.projectRoot, "feature-a");
+  await createBranch(sb.projectRoot, "feature-b");
+
+  const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
+  t.after(() => rm(templateDir, { recursive: true, force: true }));
+  // `file` omitted → defaults to .env.worm.
+  await writeFile(
+    path.join(templateDir, "config.json"),
+    JSON.stringify({ shared_paths: [], env: { vars: { PORT: "{{ 3000 + offset }}" } }, hooks: {} })
+  );
+
+  await sb.worm(["init", "--template", templateDir]);
+  const envPath = path.join(sb.projectRoot, ".env.worm");
+  const first = await readFile(envPath, "utf8");
+
+  // Re-sync must not churn the file (declarative, content-stable).
+  await sb.worm(["sync"]);
+  assert.equal(await readFile(envPath, "utf8"), first, "sync must not rewrite an unchanged env file");
+
+  // The port follows the BRANCH, not the slot — switching reproduces it.
+  await sb.worm(["universe", "add", "feature-a", "--skip-hook"]);
+  const root = await realpath(sb.projectRoot);
+  const sibEnv = path.join(siblingPath(root, 1), ".env.worm");
+  const portA = parseDotenv(await readFile(sibEnv, "utf8")).PORT;
+  assert.equal(portA, String(3000 + portOffset("feature-a")));
+
+  await sb.worm(["switch", "feature-b", "--skip-hook"], { cwd: siblingPath(root, 1) });
+  assert.equal(
+    parseDotenv(await readFile(sibEnv, "utf8")).PORT,
+    String(3000 + portOffset("feature-b"))
+  );
+
+  await sb.worm(["switch", "feature-a", "--skip-hook"], { cwd: siblingPath(root, 1) });
+  assert.equal(parseDotenv(await readFile(sibEnv, "utf8")).PORT, portA, "same branch → same port");
+});
+
+test("env: a file also listed in shared_paths is refused with a hint", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+
+  const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
+  t.after(() => rm(templateDir, { recursive: true, force: true }));
+  // Start clean (no collision) so init succeeds.
+  await writeFile(
+    path.join(templateDir, "config.json"),
+    JSON.stringify({
+      shared_paths: [".env"],
+      env: { file: ".env.worm", vars: { PORT: "{{ 8080 + offset }}" } },
+      hooks: {},
+    })
+  );
+  await sb.worm(["init", "--template", templateDir]);
+
+  // Make env.file collide with the shared_path, then sync.
+  const name = path.basename(sb.projectRoot);
+  const cfgPath = path.join(sb.wormHome, "projects", name, "config.json");
+  await writeFile(
+    cfgPath,
+    JSON.stringify({
+      shared_paths: [".env"],
+      env: { file: ".env", vars: { PORT: "{{ 8080 + offset }}" } },
+      hooks: {},
+    })
+  );
+
+  const r = await sb.worm(["sync"]);
+  assert.notEqual(r.exitCode, 0);
+  assert.match(r.stderr, /also listed in shared_paths/);
+});
+
+test("env: an unknown {{ … }} expression fails cleanly", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+
+  const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
+  t.after(() => rm(templateDir, { recursive: true, force: true }));
+  await writeFile(
+    path.join(templateDir, "config.json"),
+    JSON.stringify({ shared_paths: [], env: { vars: { X: "{{ bogus }}" } }, hooks: {} })
+  );
+
+  const r = await sb.worm(["init", "--template", templateDir]);
+  assert.notEqual(r.exitCode, 0);
+  assert.match(r.stderr, /unknown variable/);
+});
+
+test("env: index-based offset gives clean sequential ports (front/back per worktree)", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await createBranch(sb.projectRoot, "feature-a");
+
+  const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
+  t.after(() => rm(templateDir, { recursive: true, force: true }));
+  // The arcads-monorepo convention: front 3000 / back 3001, +10000 per slot.
+  await writeFile(
+    path.join(templateDir, "config.json"),
+    JSON.stringify({
+      shared_paths: [],
+      env: {
+        vars: { FRONT: "{{ 3000 + index * 10000 }}", BACK: "{{ 3001 + index * 10000 }}" },
+      },
+      hooks: {},
+    })
+  );
+
+  await sb.worm(["init", "--template", templateDir]);
+  const slot0 = parseDotenv(await readFile(path.join(sb.projectRoot, ".env.worm"), "utf8"));
+  assert.equal(slot0.FRONT, "3000");
+  assert.equal(slot0.BACK, "3001");
+
+  await sb.worm(["universe", "add", "feature-a", "--skip-hook"]);
+  const root = await realpath(sb.projectRoot);
+  const sib = parseDotenv(await readFile(path.join(siblingPath(root, 1), ".env.worm"), "utf8"));
+  assert.equal(sib.FRONT, "13000");
+  assert.equal(sib.BACK, "13001");
+});
+
+// --- worm wire / worm detach -------------------------------------------------
+
+test("worm wire applies the cognitive layer to an externally-created worktree", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await createBranch(sb.projectRoot, "feature-a");
+
+  const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
+  t.after(() => rm(templateDir, { recursive: true, force: true }));
+  await writeFile(
+    path.join(templateDir, "config.json"),
+    JSON.stringify({
+      shared_paths: [".env"],
+      env: { vars: { PORT: "{{ 8080 + offset }}" } },
+      hooks: {},
+    })
+  );
+  await sb.worm(["init", "--template", templateDir]);
+
+  // A worktree worm did NOT create, at a non-sibling path (à la Conductor).
+  const extParent = await mkdtemp(path.join(tmpdir(), "worm-ext-"));
+  t.after(() => rm(extParent, { recursive: true, force: true }));
+  const extPath = path.join(extParent, "conductor-wt");
+  await execa("git", ["worktree", "add", extPath, "feature-a"], { cwd: sb.projectRoot });
+
+  // Before wiring: no tunnel, no env file.
+  await assert.rejects(readlink(path.join(extPath, ".env")), "no tunnel before wire");
+
+  const r = await sb.worm(["wire", extPath]);
+  assert.equal(r.exitCode, 0, r.stderr);
+
+  const extReal = await realpath(extPath);
+  const link = await readlink(path.join(extReal, ".env"));
+  assert.match(link, /projects\/.+\/\.env$/, "shared_path tunnel linked into the profile");
+  const env = parseDotenv(await readFile(path.join(extReal, ".env.worm"), "utf8"));
+  assert.equal(env.PORT, String(8080 + portOffset("feature-a")), "branch-stable env generated");
+
+  // Idempotent.
+  const r2 = await sb.worm(["wire", extPath]);
+  assert.equal(r2.exitCode, 0, r2.stderr);
+});
+
+test("worm detach localises a tunnel in one slot and survives sync", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await createBranch(sb.projectRoot, "feature-a");
+
+  const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
+  t.after(() => rm(templateDir, { recursive: true, force: true }));
+  await writeFile(
+    path.join(templateDir, "config.json"),
+    JSON.stringify({ shared_paths: [".env"], hooks: {} })
+  );
+  await sb.worm(["init", "--template", templateDir]);
+
+  // Give the shared source some content, and add a sibling that shares it.
+  const name = path.basename(sb.projectRoot);
+  await writeFile(path.join(sb.wormHome, "projects", name, ".env"), "SHARED=1\n");
+  await sb.worm(["universe", "add", "feature-a", "--skip-hook"]);
+  const root = await realpath(sb.projectRoot);
+
+  // Detach .env in Slot 0 (cwd defaults to projectRoot).
+  const r = await sb.worm(["detach", ".env"]);
+  assert.equal(r.exitCode, 0, r.stderr);
+
+  // Slot 0: now a real file with the copied content; the sibling keeps the link.
+  await assert.rejects(readlink(path.join(root, ".env")), "Slot 0 .env is no longer a symlink");
+  assert.equal(await readFile(path.join(root, ".env"), "utf8"), "SHARED=1\n");
+  await readlink(path.join(siblingPath(root, 1), ".env")); // resolves → still a tunnel
+
+  // Local edits survive a sync (deref-guard: a real file is never relinked).
+  await writeFile(path.join(root, ".env"), "LOCAL=1\n");
+  const r2 = await sb.worm(["sync"]);
+  assert.equal(r2.exitCode, 0, r2.stderr);
+  await assert.rejects(readlink(path.join(root, ".env")), "still a real file after sync");
+  assert.equal(await readFile(path.join(root, ".env"), "utf8"), "LOCAL=1\n", "local edit preserved");
+});
+
+test("worm detach refuses a file that isn't a managed tunnel", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init"]); // default config: no shared_paths
+
+  const r = await sb.worm(["detach", ".env"]);
+  assert.notEqual(r.exitCode, 0);
+  assert.match(r.stderr, /isn't a worm-managed link/);
+});
+
+// --- autosync recipe ---------------------------------------------------------
+
+// Turn the sandbox's WORM_HOME into a committed git repo with a bare remote.
+async function initHomeGitRemote(t, sb) {
+  const home = sb.wormHome;
+  await execa("git", ["-C", home, "config", "user.email", "home@e.com"]);
+  await execa("git", ["-C", home, "config", "user.name", "Home"]);
+  await execa("git", ["-C", home, "add", "-A"]);
+  await execa("git", ["-C", home, "commit", "-q", "-m", "initial"]);
+  const bare = await mkdtemp(path.join(tmpdir(), "worm-remote-"));
+  t.after(() => rm(bare, { recursive: true, force: true }));
+  await execa("git", ["init", "--bare", "-q", bare]);
+  await execa("git", ["-C", home, "remote", "add", "origin", bare]);
+  const branch = (await execa("git", ["-C", home, "rev-parse", "--abbrev-ref", "HEAD"])).stdout.trim();
+  return { home, bare, branch };
+}
+
+// Declare autosync in the GLOBAL config (~/.worm/config.json).
+async function setGlobalAutosync(sb, opts = {}) {
+  await writeFile(
+    path.join(sb.wormHome, "config.json"),
+    JSON.stringify({ recipes: { autosync: { debounceMinutes: 0, notify: false, ...opts } } })
+  );
+}
+
+test("worm sync --global wires autosync into ~/.claude/settings.json (and strips on removal)", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init"]);
+  await setGlobalAutosync(sb);
+
+  const r = await sb.worm(["sync", "--global"]);
+  assert.equal(r.exitCode, 0, r.stderr);
+
+  // HOME=wormHome in the sandbox, so ~/.claude/settings.json lives there.
+  const settingsPath = path.join(sb.wormHome, ".claude", "settings.json");
+  const s = JSON.parse(await readFile(settingsPath, "utf8"));
+  assert.match(s.hooks.SessionStart[0].hooks[0].command, /hook trigger --global session-start/);
+  assert.match(s.hooks.Stop[0].hooks[0].command, /hook trigger --global stop/);
+  assert.match(s.hooks.SessionEnd[0].hooks[0].command, /hook trigger --global session-end/);
+  // GLOBAL scope only — never wired into a project slot.
+  await assert.rejects(stat(path.join(sb.projectRoot, ".claude", "settings.local.json")), /ENOENT/);
+
+  // Removing it from the global config + re-syncing strips the hooks.
+  await writeFile(path.join(sb.wormHome, "config.json"), JSON.stringify({}));
+  await sb.worm(["sync", "--global"]);
+  const s2 = JSON.parse(await readFile(settingsPath, "utf8"));
+  assert.ok(!s2.hooks?.Stop, "autosync hooks stripped after removal");
+});
+
+test("global autosync push commits and pushes ~/.worm to its remote", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init"]);
+  await setGlobalAutosync(sb);
+  const { home, bare } = await initHomeGitRemote(t, sb);
+
+  // A new change in ~/.worm, then fire the global Stop dispatch.
+  await writeFile(path.join(home, "shared", "newfile.md"), "hello\n");
+  const r = await sb.worm(["hook", "trigger", "--global", "stop"]);
+  assert.equal(r.exitCode, 0, r.stderr);
+
+  // The remote received it; machine-local state stayed out of the push.
+  const checkout = await mkdtemp(path.join(tmpdir(), "worm-check-"));
+  t.after(() => rm(checkout, { recursive: true, force: true }));
+  await execa("git", ["clone", "-q", bare, checkout]);
+  await stat(path.join(checkout, "shared", "newfile.md"));
+  await assert.rejects(stat(path.join(checkout, ".managed-links.json")), /ENOENT/);
+});
+
+test("global autosync never auto-resolves: conflict → clean repo + marker + status surfaces it", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init"]);
+  await setGlobalAutosync(sb);
+  const { home, bare, branch } = await initHomeGitRemote(t, sb);
+  await execa("git", ["-C", home, "push", "-q", "origin", branch]);
+
+  // Another clone pushes a conflicting change to the same file.
+  const other = await mkdtemp(path.join(tmpdir(), "worm-other-"));
+  t.after(() => rm(other, { recursive: true, force: true }));
+  await execa("git", ["clone", "-q", bare, other]);
+  await execa("git", ["-C", other, "config", "user.email", "o@e.com"]);
+  await execa("git", ["-C", other, "config", "user.name", "Other"]);
+  await writeFile(path.join(other, "shared", "global-rules.md"), "REMOTE\n");
+  await execa("git", ["-C", other, "commit", "-aqm", "remote change"]);
+  await execa("git", ["-C", other, "push", "-q", "origin", branch]);
+
+  // A conflicting local commit in ~/.worm, then the global pull (session-start).
+  await writeFile(path.join(home, "shared", "global-rules.md"), "LOCAL\n");
+  await execa("git", ["-C", home, "commit", "-aqm", "local change"]);
+  const r = await sb.worm(["hook", "trigger", "--global", "session-start"]);
+  assert.equal(r.exitCode, 0, r.stderr);
+
+  // Marker written; repo left clean (rebase aborted); local change intact.
+  await stat(path.join(home, ".autosync-conflict.json"));
+  const st = await execa("git", ["-C", home, "status", "--porcelain"]);
+  assert.equal(st.stdout.trim(), "", "rebase aborted → clean working tree");
+  assert.equal(await readFile(path.join(home, "shared", "global-rules.md"), "utf8"), "LOCAL\n");
+
+  // `worm status` surfaces it (the durable, UI-less channel).
+  const status = await sb.worm(["status"]);
+  assert.match(status.stdout, /autosync: ~\/\.worm has an unresolved conflict/);
+
+  // A clean push afterwards clears the marker (force local to win, then push).
+  await execa("git", ["-C", home, "push", "-qf", "origin", branch]);
+  const r2 = await sb.worm(["hook", "trigger", "--global", "stop"]);
+  assert.equal(r2.exitCode, 0, r2.stderr);
+  await assert.rejects(stat(path.join(home, ".autosync-conflict.json")), /ENOENT/, "marker cleared");
+});
+
+test("global autosync never strands UNCOMMITTED local work on a conflicting push", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init"]);
+  await setGlobalAutosync(sb);
+  const { home, bare, branch } = await initHomeGitRemote(t, sb);
+  await execa("git", ["-C", home, "push", "-q", "origin", branch]);
+
+  // Another clone pushes a conflicting change to the same file.
+  const other = await mkdtemp(path.join(tmpdir(), "worm-other-"));
+  t.after(() => rm(other, { recursive: true, force: true }));
+  await execa("git", ["clone", "-q", bare, other]);
+  await execa("git", ["-C", other, "config", "user.email", "o@e.com"]);
+  await execa("git", ["-C", other, "config", "user.name", "Other"]);
+  await writeFile(path.join(other, "shared", "global-rules.md"), "REMOTE\n");
+  await execa("git", ["-C", other, "commit", "-aqm", "remote change"]);
+  await execa("git", ["-C", other, "push", "-q", "origin", branch]);
+
+  // Local work is UNCOMMITTED (the case the old `rebase --autostash` mishandled:
+  // a pop-conflict stranded it in refs/stash with no marker). Fire the push.
+  await writeFile(path.join(home, "shared", "global-rules.md"), "LOCAL\n");
+  const r = await sb.worm(["hook", "trigger", "--global", "stop"]);
+  assert.equal(r.exitCode, 0, r.stderr);
+
+  // Conflict marker written, working tree clean (rebase aborted)…
+  await stat(path.join(home, ".autosync-conflict.json"));
+  const st = await execa("git", ["-C", home, "status", "--porcelain"]);
+  assert.equal(st.stdout.trim(), "", "rebase aborted → clean working tree");
+  // …and the local work is SAFE on HEAD (committed before integrating), not lost
+  // to a dangling stash.
+  const head = await execa("git", ["-C", home, "show", "HEAD:shared/global-rules.md"]);
+  assert.equal(head.stdout, "LOCAL", "uncommitted work was committed, not stranded");
+  const stash = await execa("git", ["-C", home, "stash", "list"]);
+  assert.equal(stash.stdout.trim(), "", "nothing stranded in refs/stash");
+});
+
+test("global autosync no-ops cleanly when ~/.worm has no remote", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init"]);
+  await setGlobalAutosync(sb);
+  // No remote configured on WORM_HOME — the hook must exit 0 and do nothing.
+  const r = await sb.worm(["hook", "trigger", "--global", "stop"]);
+  assert.equal(r.exitCode, 0, r.stderr);
+});
+
+test("global autosync serializes: a held lock makes a concurrent run skip", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init"]);
+  await setGlobalAutosync(sb);
+  const { home, bare } = await initHomeGitRemote(t, sb);
+
+  // Pre-hold the lock as if another session were mid-sync (mirrors the script's
+  // LOCK_DIR naming: OS temp dir, keyed by the sanitized worm home).
+  const lockDir = path.join(tmpdir(), `worm-autosync-${sb.wormHome.replace(/[^a-zA-Z0-9]/g, "_")}.lock`);
+  await mkdir(lockDir, { recursive: true });
+  t.after(() => rm(lockDir, { recursive: true, force: true }));
+
+  await writeFile(path.join(home, "shared", "locked.md"), "x\n");
+  const r = await sb.worm(["hook", "trigger", "--global", "stop"]);
+  assert.equal(r.exitCode, 0, r.stderr);
+
+  // Lock held → the run skipped → nothing pushed to the remote.
+  const c1 = await mkdtemp(path.join(tmpdir(), "worm-check-"));
+  t.after(() => rm(c1, { recursive: true, force: true }));
+  await execa("git", ["clone", "-q", bare, c1]);
+  await assert.rejects(stat(path.join(c1, "shared", "locked.md")), /ENOENT/, "skipped while locked");
+
+  // Release the lock → the next run pushes normally.
+  await rm(lockDir, { recursive: true, force: true });
+  await sb.worm(["hook", "trigger", "--global", "stop"]);
+  const c2 = await mkdtemp(path.join(tmpdir(), "worm-check2-"));
+  t.after(() => rm(c2, { recursive: true, force: true }));
+  await execa("git", ["clone", "-q", bare, c2]);
+  await stat(path.join(c2, "shared", "locked.md"));
+});
+
+test("worm sync --global wires the notifyPendingInput + syncGlobalPermissions global recipes", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init"]);
+  await writeFile(
+    path.join(sb.wormHome, "config.json"),
+    JSON.stringify({ recipes: { notifyPendingInput: {}, syncGlobalPermissions: {} } })
+  );
+
+  const r = await sb.worm(["sync", "--global"]);
+  assert.equal(r.exitCode, 0, r.stderr);
+
+  const s = JSON.parse(await readFile(path.join(sb.wormHome, ".claude", "settings.json"), "utf8"));
+  // syncGlobalPermissions → start/end/stop ; notifyPendingInput → stop/permission-request.
+  assert.match(s.hooks.SessionStart[0].hooks[0].command, /hook trigger --global session-start/);
+  assert.match(s.hooks.SessionEnd[0].hooks[0].command, /hook trigger --global session-end/);
+  assert.match(s.hooks.Stop[0].hooks[0].command, /hook trigger --global stop/);
+  assert.match(s.hooks.PermissionRequest[0].hooks[0].command, /hook trigger --global permission-request/);
+  // ONE dispatcher entry per event, even though two recipes both contribute `stop`.
+  assert.equal(s.hooks.Stop.length, 1);
+});
+
+test("syncGlobalPermissions merges the global permissions block bidirectionally", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init"]);
+  await writeFile(
+    path.join(sb.wormHome, "config.json"),
+    JSON.stringify({ recipes: { syncGlobalPermissions: {} } })
+  );
+
+  // Live global settings: a permission + a non-permission key that must survive.
+  const liveFile = path.join(sb.wormHome, ".claude", "settings.json");
+  await mkdir(path.dirname(liveFile), { recursive: true });
+  await writeFile(liveFile, JSON.stringify({ permissions: { allow: ["Bash(live)"] }, trustedDirectories: ["/x"] }));
+  // Canonical git-tracked copy holds a different rule.
+  const canonFile = path.join(sb.wormHome, "shared", ".claude", "settings.json");
+  await mkdir(path.dirname(canonFile), { recursive: true });
+  await writeFile(canonFile, JSON.stringify({ permissions: { allow: ["Bash(canon)"] } }));
+
+  await sb.worm(["hook", "trigger", "--global", "session-start"]);
+
+  const live = JSON.parse(await readFile(liveFile, "utf8"));
+  assert.deepEqual(new Set(live.permissions.allow), new Set(["Bash(live)", "Bash(canon)"]), "live ∪ canon");
+  assert.deepEqual(live.trustedDirectories, ["/x"], "non-permission keys preserved in the live file");
+  const canon = JSON.parse(await readFile(canonFile, "utf8"));
+  assert.deepEqual(new Set(canon.permissions.allow), new Set(["Bash(live)", "Bash(canon)"]));
+  assert.ok(!canon.trustedDirectories, "canonical holds permissions only");
+});
+
+test("notifyPendingInput runs through the global dispatch and exits cleanly (no fire on sub-agent events)", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init"]);
+  // A custom `openOnClick` exercises the configurable click-target.
+  await writeFile(
+    path.join(sb.wormHome, "config.json"),
+    JSON.stringify({ recipes: { notifyPendingInput: { openOnClick: "Cursor" } } })
+  );
+
+  // A sub-agent payload (agent_id present) → the script reads stdin and returns
+  // BEFORE notifying. Proves the dispatch routes + forwards stdin without firing
+  // a real notification during the suite.
+  const r = await sb.worm(["hook", "trigger", "--global", "stop"], {
+    input: JSON.stringify({ hook_event_name: "Stop", agent_id: "abc" }),
+  });
+  assert.equal(r.exitCode, 0, r.stderr);
+});
+
+test("worm detach is reversible: delete the local file and sync re-links it", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+
+  const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
+  t.after(() => rm(templateDir, { recursive: true, force: true }));
+  await writeFile(
+    path.join(templateDir, "config.json"),
+    JSON.stringify({ shared_paths: [".env"], hooks: {} })
+  );
+  await sb.worm(["init", "--template", templateDir]);
+  const name = path.basename(sb.projectRoot);
+  await writeFile(path.join(sb.wormHome, "projects", name, ".env"), "SHARED=1\n");
+  const root = await realpath(sb.projectRoot);
+
+  await sb.worm(["detach", ".env"]);
+  await assert.rejects(readlink(path.join(root, ".env")), "detached → real file");
+
+  // Re-attach by removing the local file, then syncing.
+  await rm(path.join(root, ".env"));
+  const r = await sb.worm(["sync"]);
+  assert.equal(r.exitCode, 0, r.stderr);
+  const link = await readlink(path.join(root, ".env")); // tunnel restored
+  assert.match(link, /projects\/.+\/\.env$/);
+  assert.equal(await readFile(path.join(root, ".env"), "utf8"), "SHARED=1\n");
 });

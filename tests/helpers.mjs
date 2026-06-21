@@ -36,7 +36,11 @@ export async function createSandbox() {
         HOME: opts.home ?? wormHome,
         ...opts.env,
       },
-      input: opts.input,
+      // Always close the child's stdin (empty when no input). Hooks read stdin
+      // via readStdin(), which waits for EOF on a non-TTY pipe — Claude provides
+      // the payload and closes it in production; tests must do the same or the
+      // global hook dispatch (which always reads stdin) hangs waiting for EOF.
+      input: opts.input ?? "",
       reject: false,
     });
   }

@@ -9,6 +9,9 @@ import {
   readManifest,
   reconcileSlotLinks,
   writeManifest,
+  readDetached,
+  writeDetached,
+  liveDetached,
   planAdoption,
   executeAdoption,
   formatAdoptionMove,
@@ -16,8 +19,11 @@ import {
   type AdoptionOperation,
 } from "../core/links.js";
 import type { UniverseSlot } from "../types.js";
-import { applyRecipeWiring, materializeRecipes } from "../core/recipes.js";
+import { applyGlobalRecipeWiring, applyRecipeWiring, materializeRecipes } from "../core/recipes.js";
 import { resolveStoreLinks } from "../core/stores.js";
+import { applyEnv, assertNoEnvCollision } from "../core/env.js";
+import { gitHasRemote } from "../core/git.js";
+import { globalRoot } from "../core/paths.js";
 import { ensureLocalLayout } from "../core/layout.js";
 import { loadGlobalConfig } from "../core/global-config.js";
 import {
@@ -52,6 +58,8 @@ export async function runSync(options: SyncOptions = {}): Promise<void> {
   }
   const root = await findSlot0Root();
   const config = await loadLocalConfig(root);
+  // Fail fast on a misconfigured env block (file also declared as a shared_path).
+  assertNoEnvCollision(config);
   const projectName = await readProjectName(root);
   // Ensure the consolidated layout (recipes/logs symlinks into the profile,
   // manifest in the profile); migrates an old project in place.
@@ -61,11 +69,30 @@ export async function runSync(options: SyncOptions = {}): Promise<void> {
   // Resolve shared_paths to concrete sources once (clones any missing store).
   const links = await resolveStoreLinks(config, projectName);
 
+  // Detach registry: per-slot tails the user localised. Self-heal each live
+  // slot (a deleted local file re-attaches), GC vanished slots, then exclude
+  // detached tails per slot from BOTH adoption and reconcile so a detached file
+  // stays a local copy instead of being adopted or relinked.
+  const detached = await readDetached(projectName);
+  const detachedBySlot = new Map<string, string[]>();
+  for (const slot of slots) {
+    detachedBySlot.set(path.resolve(slot.path), await liveDetached(slot.path, detached));
+  }
+  const liveKeys = new Set(slots.map((s) => path.resolve(s.path)));
+  for (const key of Object.keys(detached)) {
+    if (!liveKeys.has(key)) delete detached[key];
+  }
+  await writeDetached(projectName, detached);
+  const slotLinks = (slot: UniverseSlot) => {
+    const d = detachedBySlot.get(path.resolve(slot.path)) ?? [];
+    return d.length > 0 ? links.filter((l) => !d.includes(l.tail)) : links;
+  };
+
   // Plan adoption (move slot-local files into the profile, then symlink) for
   // every slot, then execute once the whole plan is confirmed conflict-free.
   const allOperations: Array<{ slot: UniverseSlot; operations: AdoptionOperation[] }> = [];
   for (const slot of slots) {
-    const plan = await planAdoption(slot.path, links);
+    const plan = await planAdoption(slot.path, slotLinks(slot));
     if (plan.operations.length > 0) {
       allOperations.push({ slot, operations: plan.operations });
     }
@@ -139,7 +166,7 @@ export async function runSync(options: SyncOptions = {}): Promise<void> {
   let created = 0;
   let pruned = 0;
   for (const slot of slots) {
-    const res = await reconcileSlotLinks(slot.path, links, manifest);
+    const res = await reconcileSlotLinks(slot.path, slotLinks(slot), manifest);
     created += res.created.length;
     pruned += res.pruned.length;
     for (const rel of res.created) logger.step(`🔗 ${slot.name}: linked ${rel}`);
@@ -150,6 +177,9 @@ export async function runSync(options: SyncOptions = {}): Promise<void> {
     for (const rel of res.missing) {
       logger.warn(`${slot.name}: ${rel} — store source not found yet; not linked.`);
     }
+    // Refresh this slot's per-worktree env file (no-op unless `env` is configured).
+    const envRes = await applyEnv(slot.path, config, slot, slot.branch ?? "");
+    if (envRes?.written) logger.step(`📝 ${slot.name}: generated ${envRes.file}`);
   }
 
   // Garbage-collect manifest entries for slots that no longer exist.
@@ -183,12 +213,35 @@ async function runGlobalSync(): Promise<void> {
   const config = await loadGlobalConfig();
   const desired = config.shared_paths ?? [];
   const manifest = await readGlobalManifest();
+  const recipes = config.recipes ?? {};
+
+  // Wire (or strip) GLOBAL-scope recipes into ~/.claude/settings.json — runs
+  // regardless of shared_paths (removing `autosync` from config + re-running
+  // strips the hooks). autosync needs a git remote on ~/.worm to do anything.
+  if (await applyGlobalRecipeWiring(recipes)) {
+    logger.step("⚡ wired global recipe hooks → ~/.claude/settings.json");
+  }
+  // Independent of whether the wiring changed this run: as long as autosync is
+  // enabled without the remote it targets, it silently no-ops, so surface the
+  // reminder every sync (a second already-wired `worm sync --global` shouldn't
+  // swallow it). Check the SPECIFIC remote autosync uses — a differently-named
+  // remote present wouldn't help it.
+  if (recipes.autosync) {
+    const remote = recipes.autosync.remote;
+    if (!(await gitHasRemote(globalRoot(), remote))) {
+      logger.warn(
+        `autosync is enabled but ~/.worm has no git remote "${remote}" — it will no-op until you add one (e.g. \`git -C ~/.worm remote add ${remote} <url>\`).`
+      );
+    }
+  }
 
   if (desired.length === 0 && Object.keys(manifest).length === 0) {
-    logger.info("🪐 No global shared_paths configured in ~/.worm/config.json.");
-    logger.hint(
-      'Add e.g. "shared_paths": [".claude/commands", ".claude/skills"] there, then re-run `worm sync --global`.'
-    );
+    if (Object.keys(recipes).length === 0) {
+      logger.info("🪐 Nothing global configured in ~/.worm/config.json.");
+      logger.hint(
+        'Add e.g. "shared_paths": [".claude/commands"] or "recipes": { "autosync": {} }, then re-run `worm sync --global`.'
+      );
+    }
     return;
   }
 

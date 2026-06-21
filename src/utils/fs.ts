@@ -54,6 +54,22 @@ export async function writeTextIfMissing(p: string, contents: string): Promise<b
   return true;
 }
 
+/**
+ * Write `contents` only when the file is missing or its content differs.
+ * Returns whether it actually wrote — lets declarative generators (e.g. the
+ * per-worktree env file) stay quiet on a no-op re-run.
+ */
+export async function writeTextChanged(p: string, contents: string): Promise<boolean> {
+  try {
+    if ((await fs.readFile(p, "utf8")) === contents) return false;
+  } catch {
+    // missing or unreadable → (re)write below
+  }
+  await ensureDir(path.dirname(p));
+  await fs.writeFile(p, contents, "utf8");
+  return true;
+}
+
 export async function readSymlinkTarget(p: string): Promise<string | null> {
   try {
     return await fs.readlink(p);

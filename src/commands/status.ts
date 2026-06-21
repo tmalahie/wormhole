@@ -3,22 +3,55 @@ import pc from "picocolors";
 import { logger } from "../utils/logger.js";
 import { findSlot0Root } from "../core/project.js";
 import { scanUniverses, universeLabel } from "../core/universe.js";
+import { autosyncConflictFile } from "../core/paths.js";
+import { pathExists, readJson } from "../utils/fs.js";
 import type { UniverseSlot } from "../types.js";
 
 export interface StatusOptions {
   json?: boolean;
 }
 
+interface AutosyncConflict {
+  at?: string;
+  machine?: string;
+  detail?: string;
+}
+
+/** The durable surface for an autosync conflict — the hook has no live UI, so it
+ *  drops a marker and `worm status` is where the human reliably sees it. */
+async function readAutosyncConflict(): Promise<AutosyncConflict | null> {
+  const file = autosyncConflictFile();
+  if (!(await pathExists(file))) return null;
+  try {
+    return await readJson<AutosyncConflict>(file);
+  } catch {
+    return { detail: "unreadable conflict marker" };
+  }
+}
+
 export async function runStatus(options: StatusOptions = {}): Promise<void> {
   const root = await findSlot0Root();
   const slots = await scanUniverses(root);
+  const autosyncConflict = await readAutosyncConflict();
 
   if (options.json) {
-    console.log(JSON.stringify({ root, slots }, null, 2));
+    console.log(JSON.stringify({ root, slots, autosyncConflict }, null, 2));
     return;
   }
 
   renderStatus(root, slots);
+  if (autosyncConflict) renderAutosyncConflict(autosyncConflict);
+}
+
+function renderAutosyncConflict(c: AutosyncConflict): void {
+  // Rendered on stdout (like the rest of the status report) so the whole thing is
+  // one cohesive block — this is the durable surface for a UI-less hook.
+  logger.raw("");
+  logger.raw(
+    pc.yellow(`💥 autosync: ~/.worm has an unresolved conflict${c.at ? ` (since ${c.at})` : ""}.`)
+  );
+  if (c.detail) logger.raw(`     ${pc.dim(c.detail)}`);
+  logger.raw(pc.dim("     💡 Resolve it: cd ~/.worm && git status. It clears on the next clean sync."));
 }
 
 function renderStatus(root: string, slots: UniverseSlot[]): void {

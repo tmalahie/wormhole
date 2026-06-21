@@ -3,13 +3,14 @@ import { logger } from "./utils/logger.js";
 import { isWormError } from "./utils/errors.js";
 import { runInit } from "./commands/init.js";
 import { runStatus } from "./commands/status.js";
-import { runConfig } from "./commands/config.js";
 import { runPath, runShellAlias } from "./commands/path.js";
 import { runShellInit } from "./commands/shell-init.js";
 import { runDestroy } from "./commands/destroy.js";
 import { runClone } from "./commands/clone.js";
 import { runCompletion } from "./commands/completion.js";
 import { runSync } from "./commands/sync.js";
+import { runWire } from "./commands/wire.js";
+import { runDetach } from "./commands/detach.js";
 import { runSwitch } from "./commands/switch.js";
 import { runUniverseAdd, runUniverseRemove } from "./commands/universe.js";
 import { runHookTrigger } from "./commands/hook.js";
@@ -95,6 +96,20 @@ program
     await runSync(opts);
   });
 
+program
+  .command("wire [path]")
+  .description("Apply the cognitive layer (tunnels, env, recipes) to a worktree worm didn't create (default: cwd).")
+  .action(async (pathArg: string | undefined) => {
+    await runWire(pathArg);
+  });
+
+program
+  .command("detach <file>")
+  .description("Sever a shared-path tunnel in the current worktree only — replace the symlink with a local copy.")
+  .action(async (file: string) => {
+    await runDetach(file);
+  });
+
 const template = program
   .command("template")
   .description("Worm's templating primitive: render {{var}} template files.");
@@ -112,15 +127,6 @@ program
   .option("--json", "Output as JSON.")
   .action(async (opts) => {
     await runStatus(opts);
-  });
-
-program
-  .command("config [key] [value]")
-  .description("Read or write machine-level worm settings (~/.worm/config.json).")
-  .option("--list", "Print all keys and values.")
-  .option("--unset", "Remove a key.")
-  .action(async (key: string | undefined, value: string | undefined, opts) => {
-    await runConfig(key, value, opts);
   });
 
 program
@@ -164,9 +170,10 @@ const hook = program
 
 hook
   .command("trigger <event>")
-  .description("Run enabled recipes' hooks for <event> (pre-tool-use | session-start | session-end).")
-  .action(async (event: string) => {
-    await runHookTrigger(event);
+  .description("Run enabled recipes' hooks for <event> (pre-tool-use | session-start | session-end | stop).")
+  .option("--global", "Run machine-wide recipes from ~/.worm/config.json (no project context).")
+  .action(async (event: string, opts) => {
+    await runHookTrigger(event, opts);
   });
 
 program

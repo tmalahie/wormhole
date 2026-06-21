@@ -2,16 +2,19 @@ import path from "node:path";
 import { findSlot0Root, gitToplevel, readProjectName } from "../core/project.js";
 import { loadLocalConfig } from "../core/config.js";
 import { currentBranch } from "../core/git.js";
+import { portOffset } from "../core/env.js";
 import { localLogsDir, SLOT_DIR_INFIX } from "../core/paths.js";
 import { ensureDir, fs } from "../utils/fs.js";
 import {
   HOOK_EVENTS,
+  runGlobalRecipeHooks,
   runRecipeContext,
   runRecipeFilters,
   runRecipeHooks,
   type DispatchContext,
   type HookEvent,
 } from "../core/recipes.js";
+import { loadGlobalConfig } from "../core/global-config.js";
 import type { UniverseSlot } from "../types.js";
 
 /**
@@ -26,10 +29,28 @@ import type { UniverseSlot } from "../types.js";
  * and fail OPEN — a worm bug must not block every command. (The interceptor's
  * own decision logic still denies on malformed input.)
  */
-export async function runHookTrigger(rawEvent: string): Promise<void> {
+export async function runHookTrigger(
+  rawEvent: string,
+  options: { global?: boolean } = {}
+): Promise<void> {
   const meta = HOOK_EVENTS[rawEvent as HookEvent];
   if (!meta) return; // unknown event → no-op
   const event = rawEvent as HookEvent;
+
+  // Global dispatch: machine-wide recipes (autosync, notify, syncGlobalPermissions)
+  // from ~/.worm/config.json, with NO project resolution — this hook fires from
+  // anywhere, even non-worm dirs. Read stdin first so the payload reaches recipes
+  // that need it (notify); read it even for run events (the project path doesn't).
+  if (options.global) {
+    const input = await readStdin();
+    try {
+      const recipes = (await loadGlobalConfig()).recipes ?? {};
+      await runGlobalRecipeHooks(recipes, event, input);
+    } catch (err) {
+      await recordDispatchError(err);
+    }
+    return;
+  }
 
   if (meta.kind !== "run") {
     // stdin-driven events (filter + context). Read the input first so a
@@ -63,27 +84,43 @@ async function resolveContext(withBranch: boolean): Promise<DispatchContext> {
   const start = process.env.CLAUDE_PROJECT_DIR || process.cwd();
   const slot0Root = await findSlot0Root(start);
   const projectName = await readProjectName(slot0Root);
-  const slot = deriveSlot(slot0Root, (await gitToplevel(start)) ?? start);
-  const branch = withBranch ? (await currentBranch(slot.path)) ?? "" : "";
+  const here = (await gitToplevel(start)) ?? start;
+
+  let slot = deriveSlot(slot0Root, here);
+  let branch = "";
+  if (!slot) {
+    // An externally-created worktree (Conductor/worktrunk/native) wired via
+    // `worm wire` — not Slot 0, not a `<base>-<N>` sibling. Mirror `wire`'s
+    // identifySlot: a synthetic slot keyed by the branch's stable offset, so a
+    // project recipe sees a distinct WORM_SLOT/INDEX instead of masquerading as
+    // Slot 0. (We pay one `git` call for branch here, but only on this rare path
+    // — the common Slot 0 / sibling case stays git-free.)
+    branch = (await currentBranch(here)) ?? "";
+    const resolved = path.resolve(here);
+    slot = {
+      index: portOffset(branch),
+      name: path.basename(resolved),
+      isPrimary: false,
+      path: resolved,
+      status: "READY",
+    };
+  }
+  if (withBranch && !branch) branch = (await currentBranch(slot.path)) ?? "";
   return { slot0Root, projectName, slot, branch };
 }
 
 /**
  * Which slot is `worktreeRoot`? Slot 0 if it IS slot0Root, else parse the
  * `<base><INFIX><N>` sibling suffix. Cheap (no `git worktree list`) since this
- * runs on the hot path. An unrecognised worktree falls back to Slot 0.
+ * runs on the hot path. Returns null for an unrecognised worktree (an external
+ * one wired by `worm wire`); the caller builds a synthetic slot for it.
  */
-function deriveSlot(slot0Root: string, worktreeRoot: string): UniverseSlot {
+function deriveSlot(slot0Root: string, worktreeRoot: string): UniverseSlot | null {
   const root = path.resolve(slot0Root);
   const here = path.resolve(worktreeRoot);
-  const slot0: UniverseSlot = {
-    index: 0,
-    name: "main",
-    isPrimary: true,
-    path: root,
-    status: "READY",
-  };
-  if (here === root) return slot0;
+  if (here === root) {
+    return { index: 0, name: "main", isPrimary: true, path: root, status: "READY" };
+  }
   const prefix = `${path.basename(root)}${SLOT_DIR_INFIX}`;
   const name = path.basename(here);
   if (path.dirname(here) === path.dirname(root) && name.startsWith(prefix)) {
@@ -98,7 +135,7 @@ function deriveSlot(slot0Root: string, worktreeRoot: string): UniverseSlot {
       };
     }
   }
-  return slot0;
+  return null;
 }
 
 function readStdin(): Promise<string> {

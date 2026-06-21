@@ -36,11 +36,12 @@ const COMMANDS = [
   "universe",
   "switch",
   "sync",
+  "wire",
+  "detach",
   "status",
   "cd",
   "tp",
   "path",
-  "config",
   "destroy",
   "shell-init",
   "completion",
@@ -50,7 +51,6 @@ const COMMANDS = [
 const BRANCH_ONLY_COMMANDS = ["switch"];
 // `cd`/`tp`/`path` flow through `worm path`'s resolver: a branch or a slot index.
 const REF_COMMANDS = ["cd", "tp", "path"];
-const CONFIG_KEYS = ["editor"];
 
 const BASH = `# worm bash completion. Source with: eval "$(worm completion bash)"
 _worm_complete() {
@@ -75,11 +75,6 @@ _worm_complete() {
       refs="$(printf '%s\\n' "$wtlist" | sed -nE 's|^branch refs/heads/||p;')
 $(printf '%s\\n' "$wtlist" | sed -nE 's|^worktree .*${SLOT_DIR_INFIX}([0-9]+)$|\\1|p;')"
       COMPREPLY=($(compgen -W "$refs" -- "$cur"))
-      ;;
-    config)
-      if [[ $COMP_CWORD -eq 2 ]]; then
-        COMPREPLY=($(compgen -W "${CONFIG_KEYS.join(" ")}" -- "$cur"))
-      fi
       ;;
     completion)
       if [[ $COMP_CWORD -eq 2 ]]; then
@@ -117,11 +112,6 @@ _worm_complete() {
       _worm_wtlist="$(git worktree list --porcelain 2>/dev/null)"
       compadd -- \${(f)"$(printf '%s\\n' "$_worm_wtlist" | sed -nE 's|^branch refs/heads/||p;')"}
       compadd -- \${(f)"$(printf '%s\\n' "$_worm_wtlist" | sed -nE 's|^worktree .*${SLOT_DIR_INFIX}([0-9]+)$|\\1|p;')"}
-      ;;
-    config)
-      if (( CURRENT == 3 )); then
-        compadd -- ${CONFIG_KEYS.map((k) => `'${k}'`).join(" ")}
-      fi
       ;;
     completion)
       if (( CURRENT == 3 )); then

@@ -27,12 +27,14 @@ One file per command. Each exports a single `runX(args, options)` async function
 | `init.ts` | Bind the current clone as Slot 0. Lazily provisions `~/.worm/` on first run, writes the structural symlinks (`config.json`, `scripts/`), provisions `shared_paths`, seeds the managed-link manifest, and excludes `.worm/` via `.git/info/exclude`. Idempotent. |
 | `universe.ts` | `add <branch>` — create a permanent sibling worktree + run `on_create`. `rm <ref>` — remove a sibling (Slot 0 protected; refuses dirty without `--force`; runs `on_remove`; strips managed links before `git worktree remove`). |
 | `switch.ts` | `git switch <branch>` in the current slot + re-run `on_create`. Sugar over plain `git switch`, plus the "branch held elsewhere" guard. |
-| `sync.ts` | Declarative reconcile of shared-path links across all slots via the manifest; prunes removed links; GCs manifest entries for vanished slots. Idempotent. `--global` reconciles HOME-scope links instead (`~/<tail>` → `~/.worm/shared/<tail>`). |
+| `sync.ts` | Declarative reconcile of shared-path links across all slots via the manifest; prunes removed links; GCs manifest entries for vanished slots; self-heals + applies the detach registry per slot. Idempotent. `--global` reconciles HOME-scope links (`~/<tail>` → `~/.worm/shared/<tail>`) **and** installs/strips global-scope recipes (`autosync`) into `~/.claude/settings.json` via `applyGlobalRecipeWiring`. |
+| `wire.ts` | `worm wire [path]` — apply the cognitive layer (tunnels + env + recipe hooks) to a worktree worm didn't create. Reuses `reconcileSlotLinks` / `applyEnv` / `applyRecipeWiring` against an arbitrary path; identifies the slot via `scanUniverses`, else a synthetic external slot (`index` = branch offset). The seam for composing with Conductor/worktrunk/native worktrees. |
+| `detach.ts` | `worm detach <file>` — replace a shared symlink with a local real copy in the current worktree, drop it from the manifest, and record it in the detach registry (so adoption/reconcile leave it alone). Reversible by deleting the file + `worm sync`. |
 | `status.ts` | Enumerate the pool, render a table or `--json`. |
 | `destroy.ts` | Remove sibling universes + `.worm/` + the global profile. **Slot 0 is left intact.** |
-| `hook.ts` | `worm hook trigger <event>` — internal recipe-hook dispatcher invoked by each slot's `settings.local.json` (one static entry per event). Resolves the live slot, runs enabled recipes' hook commands with injected env, and owns logging. Must never throw; fails open on the hot path. |
+| `hook.ts` | `worm hook trigger <event>` — internal recipe-hook dispatcher invoked by each slot's `settings.local.json` (one static entry per event). Events: `pre-tool-use` (filter), `user-prompt-submit` (context), `session-start` / `session-end` / `stop` / `permission-request` (run). Resolves the live slot, runs enabled **project-scope** recipes with injected env, and owns logging. `--global` runs **global-scope** recipes (`autosync`, `notifyPendingInput`, `syncGlobalPermissions`) from `~/.worm/config.json` with NO project context (the form `worm sync --global` writes into `~/.claude/settings.json`); it forwards stdin so payload-reading recipes (`notifyPendingInput`) work. Must never throw; fails open on the hot path. Recipe scripts live in `src/recipes/<name>/`; shared script helpers (the notification backend) in `src/recipes/_lib/`. |
 | `template.ts` | `worm template render <file> KEY=VALUE …` — render a `{{var}}` template file to stdout (worm's templating primitive, for user setup scripts). |
-| `path.ts` / `shell-init.ts` / `completion.ts` / `config.ts` | Navigation helpers, shell wrapper, tab-completion, and machine-level settings. |
+| `path.ts` / `shell-init.ts` / `completion.ts` | Navigation helpers, shell wrapper, and tab-completion. |
 
 ### `core/`
 Domain primitives. Pure functions where possible; the only side effects are filesystem and `git`.
@@ -44,9 +46,10 @@ Domain primitives. Pure functions where possible; the only side effects are file
 | `project.ts` | `findSlot0Root()` (via `git rev-parse --git-common-dir`) is the root resolver used by every command but `init`/`clone`, which use `gitToplevel()`. Retains a legacy `isBareCloneContainer` detector for a future `worm migrate`. |
 | `config.ts` | Load / save / validate `Config` via zod (`.strict()`, parsed as-is — no legacy normalization). |
 | `templates.ts` | Seed `~/.worm/templates/default/` and resolve a template (override → global default → built-in) into a `Config` + `scripts/`. |
-| `git.ts` | Typed wrappers for `git worktree {add,remove,list,prune}`, `switchBranch`, `currentBranch`, branch lookups, `dirtyFiles`. Parses porcelain output. |
+| `git.ts` | Typed wrappers for `git worktree {add,remove,list,prune}`, `switchBranch`, `currentBranch`, branch lookups, `dirtyFiles`. Parses porcelain output. Also `gitCommonDir` + `ensureGitExclude` (idempotent add to the shared `info/exclude`, used for `.worm/` and each slot's generated env file). |
+| `env.ts` | The per-worktree `env` block: `stableHash`/`portOffset` (deterministic, branch-keyed), the value evaluator (integer arithmetic over `index`/`offset`/`hash`, plus text `slot`/`branch`), `renderEnvFile`, `applyEnv` (write-if-changed + git-exclude), and `assertNoEnvCollision`. Distinct from `utils/template.ts` — only this evaluator does arithmetic inside `{{ … }}`. |
 | `symlinks.ts` | `ensureSymlink()` — idempotent, prefers relative paths, refuses to overwrite real files. |
-| `links.ts` | The managed-link manifest (in the profile): `reconcileSlotLinks` (links each slot's tails straight at their resolved source, absolute; sprouts a missing profile source, skips a missing external one; create/prune, deref-guarded) and `stripSlotLinks` (before worktree removal). |
+| `links.ts` | The managed-link manifest (in the profile): `reconcileSlotLinks` (links each slot's tails straight at their resolved source, absolute; sprouts a missing profile source, skips a missing external one; create/prune, deref-guarded on BOTH sides — a real file is never clobbered, and the manifest stores only tails actually maintained as symlinks) and `stripSlotLinks` (before worktree removal). Also the **detach registry** (`.detached-links.json`): `readDetached`/`writeDetached`/`liveDetached` (self-healing — a deleted local file re-attaches). |
 | `stores.ts` | `resolveStoreLinks` maps `shared_paths` to concrete sources: bare/`{path}` → the profile store; `{path, store}` → that named store's `root` (project `stores` override global `~/.worm/config.json` ones), cloning a missing root from its `url` on demand. |
 | `global-links.ts` | HOME-scope analogue of `links.ts`: `reconcileGlobalLinks` links `~/<tail>` → `~/.worm/shared/<tail>` for `worm sync --global`, with its own manifest (`~/.worm/.managed-links.json`). |
 | `hooks.ts` | Runs `on_create`/`on_remove` with inherited stdio and `WORM_*` env (`hookEnv`). |
@@ -64,7 +67,7 @@ Cross-cutting helpers. No domain knowledge here.
 | `template.ts` | `renderTemplate(tmpl, vars)` — strict `{{var}}` substitution (worm's one rendering primitive; leaves shell `${VAR}` untouched). Used by recipe scaffolds and `worm template render`. |
 
 ### `types.ts`
-Shared types and the canonical `ConfigSchema` (zod) + `DEFAULT_CONFIG` + `RecipesSchema` / `SandboxRecipeSchema` + `StoreSchema` / `SharedPathSchema` (the `string | {path, store}` union). Everything that touches config imports from here.
+Shared types and the canonical `ConfigSchema` (zod) + `DEFAULT_CONFIG` + `RecipesSchema` / `SandboxRecipeSchema` + `StoreSchema` / `SharedPathSchema` (the `string | {path, store}` union) + `EnvSchema` (the optional per-worktree `env` block). Everything that touches config imports from here.
 
 ## Key invariants
 

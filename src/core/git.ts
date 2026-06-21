@@ -1,5 +1,7 @@
+import path from "node:path";
 import { run, runOrThrow } from "../utils/exec.js";
 import { WormError } from "../utils/errors.js";
+import { ensureDir, fs } from "../utils/fs.js";
 
 export interface WorktreeEntry {
   path: string;
@@ -137,6 +139,60 @@ export async function worktreeRemove(
 
 export async function pruneWorktrees(repoRoot: string): Promise<void> {
   await run("git", ["worktree", "prune"], { cwd: repoRoot });
+}
+
+/**
+ * Whether the repo at `cwd` has a remote. With `name`, checks that SPECIFIC
+ * remote exists (matches what autosync fetches from); without, any remote.
+ */
+export async function gitHasRemote(cwd: string, name?: string): Promise<boolean> {
+  if (name) {
+    const { exitCode } = await run("git", ["remote", "get-url", name], { cwd });
+    return exitCode === 0;
+  }
+  const { stdout, exitCode } = await run("git", ["remote"], { cwd });
+  return exitCode === 0 && stdout.trim().length > 0;
+}
+
+/**
+ * Absolute path to the COMMON git dir for the repo at `cwd` (shared by Slot 0
+ * and every linked worktree). For Slot 0 this is `<root>/.git`; from a sibling
+ * worktree `git` still reports the common dir, not the worktree's own gitdir.
+ * Returns null when `cwd` isn't a git repo.
+ */
+export async function gitCommonDir(cwd: string): Promise<string | null> {
+  const { stdout, exitCode } = await run("git", ["rev-parse", "--git-common-dir"], { cwd });
+  if (exitCode !== 0) return null;
+  const out = stdout.trim();
+  if (!out) return null;
+  return path.resolve(cwd, out);
+}
+
+/**
+ * Idempotently add `entry` to the repo's COMMON `info/exclude`, so it ignores
+ * the pattern across every worktree at once (the file is shared). Used for
+ * worm-managed local files that must not show up as untracked — `.worm/` and
+ * each slot's generated env file. Non-fatal: silently skips if git can't be
+ * reached or the file can't be written.
+ */
+export async function ensureGitExclude(cwd: string, entry: string): Promise<void> {
+  try {
+    const common = await gitCommonDir(cwd);
+    if (!common) return;
+    const excludePath = path.join(common, "info", "exclude");
+    let content = "";
+    try {
+      content = await fs.readFile(excludePath, "utf8");
+    } catch {
+      // no existing exclude file
+    }
+    if (content.split("\n").includes(entry)) return;
+    await ensureDir(path.dirname(excludePath));
+    const sep = content.length > 0 && !content.endsWith("\n") ? "\n" : "";
+    await fs.writeFile(excludePath, content + sep + entry + "\n", "utf8");
+  } catch {
+    // perms or an exotic git layout — skip silently.
+  }
 }
 
 /**

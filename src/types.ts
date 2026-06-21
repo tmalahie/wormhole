@@ -29,10 +29,35 @@ export const SandboxRecipeSchema = z
   })
   .strict();
 
-// syncPermissions / shareHistory / shareMemory have no options yet — presence is the signal.
+// These recipes have no options yet — presence is the signal.
 export const SyncPermissionsRecipeSchema = z.object({}).strict();
 export const ShareHistoryRecipeSchema = z.object({}).strict();
 export const ShareMemoryRecipeSchema = z.object({}).strict();
+// GLOBAL-scope (like autosync), declared in ~/.worm/config.json:
+// `notifyPendingInput` — OS notification when input from you is pending (a
+//   finished response to read, or a permission to approve). `openOnClick` is the
+//   macOS app the notification click opens the project folder in (any `open -a`
+//   app name: "Visual Studio Code", "Cursor", "Windsurf", …). Defaults to "" → no
+//   click action (we don't presume an editor); set it to opt into click-to-focus.
+// `syncGlobalPermissions` — version-control the global ~/.claude permissions block.
+export const NotifyPendingInputRecipeSchema = z
+  .object({ openOnClick: z.string().default("") })
+  .strict();
+export const SyncGlobalPermissionsRecipeSchema = z.object({}).strict();
+
+// autosync is a GLOBAL-scope recipe (the others are project-scope): declared in
+// the GLOBAL ~/.worm/config.json `recipes` block and wired by `worm sync --global`
+// into ~/.claude/settings.json, it keeps the whole ~/.worm meta-repo synced across
+// machines — pull on session start, push (debounced) on stop, flush on session
+// end. Conflicts are NEVER auto-resolved: a clean rebase --abort, a durable marker
+// surfaced by `worm status`, and an OS notification. No-ops without a git remote.
+export const AutosyncSchema = z
+  .object({
+    remote: z.string().default("origin"),
+    debounceMinutes: z.number().nonnegative().default(5),
+    notify: z.boolean().default(true),
+  })
+  .strict();
 
 export const RecipesSchema = z
   .object({
@@ -40,6 +65,9 @@ export const RecipesSchema = z
     syncPermissions: SyncPermissionsRecipeSchema.optional(),
     shareHistory: ShareHistoryRecipeSchema.optional(),
     shareMemory: ShareMemoryRecipeSchema.optional(),
+    autosync: AutosyncSchema.optional(),
+    notifyPendingInput: NotifyPendingInputRecipeSchema.optional(),
+    syncGlobalPermissions: SyncGlobalPermissionsRecipeSchema.optional(),
   })
   .strict()
   .default({});
@@ -62,6 +90,22 @@ export const SharedPathSchema = z.union([
   z.object({ path: z.string().min(1), store: z.string().min(1).optional() }).strict(),
 ]);
 
+// Per-worktree environment file. Unlike `shared_paths` (one source symlinked
+// everywhere — IDENTICAL content), `env` generates a DIFFERENT dotenv file per
+// worktree, with values derived from a STABLE hash of the branch (so a given
+// branch always gets the same port/offset, even with ephemeral worktrees).
+// `file` is the generated filename (gitignored automatically); `vars` values are
+// integer arithmetic over `index` (slot number — positional), `offset`/`hash`
+// (branch-stable), plus the text vars `slot` / `branch` — e.g.
+// `{{ 3000 + index * 10000 }}` or `{{ 8080 + offset }}`. Templates remain for
+// advanced cases; this is the zero-file-to-maintain path for the common one.
+export const EnvSchema = z
+  .object({
+    file: z.string().min(1).default(".env.worm"),
+    vars: z.record(z.string(), z.string()).default({}),
+  })
+  .strict();
+
 export const ConfigSchema = z
   .object({
     // The "wormhole tunnels": files symlinked from each slot back into a store
@@ -71,12 +115,15 @@ export const ConfigSchema = z
     // Named external stores referenceable by `shared_paths` (project stores
     // override same-named global ones in ~/.worm/config.json).
     stores: z.record(z.string(), StoreSchema).default({}),
+    // Optional per-worktree env file (absent → feature off). See EnvSchema.
+    env: EnvSchema.optional(),
     hooks: HooksSchema.default({}),
     recipes: RecipesSchema,
   })
   .strict();
 
 export type Config = z.infer<typeof ConfigSchema>;
+export type EnvConfig = z.infer<typeof EnvSchema>;
 export type StoreConfig = z.infer<typeof StoreSchema>;
 export type SharedPathConfig = z.infer<typeof SharedPathSchema>;
 export type Hooks = z.infer<typeof HooksSchema>;
@@ -85,6 +132,9 @@ export type SandboxRecipeConfig = z.infer<typeof SandboxRecipeSchema>;
 export type SyncPermissionsRecipeConfig = z.infer<typeof SyncPermissionsRecipeSchema>;
 export type ShareHistoryRecipeConfig = z.infer<typeof ShareHistoryRecipeSchema>;
 export type ShareMemoryRecipeConfig = z.infer<typeof ShareMemoryRecipeSchema>;
+export type AutosyncConfig = z.infer<typeof AutosyncSchema>;
+export type NotifyPendingInputRecipeConfig = z.infer<typeof NotifyPendingInputRecipeSchema>;
+export type SyncGlobalPermissionsRecipeConfig = z.infer<typeof SyncGlobalPermissionsRecipeSchema>;
 
 export const DEFAULT_CONFIG: Config = ConfigSchema.parse({
   hooks: { on_create: 'bash "$WORM_PROJECT_ROOT/.worm/scripts/setup.sh"' },

@@ -26,7 +26,8 @@ import {
 } from "../core/paths.js";
 import { ensureSymlink } from "../core/symlinks.js";
 import { applyRecipeWiring, materializeRecipes } from "../core/recipes.js";
-import { currentBranch } from "../core/git.js";
+import { currentBranch, ensureGitExclude } from "../core/git.js";
+import { applyEnv } from "../core/env.js";
 import { hookEnv, runHook } from "../core/hooks.js";
 import { run } from "../utils/exec.js";
 import type { UniverseSlot } from "../types.js";
@@ -151,6 +152,11 @@ export async function bindProject(
   await reconcileSlotLinks(projectRoot, links, manifest);
   await writeManifest(projectName, manifest);
 
+  // Generate Slot 0's per-worktree env file (no-op unless `env` is configured).
+  const slot0Branch = (await currentBranch(projectRoot)) ?? "";
+  const envRes = await applyEnv(projectRoot, config, { name: "main", index: 0 }, slot0Branch);
+  if (envRes?.written) logger.step(`📝 generated ${envRes.file}`);
+
   // Materialize enabled recipes' artifacts (a no-op when none are enabled).
   const recipeFiles = await materializeRecipes(projectRoot, projectName, config.recipes);
   for (const file of recipeFiles) logger.step(`📦 recipes/${file}`);
@@ -173,7 +179,7 @@ export async function bindProject(
     };
     const result = await runHook("on_create", config.hooks.on_create, {
       cwd: projectRoot,
-      env: hookEnv(projectRoot, slot, branch),
+      env: hookEnv(projectRoot, slot, branch, projectName),
     });
     if (result.ran && result.exitCode !== 0) {
       logger.warn(
@@ -199,24 +205,6 @@ export async function bindProject(
   );
 }
 
-async function ensureGitExclude(repoRoot: string, entry: string): Promise<void> {
-  const excludePath = path.join(repoRoot, ".git", "info", "exclude");
-  try {
-    let content = "";
-    try {
-      content = await fs.readFile(excludePath, "utf8");
-    } catch {
-      // no existing exclude file
-    }
-    if (content.split("\n").includes(entry)) return;
-    await ensureDir(path.dirname(excludePath));
-    const sep = content.length > 0 && !content.endsWith("\n") ? "\n" : "";
-    await fs.writeFile(excludePath, content + sep + entry + "\n", "utf8");
-  } catch {
-    // Non-fatal: a linked worktree's .git is a file, or perms — skip silently.
-  }
-}
-
 async function ensureGlobalRoot(): Promise<void> {
   const root = globalRoot();
   await ensureDir(root);
@@ -237,6 +225,22 @@ async function ensureGlobalRoot(): Promise<void> {
   await writeTextIfMissing(
     path.join(root, "README.md"),
     "# wormhole personal repo\n\nThis directory is managed by the `worm` CLI.\nIt holds per-project profiles (projects/), shared rules (shared/), and templates (templates/).\n"
+  );
+
+  // Machine-local state must never sync across machines (it holds absolute slot
+  // paths / per-host markers) — exclude it so the `autosync` recipe doesn't
+  // commit & push it and create cross-machine conflicts on every node.
+  await writeTextIfMissing(
+    path.join(root, ".gitignore"),
+    [
+      "# Machine-local worm state — not meant to sync across machines.",
+      ".managed-links.json",
+      ".detached-links.json",
+      ".autosync-conflict.json",
+      ".autosync-last-push",
+      "projects/*/logs/",
+      "",
+    ].join("\n")
   );
 
   await initGitRepoIfNeeded(root);

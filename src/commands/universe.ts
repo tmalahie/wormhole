@@ -20,12 +20,15 @@ import {
 import { siblingWorktreeDir } from "../core/paths.js";
 import { applyRecipeWiring, materializeRecipes } from "../core/recipes.js";
 import { resolveStoreLinks } from "../core/stores.js";
+import { applyEnv } from "../core/env.js";
 import { ensureLocalLayout } from "../core/layout.js";
 import { hookEnv, runHook } from "../core/hooks.js";
 import {
+  readDetached,
   readManifest,
   reconcileSlotLinks,
   stripSlotLinks,
+  writeDetached,
   writeManifest,
 } from "../core/links.js";
 import type { UniverseSlot } from "../types.js";
@@ -98,6 +101,11 @@ export async function runUniverseAdd(
   await reconcileSlotLinks(target, links, manifest);
   await writeManifest(projectName, manifest);
 
+  // Generate this slot's per-worktree env file before the warm-up hook runs, so
+  // setup.sh can read it (no-op unless `env` is configured).
+  const envRes = await applyEnv(target, config, { name: String(index), index }, branch);
+  if (envRes?.written) logger.step(`📝 generated ${envRes.file}`);
+
   if (!options.skipHook && config.hooks.on_create) {
     const slot: UniverseSlot = {
       index,
@@ -109,7 +117,7 @@ export async function runUniverseAdd(
     };
     const result = await runHook("on_create", config.hooks.on_create, {
       cwd: target,
-      env: hookEnv(root, slot, branch),
+      env: hookEnv(root, slot, branch, projectName),
     });
     if (result.ran && result.exitCode !== 0) {
       logger.warn(
@@ -142,6 +150,7 @@ export async function runUniverseRemove(
   }
 
   const root = await findSlot0Root();
+  const projectName = await readProjectName(root);
   const config = await loadLocalConfig(root);
   const slots = await scanUniverses(root);
   const slot = resolveSlotRef(ref, slots);
@@ -174,7 +183,7 @@ export async function runUniverseRemove(
   if (!options.skipHook && config.hooks.on_remove) {
     const result = await runHook("on_remove", config.hooks.on_remove, {
       cwd: slot.path,
-      env: hookEnv(root, slot, slot.branch ?? ""),
+      env: hookEnv(root, slot, slot.branch ?? "", projectName),
     });
     if (result.ran && result.exitCode !== 0 && !options.force) {
       throw new WormError(
@@ -184,11 +193,16 @@ export async function runUniverseRemove(
     }
   }
 
-  const projectName = await readProjectName(root);
   const manifest = await readManifest(projectName);
   await stripSlotLinks(slot.path, manifest);
   delete manifest[slot.path];
   await writeManifest(projectName, manifest);
+  // Drop any detach records for the vanished slot so they don't leak.
+  const detached = await readDetached(projectName);
+  if (detached[slot.path]) {
+    delete detached[slot.path];
+    await writeDetached(projectName, detached);
+  }
   logger.step("🧹 swept wormhole symlinks");
 
   await worktreeRemove(root, slot.path, { force: options.force });

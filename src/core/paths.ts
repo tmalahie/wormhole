@@ -14,6 +14,10 @@ export const RECIPES_DIR_NAME = "recipes";
 export const LOGS_DIR_NAME = "logs";
 export const SETUP_SCRIPT_NAME = "setup.sh";
 export const MANAGED_LINKS_FILE_NAME = ".managed-links.json";
+export const DETACHED_LINKS_FILE_NAME = ".detached-links.json";
+// Kept in sync with the literal in src/recipes/autosync/sync-worm-home.js (that
+// script is standalone and can't import this module).
+export const AUTOSYNC_CONFLICT_FILE_NAME = ".autosync-conflict.json";
 /** Joins the repo basename and slot index for sibling worktree dirs: `<repo>-<N>`. */
 export const SLOT_DIR_INFIX = "-";
 
@@ -45,6 +49,15 @@ export function globalConfigFile(): string {
  */
 export function globalManagedLinksFile(): string {
   return path.join(globalRoot(), MANAGED_LINKS_FILE_NAME);
+}
+
+/**
+ * Marker the autosync recipe drops at `~/.worm/.autosync-conflict.json` when a
+ * pull/push hits a conflict it won't auto-resolve. `worm status` surfaces it
+ * (durably, since the hook has no live UI), and the next clean sync clears it.
+ */
+export function autosyncConflictFile(): string {
+  return path.join(globalRoot(), AUTOSYNC_CONFLICT_FILE_NAME);
 }
 
 export function globalProjectDir(projectName: string): string {
@@ -138,16 +151,6 @@ export function packagedRecipeTemplate(recipeName: string, file: string): string
   return path.join(packagedRecipesDir(), recipeName, "templates", file);
 }
 
-/**
- * Absolute path to the running worm CLI entry (`dist/cli.js`). The recipe-hook
- * dispatcher entries written into a slot's settings.local.json invoke it by
- * absolute path — `node "<this>" hook trigger <event>` — so a change to the
- * shell's PATH can't silently disable the hooks.
- */
-export function wormCliEntry(): string {
-  return fileURLToPath(import.meta.url);
-}
-
 /** Where recipe hooks write their logs: `.worm/logs/` (a symlink into the
  *  profile's `logs/`). */
 export function localLogsDir(slot0Root: string): string {
@@ -162,6 +165,16 @@ export function localLogsDir(slot0Root: string): string {
  */
 export function managedLinksFile(projectName: string): string {
   return globalProjectFile(projectName, MANAGED_LINKS_FILE_NAME);
+}
+
+/**
+ * Path to the detach registry (`~/.worm/projects/<name>/.detached-links.json`):
+ * per-slot tails the user localised with `worm detach`. Adoption and reconcile
+ * skip these so a detached file stays a slot-local real copy across syncs —
+ * disambiguating an intentional override from a file waiting to be adopted.
+ */
+export function detachedLinksFile(projectName: string): string {
+  return globalProjectFile(projectName, DETACHED_LINKS_FILE_NAME);
 }
 
 /**
