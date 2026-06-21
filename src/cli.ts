@@ -1,3 +1,4 @@
+import { createRequire } from "node:module";
 import { Command } from "commander";
 import { logger } from "./utils/logger.js";
 import { isWormError } from "./utils/errors.js";
@@ -16,6 +17,13 @@ import { runUniverseAdd, runUniverseRemove } from "./commands/universe.js";
 import { runHookTrigger } from "./commands/hook.js";
 import { runTemplateRender } from "./commands/template.js";
 
+// Single source of truth for the version: read it from package.json at runtime
+// rather than duplicating the literal here. `../package.json` resolves relative
+// to the built `dist/cli.js` (npm ships package.json at the tarball root, so it's
+// present both in dev and once installed). A dynamic require keeps esbuild from
+// inlining the whole manifest into the bundle.
+const { version } = createRequire(import.meta.url)("../package.json") as { version: string };
+
 const program = new Command();
 
 program
@@ -23,7 +31,7 @@ program
   .description(
     "A permanent pool of warm git worktrees + a personal cognitive layer for AI coding agents."
   )
-  .version("0.2.0")
+  .version(version)
   .showHelpAfterError("(run `worm --help` for usage)")
   .addHelpText(
     "after",
