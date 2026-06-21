@@ -6,12 +6,14 @@ import { localLogsDir, SLOT_DIR_INFIX } from "../core/paths.js";
 import { ensureDir, fs } from "../utils/fs.js";
 import {
   HOOK_EVENTS,
+  runGlobalRecipeHooks,
   runRecipeContext,
   runRecipeFilters,
   runRecipeHooks,
   type DispatchContext,
   type HookEvent,
 } from "../core/recipes.js";
+import { loadGlobalConfig } from "../core/global-config.js";
 import type { UniverseSlot } from "../types.js";
 
 /**
@@ -26,10 +28,25 @@ import type { UniverseSlot } from "../types.js";
  * and fail OPEN — a worm bug must not block every command. (The interceptor's
  * own decision logic still denies on malformed input.)
  */
-export async function runHookTrigger(rawEvent: string): Promise<void> {
+export async function runHookTrigger(
+  rawEvent: string,
+  options: { global?: boolean } = {}
+): Promise<void> {
   const meta = HOOK_EVENTS[rawEvent as HookEvent];
   if (!meta) return; // unknown event → no-op
   const event = rawEvent as HookEvent;
+
+  // Global dispatch: machine-wide recipes (autosync) from ~/.worm/config.json,
+  // with NO project resolution — this hook fires from anywhere, even non-worm dirs.
+  if (options.global) {
+    try {
+      const recipes = (await loadGlobalConfig()).recipes ?? {};
+      await runGlobalRecipeHooks(recipes, event);
+    } catch (err) {
+      await recordDispatchError(err);
+    }
+    return;
+  }
 
   if (meta.kind !== "run") {
     // stdin-driven events (filter + context). Read the input first so a

@@ -1374,7 +1374,7 @@ test("worm sync --global is a no-op with a hint when nothing is configured", asy
 
   const r = await sb.worm(["sync", "--global"]);
   assert.equal(r.exitCode, 0, r.stderr);
-  assert.match(r.stdout + r.stderr, /No global shared_paths/i);
+  assert.match(r.stdout + r.stderr, /Nothing global configured/i);
   await assert.rejects(stat(path.join(sb.wormHome, ".managed-links.json")), /ENOENT/, "no manifest fabricated");
 });
 
@@ -1841,57 +1841,64 @@ async function initHomeGitRemote(t, sb) {
   return { home, bare, branch };
 }
 
-async function autosyncTemplate(t, opts = {}) {
-  const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
-  t.after(() => rm(templateDir, { recursive: true, force: true }));
+// Declare autosync in the GLOBAL config (~/.worm/config.json).
+async function setGlobalAutosync(sb, opts = {}) {
   await writeFile(
-    path.join(templateDir, "config.json"),
-    JSON.stringify({
-      shared_paths: [],
-      hooks: {},
-      recipes: { autosync: { debounceMinutes: 0, notify: false, ...opts } },
-    })
+    path.join(sb.wormHome, "config.json"),
+    JSON.stringify({ recipes: { autosync: { debounceMinutes: 0, notify: false, ...opts } } })
   );
-  return templateDir;
 }
 
-test("autosync wires session-start, stop, and session-end dispatcher entries", async (t) => {
+test("worm sync --global wires autosync into ~/.claude/settings.json (and strips on removal)", async (t) => {
   const sb = await createSandbox();
   t.after(() => sb.cleanup());
-  await sb.worm(["init", "--template", await autosyncTemplate(t)]);
+  await sb.worm(["init"]);
+  await setGlobalAutosync(sb);
 
-  const s = JSON.parse(
-    await readFile(path.join(sb.projectRoot, ".claude", "settings.local.json"), "utf8")
-  );
-  assert.match(s.hooks.SessionStart[0].hooks[0].command, /hook trigger session-start/);
-  assert.match(s.hooks.Stop[0].hooks[0].command, /hook trigger stop/);
-  assert.match(s.hooks.SessionEnd[0].hooks[0].command, /hook trigger session-end/);
-});
-
-test("autosync push commits and pushes ~/.worm to its remote", async (t) => {
-  const sb = await createSandbox();
-  t.after(() => sb.cleanup());
-  await sb.worm(["init", "--template", await autosyncTemplate(t)]);
-  const { home, bare } = await initHomeGitRemote(t, sb);
-
-  // A new change in ~/.worm, then fire the Stop hook through the dispatcher.
-  await writeFile(path.join(home, "shared", "newfile.md"), "hello\n");
-  const r = await sb.worm(["hook", "trigger", "stop"]);
+  const r = await sb.worm(["sync", "--global"]);
   assert.equal(r.exitCode, 0, r.stderr);
 
-  // The remote received it.
+  // HOME=wormHome in the sandbox, so ~/.claude/settings.json lives there.
+  const settingsPath = path.join(sb.wormHome, ".claude", "settings.json");
+  const s = JSON.parse(await readFile(settingsPath, "utf8"));
+  assert.match(s.hooks.SessionStart[0].hooks[0].command, /hook trigger --global session-start/);
+  assert.match(s.hooks.Stop[0].hooks[0].command, /hook trigger --global stop/);
+  assert.match(s.hooks.SessionEnd[0].hooks[0].command, /hook trigger --global session-end/);
+  // GLOBAL scope only — never wired into a project slot.
+  await assert.rejects(stat(path.join(sb.projectRoot, ".claude", "settings.local.json")), /ENOENT/);
+
+  // Removing it from the global config + re-syncing strips the hooks.
+  await writeFile(path.join(sb.wormHome, "config.json"), JSON.stringify({}));
+  await sb.worm(["sync", "--global"]);
+  const s2 = JSON.parse(await readFile(settingsPath, "utf8"));
+  assert.ok(!s2.hooks?.Stop, "autosync hooks stripped after removal");
+});
+
+test("global autosync push commits and pushes ~/.worm to its remote", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init"]);
+  await setGlobalAutosync(sb);
+  const { home, bare } = await initHomeGitRemote(t, sb);
+
+  // A new change in ~/.worm, then fire the global Stop dispatch.
+  await writeFile(path.join(home, "shared", "newfile.md"), "hello\n");
+  const r = await sb.worm(["hook", "trigger", "--global", "stop"]);
+  assert.equal(r.exitCode, 0, r.stderr);
+
+  // The remote received it; machine-local state stayed out of the push.
   const checkout = await mkdtemp(path.join(tmpdir(), "worm-check-"));
   t.after(() => rm(checkout, { recursive: true, force: true }));
   await execa("git", ["clone", "-q", bare, checkout]);
   await stat(path.join(checkout, "shared", "newfile.md"));
-  // Machine-local state stayed out of the push.
   await assert.rejects(stat(path.join(checkout, ".managed-links.json")), /ENOENT/);
 });
 
-test("autosync never auto-resolves: conflict → clean repo + marker + status surfaces it", async (t) => {
+test("global autosync never auto-resolves: conflict → clean repo + marker + status surfaces it", async (t) => {
   const sb = await createSandbox();
   t.after(() => sb.cleanup());
-  await sb.worm(["init", "--template", await autosyncTemplate(t)]);
+  await sb.worm(["init"]);
+  await setGlobalAutosync(sb);
   const { home, bare, branch } = await initHomeGitRemote(t, sb);
   await execa("git", ["-C", home, "push", "-q", "origin", branch]);
 
@@ -1905,10 +1912,10 @@ test("autosync never auto-resolves: conflict → clean repo + marker + status su
   await execa("git", ["-C", other, "commit", "-aqm", "remote change"]);
   await execa("git", ["-C", other, "push", "-q", "origin", branch]);
 
-  // A conflicting local commit in ~/.worm, then pull (session-start).
+  // A conflicting local commit in ~/.worm, then the global pull (session-start).
   await writeFile(path.join(home, "shared", "global-rules.md"), "LOCAL\n");
   await execa("git", ["-C", home, "commit", "-aqm", "local change"]);
-  const r = await sb.worm(["hook", "trigger", "session-start"]);
+  const r = await sb.worm(["hook", "trigger", "--global", "session-start"]);
   assert.equal(r.exitCode, 0, r.stderr);
 
   // Marker written; repo left clean (rebase aborted); local change intact.
@@ -1923,17 +1930,18 @@ test("autosync never auto-resolves: conflict → clean repo + marker + status su
 
   // A clean push afterwards clears the marker (force local to win, then push).
   await execa("git", ["-C", home, "push", "-qf", "origin", branch]);
-  const r2 = await sb.worm(["hook", "trigger", "stop"]);
+  const r2 = await sb.worm(["hook", "trigger", "--global", "stop"]);
   assert.equal(r2.exitCode, 0, r2.stderr);
   await assert.rejects(stat(path.join(home, ".autosync-conflict.json")), /ENOENT/, "marker cleared");
 });
 
-test("autosync no-ops cleanly when ~/.worm has no remote", async (t) => {
+test("global autosync no-ops cleanly when ~/.worm has no remote", async (t) => {
   const sb = await createSandbox();
   t.after(() => sb.cleanup());
-  await sb.worm(["init", "--template", await autosyncTemplate(t)]);
+  await sb.worm(["init"]);
+  await setGlobalAutosync(sb);
   // No remote configured on WORM_HOME — the hook must exit 0 and do nothing.
-  const r = await sb.worm(["hook", "trigger", "stop"]);
+  const r = await sb.worm(["hook", "trigger", "--global", "stop"]);
   assert.equal(r.exitCode, 0, r.stderr);
 });
 

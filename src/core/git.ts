@@ -141,6 +141,12 @@ export async function pruneWorktrees(repoRoot: string): Promise<void> {
   await run("git", ["worktree", "prune"], { cwd: repoRoot });
 }
 
+/** Whether the repo at `cwd` has at least one git remote configured. */
+export async function gitHasRemote(cwd: string): Promise<boolean> {
+  const { stdout, exitCode } = await run("git", ["remote"], { cwd });
+  return exitCode === 0 && stdout.trim().length > 0;
+}
+
 /**
  * Absolute path to the COMMON git dir for the repo at `cwd` (shared by Slot 0
  * and every linked worktree). For Slot 0 this is `<root>/.git`; from a sibling

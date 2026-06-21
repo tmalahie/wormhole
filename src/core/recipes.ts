@@ -18,6 +18,7 @@ import { hookEnv } from "./hooks.js";
 import {
   globalProjectFile,
   globalProjectMemoryDir,
+  globalRoot,
   localLogsDir,
   localRecipeDir,
   packagedRecipeScript,
@@ -25,7 +26,7 @@ import {
   wormCliEntry,
 } from "./paths.js";
 import type {
-  AutosyncRecipeConfig,
+  AutosyncConfig,
   RecipesConfig,
   SandboxRecipeConfig,
   ShareHistoryRecipeConfig,
@@ -79,6 +80,13 @@ export interface RecipeWireContext {
 
 export interface Recipe<C = unknown> {
   readonly name: string;
+  /**
+   * "project" (default) → wired per-slot by `worm sync` / `universe add` into
+   * each slot's settings.local.json. "global" → machine-wide, declared in
+   * ~/.worm/config.json and wired by `worm sync --global` into
+   * ~/.claude/settings.json; runs without any project/slot context.
+   */
+  readonly scope?: "project" | "global";
   /** This recipe's config slice, or undefined when it's disabled. */
   select(recipes: RecipesConfig): C | undefined;
   /** Files to write under `.worm/recipes/<name>/` (may render packaged templates). */
@@ -125,7 +133,7 @@ export const HOOK_EVENTS: Record<HookEvent, HookEventMeta> = {
   "user-prompt-submit": { claudeEvent: "UserPromptSubmit", kind: "context" },
   "session-start": { claudeEvent: "SessionStart", kind: "run" },
   "session-end": { claudeEvent: "SessionEnd", kind: "run" },
-  // Fires at the end of each agent turn — the reliable, frequent push trigger
+  // End of each agent turn — the reliable, frequent push trigger for autosync
   // (SessionEnd is best-effort and never fires for a session that's never closed).
   stop: { claudeEvent: "Stop", kind: "run" },
 };
@@ -151,9 +159,11 @@ export type HookContribution = Partial<Record<HookEvent, HookCommand[]>>;
 const DISPATCH_MARKER = "hook trigger ";
 
 /** The static settings command that routes an event back into worm. Referenced
- *  by absolute path so a PATH change can't silently disable the hooks. */
-function dispatchCommand(event: HookEvent): string {
-  return `node "${wormCliEntry()}" hook trigger ${event}`;
+ *  by absolute path so a PATH change can't silently disable the hooks. The
+ *  `--global` form runs GLOBAL-scope recipes without resolving a project (used by
+ *  the entries `worm sync --global` writes into ~/.claude/settings.json). */
+function dispatchCommand(event: HookEvent, opts: { global?: boolean } = {}): string {
+  return `node "${wormCliEntry()}" hook trigger ${opts.global ? "--global " : ""}${event}`;
 }
 
 // --- the sandbox recipe (currently the only built-in) -----------------------
@@ -331,17 +341,16 @@ const shareMemoryRecipe: Recipe<ShareMemoryRecipeConfig> = {
   },
 };
 
-// --- the autosync recipe -----------------------------------------------------
-// Keeps the ~/.worm meta-repo synced across machines around Claude sessions, so
-// agent config edited on one machine reaches the others without manual push/pull
-// on every node. Worm-owned code (lives ONCE in the package): the script targets
-// ~/.worm (via WORM_HOME, inherited through the dispatcher env), independent of
-// which project triggered it. pull on session start; push (debounced) on stop —
-// the reliable trigger for an always-open session — plus a best-effort flush on
-// session end. Conflicts are never auto-resolved (see the script).
-
-const autosyncRecipe: Recipe<AutosyncRecipeConfig> = {
+// --- the autosync recipe (GLOBAL scope) --------------------------------------
+// Keeps the ~/.worm meta-repo synced across machines. Unlike the others it isn't
+// per-slot: it's declared in ~/.worm/config.json and wired by `worm sync --global`
+// into ~/.claude/settings.json, so it fires for EVERY Claude session regardless of
+// project (even outside a worm repo). Its hooks ignore slot context — the script
+// acts on ~/.worm via WORM_HOME. pull on session start; push (debounced) on stop
+// (the reliable trigger for an always-open session) + a flush on session end.
+const autosyncRecipe: Recipe<AutosyncConfig> = {
   name: "autosync",
+  scope: "global",
   select: (recipes) => recipes.autosync,
   hooks(_ctx, cfg) {
     const script = packagedRecipeScript("autosync", "sync-worm-home.js");
@@ -365,9 +374,13 @@ const REGISTRY: Recipe<any>[] = [
   autosyncRecipe,
 ];
 
-function enabledRecipes(recipes: RecipesConfig): Array<{ recipe: Recipe<any>; cfg: unknown }> {
+function enabledRecipes(
+  recipes: RecipesConfig,
+  scope: "project" | "global" = "project"
+): Array<{ recipe: Recipe<any>; cfg: unknown }> {
   const out: Array<{ recipe: Recipe<any>; cfg: unknown }> = [];
   for (const recipe of REGISTRY) {
+    if ((recipe.scope ?? "project") !== scope) continue;
     const cfg = recipe.select(recipes);
     if (cfg !== undefined) out.push({ recipe, cfg });
   }
@@ -451,6 +464,73 @@ export async function applyRecipeWiring(
 /** Remove all worm-managed recipe hooks from a slot (used on `destroy`). */
 export async function stripRecipeWiring(slotPath: string): Promise<boolean> {
   return writeSlotHooks(slotPath, {});
+}
+
+// --- global (machine-wide) recipe wiring + dispatch --------------------------
+
+/** A context stub for global recipes — they ignore slot info and act on ~/.worm. */
+function globalWireContext(): RecipeWireContext {
+  return { slot0Root: globalRoot(), projectName: "global", slot: { name: "global", path: globalRoot() } };
+}
+
+function globalSettingsPath(): string {
+  return path.join(os.homedir(), ".claude", "settings.json");
+}
+
+/**
+ * Wire GLOBAL-scope recipes (currently `autosync`) into ~/.claude/settings.json
+ * so they fire for EVERY Claude session, regardless of project. Mirrors
+ * `applyRecipeWiring` but writes the user-level settings file with the `--global`
+ * dispatch form. An empty/none-enabled recipe set strips worm's entries (so
+ * removing `autosync` from ~/.worm/config.json + `worm sync --global` uninstalls).
+ * Returns whether the file changed.
+ */
+export async function applyGlobalRecipeWiring(recipes: RecipesConfig): Promise<boolean> {
+  const ctx = globalWireContext();
+  const events = new Set<HookEvent>();
+  for (const { recipe, cfg } of enabledRecipes(recipes, "global")) {
+    const contribution = recipe.hooks?.(ctx, cfg);
+    if (!contribution) continue;
+    for (const [event, cmds] of Object.entries(contribution) as Array<
+      [HookEvent, HookCommand[] | undefined]
+    >) {
+      if (cmds && cmds.length > 0) events.add(event);
+    }
+  }
+  const install: SettingsContribution = {};
+  for (const event of events) {
+    const meta = HOOK_EVENTS[event];
+    const entry: Record<string, unknown> = {
+      hooks: [{ type: "command", command: dispatchCommand(event, { global: true }) }],
+    };
+    if (meta.matcher) entry.matcher = meta.matcher;
+    (install[meta.claudeEvent] ??= []).push(entry);
+  }
+  return writeHooksFile(globalSettingsPath(), install);
+}
+
+/**
+ * Run GLOBAL-scope recipes' run-event commands for `event` — invoked by `worm
+ * hook trigger --global <event>`, with NO project/slot context (global recipes
+ * act on ~/.worm via WORM_HOME). Output surfaces only on a TTY: a hook's stdout
+ * would otherwise be injected into the agent's context, and conflicts already
+ * surface via the recipe's own marker + OS notification. Never throws.
+ */
+export async function runGlobalRecipeHooks(
+  recipes: RecipesConfig,
+  event: HookEvent
+): Promise<void> {
+  const ctx = globalWireContext();
+  for (const { recipe, cfg } of enabledRecipes(recipes, "global")) {
+    const cmds = recipe.hooks?.(ctx, cfg)?.[event] ?? [];
+    for (const hc of cmds) {
+      const res = await runShell(hc.command, { cwd: globalRoot(), env: process.env });
+      if (process.stdout.isTTY) {
+        const out = `${res.stdout}${res.stderr}`.trim();
+        if (out) process.stdout.write(out + "\n");
+      }
+    }
+  }
 }
 
 // --- the dispatcher (invoked by `worm hook trigger <event>`) -----------------
@@ -575,19 +655,25 @@ function isWormManaged(entry: unknown): boolean {
   );
 }
 
-/**
- * Merge `install` into a slot's `.claude/settings.local.json` (gitignored by
- * convention, so worm never dirties a tracked repo). worm owns only the hook
- * entries it recognises (see `isWormManaged`) — so on each run it strips its
- * previous entries and re-adds `install`, leaving every other hook and key
- * intact. Pass an empty `install` to strip. Idempotent. Returns whether the
- * file changed.
- */
+/** Merge `install` into a slot's `.claude/settings.local.json` (gitignored). */
 async function writeSlotHooks(
   slotPath: string,
   install: SettingsContribution
 ): Promise<boolean> {
-  const settingsPath = path.join(slotPath, ".claude", "settings.local.json");
+  return writeHooksFile(path.join(slotPath, ".claude", "settings.local.json"), install);
+}
+
+/**
+ * Merge `install` into a Claude settings file. worm owns only the hook entries it
+ * recognises (see `isWormManaged`) — so on each run it strips its previous entries
+ * and re-adds `install`, leaving every other hook and key intact. Pass an empty
+ * `install` to strip. Idempotent. Returns whether the file changed. Used for both
+ * a slot's settings.local.json and the machine-wide ~/.claude/settings.json.
+ */
+async function writeHooksFile(
+  settingsPath: string,
+  install: SettingsContribution
+): Promise<boolean> {
   const existed = await pathExists(settingsPath);
   let settings: Record<string, any> = {};
   if (existed) {

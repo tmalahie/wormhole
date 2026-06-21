@@ -19,9 +19,11 @@ import {
   type AdoptionOperation,
 } from "../core/links.js";
 import type { UniverseSlot } from "../types.js";
-import { applyRecipeWiring, materializeRecipes } from "../core/recipes.js";
+import { applyGlobalRecipeWiring, applyRecipeWiring, materializeRecipes } from "../core/recipes.js";
 import { resolveStoreLinks } from "../core/stores.js";
 import { applyEnv, assertNoEnvCollision } from "../core/env.js";
+import { gitHasRemote } from "../core/git.js";
+import { globalRoot } from "../core/paths.js";
 import { ensureLocalLayout } from "../core/layout.js";
 import { loadGlobalConfig } from "../core/global-config.js";
 import {
@@ -211,12 +213,27 @@ async function runGlobalSync(): Promise<void> {
   const config = await loadGlobalConfig();
   const desired = config.shared_paths ?? [];
   const manifest = await readGlobalManifest();
+  const recipes = config.recipes ?? {};
+
+  // Wire (or strip) GLOBAL-scope recipes into ~/.claude/settings.json — runs
+  // regardless of shared_paths (removing `autosync` from config + re-running
+  // strips the hooks). autosync needs a git remote on ~/.worm to do anything.
+  if (await applyGlobalRecipeWiring(recipes)) {
+    logger.step("⚡ wired global recipe hooks → ~/.claude/settings.json");
+    if (recipes.autosync && !(await gitHasRemote(globalRoot()))) {
+      logger.warn(
+        "autosync is enabled but ~/.worm has no git remote — it will no-op until you add one (e.g. `git -C ~/.worm remote add origin <url>`)."
+      );
+    }
+  }
 
   if (desired.length === 0 && Object.keys(manifest).length === 0) {
-    logger.info("🪐 No global shared_paths configured in ~/.worm/config.json.");
-    logger.hint(
-      'Add e.g. "shared_paths": [".claude/commands", ".claude/skills"] there, then re-run `worm sync --global`.'
-    );
+    if (Object.keys(recipes).length === 0) {
+      logger.info("🪐 Nothing global configured in ~/.worm/config.json.");
+      logger.hint(
+        'Add e.g. "shared_paths": [".claude/commands"] or "recipes": { "autosync": {} }, then re-run `worm sync --global`.'
+      );
+    }
     return;
   }
 

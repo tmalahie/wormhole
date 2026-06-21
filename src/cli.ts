@@ -180,9 +180,10 @@ const hook = program
 
 hook
   .command("trigger <event>")
-  .description("Run enabled recipes' hooks for <event> (pre-tool-use | user-prompt-submit | session-start | stop | session-end).")
-  .action(async (event: string) => {
-    await runHookTrigger(event);
+  .description("Run enabled recipes' hooks for <event> (pre-tool-use | session-start | session-end | stop).")
+  .option("--global", "Run machine-wide recipes from ~/.worm/config.json (no project context).")
+  .action(async (event: string, opts) => {
+    await runHookTrigger(event, opts);
   });
 
 program

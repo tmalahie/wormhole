@@ -2,7 +2,7 @@ import { z } from "zod";
 import { WormError } from "../utils/errors.js";
 import { pathExists, readJson, writeJson } from "../utils/fs.js";
 import { globalConfigFile } from "./paths.js";
-import { StoreSchema } from "../types.js";
+import { RecipesSchema, StoreSchema } from "../types.js";
 
 /**
  * Machine-level worm settings stored in ~/.worm/config.json. Distinct from
@@ -20,6 +20,9 @@ export const GlobalConfigSchema = z
     shared_paths: z.array(z.string().min(1)).optional(),
     // Machine-wide named stores any project's `shared_paths` can pull from.
     stores: z.record(z.string(), StoreSchema).optional(),
+    // Machine-wide recipes (only GLOBAL-scope ones — currently `autosync` — take
+    // effect here). `worm sync --global` wires them into ~/.claude/settings.json.
+    recipes: RecipesSchema.optional(),
   })
   .strict();
 

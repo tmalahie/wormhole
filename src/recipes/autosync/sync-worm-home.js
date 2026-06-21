@@ -1,12 +1,13 @@
 #!/usr/bin/env node
-// SessionStart / Stop / SessionEnd hook shipped WITH worm (autosync recipe).
-// Keeps the ~/.worm meta-repo synced across machines so agent config edited on
-// one machine reaches the others — pull on session start, push (debounced) on
+// The autosync recipe's worker, shipped WITH worm. Invoked by the GLOBAL hook
+// dispatch (`worm hook trigger --global <session-start|stop|session-end>`, wired
+// into ~/.claude/settings.json by `worm sync --global`). Keeps the ~/.worm
+// meta-repo synced across machines — pull on session start, push (debounced) on
 // each turn's Stop, flush on session end.
 //
 // Config-independent worm-owned code: ONE copy lives in dist/recipes/, never
 // materialized per project. It always acts on ~/.worm (WORM_HOME or the default),
-// regardless of which project's session triggered it.
+// regardless of which session triggered it.
 //
 // Usage:  node sync-worm-home.js <remote> <debounceMinutes> <notify 0|1> <pull|push>
 //
