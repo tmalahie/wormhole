@@ -23,7 +23,6 @@ import {
   localRecipeDir,
   packagedRecipeScript,
   packagedRecipeTemplate,
-  wormCliEntry,
 } from "./paths.js";
 import type {
   AutosyncConfig,
@@ -153,17 +152,20 @@ export interface HookCommand {
 export type HookContribution = Partial<Record<HookEvent, HookCommand[]>>;
 
 // worm's hook-entry marker, for idempotent (re)wiring. Inverted dispatch means
-// settings.local.json holds ONE static entry per event — `node "<cli>" hook
-// trigger <event>` — recognised by this marker, so re-wiring strips and re-adds
-// only worm's own entries.
+// settings holds ONE static entry per event — `worm hook trigger <event>` —
+// recognised by this marker, so re-wiring strips and re-adds only worm's own
+// entries (and migrates older `node "<cli>" hook trigger` entries — they match
+// the same marker, so a re-sync replaces them with the `worm` form).
 const DISPATCH_MARKER = "hook trigger ";
 
-/** The static settings command that routes an event back into worm. Referenced
- *  by absolute path so a PATH change can't silently disable the hooks. The
- *  `--global` form runs GLOBAL-scope recipes without resolving a project (used by
- *  the entries `worm sync --global` writes into ~/.claude/settings.json). */
+/** The static settings command that routes an event back into worm. Resolved via
+ *  `worm` on PATH (not a baked absolute path): the hook was only written because
+ *  `worm sync` ran — i.e. `worm` was on PATH — so it stays valid across reinstalls,
+ *  moves, and node/nvm version switches that would stale an absolute cli.js path.
+ *  The `--global` form runs GLOBAL-scope recipes without resolving a project (used
+ *  by the entries `worm sync --global` writes into ~/.claude/settings.json). */
 function dispatchCommand(event: HookEvent, opts: { global?: boolean } = {}): string {
-  return `node "${wormCliEntry()}" hook trigger ${opts.global ? "--global " : ""}${event}`;
+  return `worm hook trigger ${opts.global ? "--global " : ""}${event}`;
 }
 
 // --- the sandbox recipe (currently the only built-in) -----------------------

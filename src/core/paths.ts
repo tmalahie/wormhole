@@ -151,16 +151,6 @@ export function packagedRecipeTemplate(recipeName: string, file: string): string
   return path.join(packagedRecipesDir(), recipeName, "templates", file);
 }
 
-/**
- * Absolute path to the running worm CLI entry (`dist/cli.js`). The recipe-hook
- * dispatcher entries written into a slot's settings.local.json invoke it by
- * absolute path — `node "<this>" hook trigger <event>` — so a change to the
- * shell's PATH can't silently disable the hooks.
- */
-export function wormCliEntry(): string {
-  return fileURLToPath(import.meta.url);
-}
-
 /** Where recipe hooks write their logs: `.worm/logs/` (a symlink into the
  *  profile's `logs/`). */
 export function localLogsDir(slot0Root: string): string {
