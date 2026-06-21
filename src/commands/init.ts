@@ -179,7 +179,7 @@ export async function bindProject(
     };
     const result = await runHook("on_create", config.hooks.on_create, {
       cwd: projectRoot,
-      env: hookEnv(projectRoot, slot, branch),
+      env: hookEnv(projectRoot, slot, branch, projectName),
     });
     if (result.ran && result.exitCode !== 0) {
       logger.warn(

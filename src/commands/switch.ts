@@ -2,7 +2,7 @@ import path from "node:path";
 import { logger } from "../utils/logger.js";
 import { WormError } from "../utils/errors.js";
 import { confirm } from "../utils/prompt.js";
-import { findSlot0Root } from "../core/project.js";
+import { findSlot0Root, readProjectName } from "../core/project.js";
 import { loadLocalConfig } from "../core/config.js";
 import { scanUniverses, universeLabel } from "../core/universe.js";
 import { branchExists, switchBranch } from "../core/git.js";
@@ -30,6 +30,7 @@ export async function runSwitch(
   }
 
   const root = await findSlot0Root();
+  const projectName = await readProjectName(root);
   const config = await loadLocalConfig(root);
   const slots = await scanUniverses(root);
 
@@ -83,7 +84,7 @@ export async function runSwitch(
   if (!options.skipHook && config.hooks.on_create) {
     const result = await runHook("on_create", config.hooks.on_create, {
       cwd: here.path,
-      env: hookEnv(root, { ...here, branch }, branch),
+      env: hookEnv(root, { ...here, branch }, branch, projectName),
     });
     if (result.ran && result.exitCode !== 0) {
       logger.warn(`on_create hook exited with code ${result.exitCode}.`);

@@ -117,7 +117,7 @@ export async function runUniverseAdd(
     };
     const result = await runHook("on_create", config.hooks.on_create, {
       cwd: target,
-      env: hookEnv(root, slot, branch),
+      env: hookEnv(root, slot, branch, projectName),
     });
     if (result.ran && result.exitCode !== 0) {
       logger.warn(
@@ -150,6 +150,7 @@ export async function runUniverseRemove(
   }
 
   const root = await findSlot0Root();
+  const projectName = await readProjectName(root);
   const config = await loadLocalConfig(root);
   const slots = await scanUniverses(root);
   const slot = resolveSlotRef(ref, slots);
@@ -182,7 +183,7 @@ export async function runUniverseRemove(
   if (!options.skipHook && config.hooks.on_remove) {
     const result = await runHook("on_remove", config.hooks.on_remove, {
       cwd: slot.path,
-      env: hookEnv(root, slot, slot.branch ?? ""),
+      env: hookEnv(root, slot, slot.branch ?? "", projectName),
     });
     if (result.ran && result.exitCode !== 0 && !options.force) {
       throw new WormError(
@@ -192,7 +193,6 @@ export async function runUniverseRemove(
     }
   }
 
-  const projectName = await readProjectName(root);
   const manifest = await readManifest(projectName);
   await stripSlotLinks(slot.path, manifest);
   delete manifest[slot.path];

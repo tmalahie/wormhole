@@ -597,7 +597,7 @@ export interface DispatchContext {
 function dispatchEnv(ctx: DispatchContext, recipe: string, logDir: string): NodeJS.ProcessEnv {
   return {
     ...process.env,
-    ...hookEnv(ctx.slot0Root, ctx.slot, ctx.branch),
+    ...hookEnv(ctx.slot0Root, ctx.slot, ctx.branch, ctx.projectName),
     WORM_LOG_DIR: logDir,
     WORM_RECIPE: recipe,
   };

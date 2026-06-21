@@ -999,7 +999,7 @@ test("on_create hook runs setup.sh with WORM_* env vars on universe add", async 
   const setupPath = path.join(sb.projectRoot, ".worm", "scripts", "setup.sh");
   await writeFile(
     setupPath,
-    `#!/usr/bin/env bash\necho "ROOT=$WORM_PROJECT_ROOT"\necho "SLOT=$WORM_SLOT"\necho "INDEX=$WORM_SLOT_INDEX"\necho "BRANCH=$WORM_BRANCH"\necho "WT=$WORM_WORKTREE"\n`
+    `#!/usr/bin/env bash\necho "ROOT=$WORM_PROJECT_ROOT"\necho "SLOT=$WORM_SLOT"\necho "INDEX=$WORM_SLOT_INDEX"\necho "BRANCH=$WORM_BRANCH"\necho "WT=$WORM_WORKTREE"\necho "PROFILE=$WORM_PROFILE"\n`
   );
   await chmod(setupPath, 0o755);
 
@@ -1011,6 +1011,9 @@ test("on_create hook runs setup.sh with WORM_* env vars on universe add", async 
   assert.match(r.stdout, /INDEX=1/);
   assert.match(r.stdout, /BRANCH=feature-a/);
   assert.match(r.stdout, new RegExp(`WT=${escapeRegex(siblingPath(root, 1))}`));
+  // WORM_PROFILE points at the durable profile dir (<WORM_HOME>/projects/<name>).
+  const profile = path.join(sb.wormHome, "projects", path.basename(sb.projectRoot));
+  assert.match(r.stdout, new RegExp(`PROFILE=${escapeRegex(profile)}`));
 });
 
 test("on_create hook warms Slot 0 on init; --skip-hook opts out", async (t) => {

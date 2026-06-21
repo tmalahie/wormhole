@@ -1,6 +1,7 @@
 import { runShell } from "../utils/exec.js";
 import { logger } from "../utils/logger.js";
 import { portOffset, stableHash } from "./env.js";
+import { globalProjectDir } from "./paths.js";
 import type { UniverseSlot } from "../types.js";
 
 export interface HookResult {
@@ -23,11 +24,17 @@ export interface HookContext {
  * branch (not the positional index): a given branch keeps the same offset across
  * machines and across slot reordering, so `PORT=$((8080 + WORM_PORT_OFFSET))` in
  * setup.sh is stable even with ephemeral worktrees.
+ *
+ * WORM_PROFILE is the durable per-project profile dir (`~/.worm/projects/<name>/`,
+ * honouring WORM_HOME) — where recipe artifacts, logs, the manifest, and any
+ * user-owned shared state (e.g. a project's shared-uploads dir) live. Hooks that
+ * need to reach into the profile should use it rather than guessing `~/.worm`.
  */
 export function hookEnv(
   slot0Root: string,
   slot: UniverseSlot,
-  branch: string
+  branch: string,
+  projectName: string
 ): NodeJS.ProcessEnv {
   return {
     WORM_PROJECT_ROOT: slot0Root,
@@ -37,6 +44,7 @@ export function hookEnv(
     WORM_WORKTREE: slot.path,
     WORM_BRANCH_HASH: String(stableHash(branch)),
     WORM_PORT_OFFSET: String(portOffset(branch)),
+    WORM_PROFILE: globalProjectDir(projectName),
   };
 }
 
