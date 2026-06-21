@@ -206,6 +206,13 @@ worm's substrate is already agent-agnostic — the warm pool, shared-file tunnel
 
 The two halves fit together: a recipe-as-data format is what an agent adapter renders per agent. Earlier iterations — live-once recipe code, the inverted hook dispatcher, named stores, home-scope `worm sync --global`, and `worm template render` — are already shipped (the roadmap docs carry the full history). The one deferred item is a Terraform-style `plan`/`apply` for regenerating scaffolding you've edited.
 
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for the release history and any **breaking
+changes** (the current release, **0.2.0**, has a few — notably the removal of the
+`worm config` command and a hook-dispatch migration). `worm` follows
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
 ## Development
 
 ```bash

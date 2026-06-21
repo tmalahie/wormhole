@@ -23,7 +23,7 @@ program
   .description(
     "A permanent pool of warm git worktrees + a personal cognitive layer for AI coding agents."
   )
-  .version("0.1.0")
+  .version("0.2.0")
   .showHelpAfterError("(run `worm --help` for usage)")
   .addHelpText(
     "after",
