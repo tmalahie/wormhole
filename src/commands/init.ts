@@ -227,6 +227,22 @@ async function ensureGlobalRoot(): Promise<void> {
     "# wormhole personal repo\n\nThis directory is managed by the `worm` CLI.\nIt holds per-project profiles (projects/), shared rules (shared/), and templates (templates/).\n"
   );
 
+  // Machine-local state must never sync across machines (it holds absolute slot
+  // paths / per-host markers) — exclude it so the `autosync` recipe doesn't
+  // commit & push it and create cross-machine conflicts on every node.
+  await writeTextIfMissing(
+    path.join(root, ".gitignore"),
+    [
+      "# Machine-local worm state — not meant to sync across machines.",
+      ".managed-links.json",
+      ".detached-links.json",
+      ".autosync-conflict.json",
+      ".autosync-last-push",
+      "projects/*/logs/",
+      "",
+    ].join("\n")
+  );
+
   await initGitRepoIfNeeded(root);
 
   if (firstRun) {

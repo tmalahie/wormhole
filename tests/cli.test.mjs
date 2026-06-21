@@ -1824,6 +1824,119 @@ test("worm detach refuses a file that isn't a managed tunnel", async (t) => {
   assert.match(r.stderr, /isn't a worm-managed link/);
 });
 
+// --- autosync recipe ---------------------------------------------------------
+
+// Turn the sandbox's WORM_HOME into a committed git repo with a bare remote.
+async function initHomeGitRemote(t, sb) {
+  const home = sb.wormHome;
+  await execa("git", ["-C", home, "config", "user.email", "home@e.com"]);
+  await execa("git", ["-C", home, "config", "user.name", "Home"]);
+  await execa("git", ["-C", home, "add", "-A"]);
+  await execa("git", ["-C", home, "commit", "-q", "-m", "initial"]);
+  const bare = await mkdtemp(path.join(tmpdir(), "worm-remote-"));
+  t.after(() => rm(bare, { recursive: true, force: true }));
+  await execa("git", ["init", "--bare", "-q", bare]);
+  await execa("git", ["-C", home, "remote", "add", "origin", bare]);
+  const branch = (await execa("git", ["-C", home, "rev-parse", "--abbrev-ref", "HEAD"])).stdout.trim();
+  return { home, bare, branch };
+}
+
+async function autosyncTemplate(t, opts = {}) {
+  const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
+  t.after(() => rm(templateDir, { recursive: true, force: true }));
+  await writeFile(
+    path.join(templateDir, "config.json"),
+    JSON.stringify({
+      shared_paths: [],
+      hooks: {},
+      recipes: { autosync: { debounceMinutes: 0, notify: false, ...opts } },
+    })
+  );
+  return templateDir;
+}
+
+test("autosync wires session-start, stop, and session-end dispatcher entries", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init", "--template", await autosyncTemplate(t)]);
+
+  const s = JSON.parse(
+    await readFile(path.join(sb.projectRoot, ".claude", "settings.local.json"), "utf8")
+  );
+  assert.match(s.hooks.SessionStart[0].hooks[0].command, /hook trigger session-start/);
+  assert.match(s.hooks.Stop[0].hooks[0].command, /hook trigger stop/);
+  assert.match(s.hooks.SessionEnd[0].hooks[0].command, /hook trigger session-end/);
+});
+
+test("autosync push commits and pushes ~/.worm to its remote", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init", "--template", await autosyncTemplate(t)]);
+  const { home, bare } = await initHomeGitRemote(t, sb);
+
+  // A new change in ~/.worm, then fire the Stop hook through the dispatcher.
+  await writeFile(path.join(home, "shared", "newfile.md"), "hello\n");
+  const r = await sb.worm(["hook", "trigger", "stop"]);
+  assert.equal(r.exitCode, 0, r.stderr);
+
+  // The remote received it.
+  const checkout = await mkdtemp(path.join(tmpdir(), "worm-check-"));
+  t.after(() => rm(checkout, { recursive: true, force: true }));
+  await execa("git", ["clone", "-q", bare, checkout]);
+  await stat(path.join(checkout, "shared", "newfile.md"));
+  // Machine-local state stayed out of the push.
+  await assert.rejects(stat(path.join(checkout, ".managed-links.json")), /ENOENT/);
+});
+
+test("autosync never auto-resolves: conflict → clean repo + marker + status surfaces it", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init", "--template", await autosyncTemplate(t)]);
+  const { home, bare, branch } = await initHomeGitRemote(t, sb);
+  await execa("git", ["-C", home, "push", "-q", "origin", branch]);
+
+  // Another clone pushes a conflicting change to the same file.
+  const other = await mkdtemp(path.join(tmpdir(), "worm-other-"));
+  t.after(() => rm(other, { recursive: true, force: true }));
+  await execa("git", ["clone", "-q", bare, other]);
+  await execa("git", ["-C", other, "config", "user.email", "o@e.com"]);
+  await execa("git", ["-C", other, "config", "user.name", "Other"]);
+  await writeFile(path.join(other, "shared", "global-rules.md"), "REMOTE\n");
+  await execa("git", ["-C", other, "commit", "-aqm", "remote change"]);
+  await execa("git", ["-C", other, "push", "-q", "origin", branch]);
+
+  // A conflicting local commit in ~/.worm, then pull (session-start).
+  await writeFile(path.join(home, "shared", "global-rules.md"), "LOCAL\n");
+  await execa("git", ["-C", home, "commit", "-aqm", "local change"]);
+  const r = await sb.worm(["hook", "trigger", "session-start"]);
+  assert.equal(r.exitCode, 0, r.stderr);
+
+  // Marker written; repo left clean (rebase aborted); local change intact.
+  await stat(path.join(home, ".autosync-conflict.json"));
+  const st = await execa("git", ["-C", home, "status", "--porcelain"]);
+  assert.equal(st.stdout.trim(), "", "rebase aborted → clean working tree");
+  assert.equal(await readFile(path.join(home, "shared", "global-rules.md"), "utf8"), "LOCAL\n");
+
+  // `worm status` surfaces it (the durable, UI-less channel).
+  const status = await sb.worm(["status"]);
+  assert.match(status.stdout, /autosync: ~\/\.worm has an unresolved conflict/);
+
+  // A clean push afterwards clears the marker (force local to win, then push).
+  await execa("git", ["-C", home, "push", "-qf", "origin", branch]);
+  const r2 = await sb.worm(["hook", "trigger", "stop"]);
+  assert.equal(r2.exitCode, 0, r2.stderr);
+  await assert.rejects(stat(path.join(home, ".autosync-conflict.json")), /ENOENT/, "marker cleared");
+});
+
+test("autosync no-ops cleanly when ~/.worm has no remote", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init", "--template", await autosyncTemplate(t)]);
+  // No remote configured on WORM_HOME — the hook must exit 0 and do nothing.
+  const r = await sb.worm(["hook", "trigger", "stop"]);
+  assert.equal(r.exitCode, 0, r.stderr);
+});
+
 test("worm detach is reversible: delete the local file and sync re-links it", async (t) => {
   const sb = await createSandbox();
   t.after(() => sb.cleanup());

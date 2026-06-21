@@ -34,12 +34,26 @@ export const SyncPermissionsRecipeSchema = z.object({}).strict();
 export const ShareHistoryRecipeSchema = z.object({}).strict();
 export const ShareMemoryRecipeSchema = z.object({}).strict();
 
+// autosync keeps the ~/.worm meta-repo synced across machines around Claude
+// sessions: pull on session start, push (debounced) on stop, flush on session
+// end. Conflicts are NEVER auto-resolved — a clean rebase --abort, then a durable
+// marker (surfaced by `worm status`) + an OS notification. Requires a git remote
+// configured on ~/.worm (else it no-ops). `branch` defaults to ~/.worm's current.
+export const AutosyncRecipeSchema = z
+  .object({
+    remote: z.string().default("origin"),
+    debounceMinutes: z.number().nonnegative().default(5),
+    notify: z.boolean().default(true),
+  })
+  .strict();
+
 export const RecipesSchema = z
   .object({
     sandbox: SandboxRecipeSchema.optional(),
     syncPermissions: SyncPermissionsRecipeSchema.optional(),
     shareHistory: ShareHistoryRecipeSchema.optional(),
     shareMemory: ShareMemoryRecipeSchema.optional(),
+    autosync: AutosyncRecipeSchema.optional(),
   })
   .strict()
   .default({});
@@ -104,6 +118,7 @@ export type SandboxRecipeConfig = z.infer<typeof SandboxRecipeSchema>;
 export type SyncPermissionsRecipeConfig = z.infer<typeof SyncPermissionsRecipeSchema>;
 export type ShareHistoryRecipeConfig = z.infer<typeof ShareHistoryRecipeSchema>;
 export type ShareMemoryRecipeConfig = z.infer<typeof ShareMemoryRecipeSchema>;
+export type AutosyncRecipeConfig = z.infer<typeof AutosyncRecipeSchema>;
 
 export const DEFAULT_CONFIG: Config = ConfigSchema.parse({
   hooks: { on_create: 'bash "$WORM_PROJECT_ROOT/.worm/scripts/setup.sh"' },

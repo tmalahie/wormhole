@@ -32,7 +32,7 @@ One file per command. Each exports a single `runX(args, options)` async function
 | `detach.ts` | `worm detach <file>` — replace a shared symlink with a local real copy in the current worktree, drop it from the manifest, and record it in the detach registry (so adoption/reconcile leave it alone). Reversible by deleting the file + `worm sync`. |
 | `status.ts` | Enumerate the pool, render a table or `--json`. |
 | `destroy.ts` | Remove sibling universes + `.worm/` + the global profile. **Slot 0 is left intact.** |
-| `hook.ts` | `worm hook trigger <event>` — internal recipe-hook dispatcher invoked by each slot's `settings.local.json` (one static entry per event). Resolves the live slot, runs enabled recipes' hook commands with injected env, and owns logging. Must never throw; fails open on the hot path. |
+| `hook.ts` | `worm hook trigger <event>` — internal recipe-hook dispatcher invoked by each slot's `settings.local.json` (one static entry per event). Events: `pre-tool-use` (filter), `user-prompt-submit` (context), `session-start` / `session-end` / `stop` (run). Resolves the live slot, runs enabled recipes' hook commands with injected env, and owns logging. Must never throw; fails open on the hot path. Recipe code lives in `src/recipes/<name>/` (the `autosync` recipe's `sync-worm-home.js` syncs `~/.worm` around sessions). |
 | `template.ts` | `worm template render <file> KEY=VALUE …` — render a `{{var}}` template file to stdout (worm's templating primitive, for user setup scripts). |
 | `path.ts` / `shell-init.ts` / `completion.ts` / `config.ts` | Navigation helpers, shell wrapper, tab-completion, and machine-level settings. |
 

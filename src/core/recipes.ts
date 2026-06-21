@@ -25,6 +25,7 @@ import {
   wormCliEntry,
 } from "./paths.js";
 import type {
+  AutosyncRecipeConfig,
   RecipesConfig,
   SandboxRecipeConfig,
   ShareHistoryRecipeConfig,
@@ -97,7 +98,8 @@ export type HookEvent =
   | "pre-tool-use"
   | "user-prompt-submit"
   | "session-start"
-  | "session-end";
+  | "session-end"
+  | "stop";
 
 /**
  * How the dispatcher treats an event's stdin/stdout:
@@ -123,6 +125,9 @@ export const HOOK_EVENTS: Record<HookEvent, HookEventMeta> = {
   "user-prompt-submit": { claudeEvent: "UserPromptSubmit", kind: "context" },
   "session-start": { claudeEvent: "SessionStart", kind: "run" },
   "session-end": { claudeEvent: "SessionEnd", kind: "run" },
+  // Fires at the end of each agent turn — the reliable, frequent push trigger
+  // (SessionEnd is best-effort and never fires for a session that's never closed).
+  stop: { claudeEvent: "Stop", kind: "run" },
 };
 
 /**
@@ -326,6 +331,29 @@ const shareMemoryRecipe: Recipe<ShareMemoryRecipeConfig> = {
   },
 };
 
+// --- the autosync recipe -----------------------------------------------------
+// Keeps the ~/.worm meta-repo synced across machines around Claude sessions, so
+// agent config edited on one machine reaches the others without manual push/pull
+// on every node. Worm-owned code (lives ONCE in the package): the script targets
+// ~/.worm (via WORM_HOME, inherited through the dispatcher env), independent of
+// which project triggered it. pull on session start; push (debounced) on stop —
+// the reliable trigger for an always-open session — plus a best-effort flush on
+// session end. Conflicts are never auto-resolved (see the script).
+
+const autosyncRecipe: Recipe<AutosyncRecipeConfig> = {
+  name: "autosync",
+  select: (recipes) => recipes.autosync,
+  hooks(_ctx, cfg) {
+    const script = packagedRecipeScript("autosync", "sync-worm-home.js");
+    const base = `node "${script}" "${cfg.remote}" "${cfg.debounceMinutes}" "${cfg.notify ? 1 : 0}"`;
+    return {
+      "session-start": [{ command: `${base} pull`, log: "autosync" }],
+      stop: [{ command: `${base} push`, log: "autosync" }],
+      "session-end": [{ command: `${base} push`, log: "autosync" }],
+    };
+  },
+};
+
 // shareMemory is registered AFTER shareHistory so that, when both are enabled, a
 // sibling's whole project dir is already a symlink to Slot 0's before shareMemory
 // touches its memory subdir (it then resolves to Slot 0's link — a no-op).
@@ -334,6 +362,7 @@ const REGISTRY: Recipe<any>[] = [
   syncPermissionsRecipe,
   shareHistoryRecipe,
   shareMemoryRecipe,
+  autosyncRecipe,
 ];
 
 function enabledRecipes(recipes: RecipesConfig): Array<{ recipe: Recipe<any>; cfg: unknown }> {

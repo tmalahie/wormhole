@@ -15,6 +15,9 @@ export const LOGS_DIR_NAME = "logs";
 export const SETUP_SCRIPT_NAME = "setup.sh";
 export const MANAGED_LINKS_FILE_NAME = ".managed-links.json";
 export const DETACHED_LINKS_FILE_NAME = ".detached-links.json";
+// Kept in sync with the literal in src/recipes/autosync/sync-worm-home.js (that
+// script is standalone and can't import this module).
+export const AUTOSYNC_CONFLICT_FILE_NAME = ".autosync-conflict.json";
 /** Joins the repo basename and slot index for sibling worktree dirs: `<repo>-<N>`. */
 export const SLOT_DIR_INFIX = "-";
 
@@ -46,6 +49,15 @@ export function globalConfigFile(): string {
  */
 export function globalManagedLinksFile(): string {
   return path.join(globalRoot(), MANAGED_LINKS_FILE_NAME);
+}
+
+/**
+ * Marker the autosync recipe drops at `~/.worm/.autosync-conflict.json` when a
+ * pull/push hits a conflict it won't auto-resolve. `worm status` surfaces it
+ * (durably, since the hook has no live UI), and the next clean sync clears it.
+ */
+export function autosyncConflictFile(): string {
+  return path.join(globalRoot(), AUTOSYNC_CONFLICT_FILE_NAME);
 }
 
 export function globalProjectDir(projectName: string): string {
