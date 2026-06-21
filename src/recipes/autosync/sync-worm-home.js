@@ -11,6 +11,12 @@
 //
 // Usage:  node sync-worm-home.js <remote> <debounceMinutes> <notify 0|1> <pull|push>
 //
+// Runs are SERIALIZED by a machine-local lock: many VS Code windows firing
+// SessionStart/Stop at once must not run git on ~/.worm concurrently (that races
+// on .git/index.lock and self-inflicts divergence). A held lock → skip this run.
+// On push it integrates (fetch + rebase) BEFORE committing, so serialized sessions
+// build on the latest state instead of diverging.
+//
 // Conflicts are NEVER auto-resolved: a clean `git rebase --abort` restores the
 // repo, then a durable marker (.autosync-conflict.json, surfaced by `worm
 // status`) plus an OS notification tell the human. The next clean sync clears it.
@@ -34,6 +40,15 @@ const home =
 // Kept in sync with src/core/paths.ts (AUTOSYNC_CONFLICT_FILE_NAME).
 const CONFLICT_FILE = path.join(home, ".autosync-conflict.json");
 const STAMP_FILE = path.join(home, ".autosync-last-push");
+
+// Cross-process lock so concurrent sessions (many VS Code windows all firing
+// SessionStart/Stop at once) never run git on ~/.worm in parallel — that races on
+// .git/index.lock and produces half-applied rebases / spurious divergence. Lives
+// in the OS temp dir (machine-local, never touched by `git add -A`), keyed by the
+// worm home so a custom WORM_HOME (tests) gets its own lock. Held only for the
+// duration of one run; stale locks (a crashed process) are stolen after a grace.
+const LOCK_DIR = path.join(os.tmpdir(), `worm-autosync-${home.replace(/[^a-zA-Z0-9]/g, "_")}.lock`);
+const LOCK_STALE_MS = 120000;
 
 function git(args) {
   return spawnSync("git", ["-C", home, ...args], { encoding: "utf8" });
@@ -109,11 +124,69 @@ function stamp() {
   }
 }
 
+// mkdir is atomic across processes: it succeeds for exactly one racer. If the
+// lock is held we SKIP this run (another session is syncing — the shared ~/.worm
+// will be up to date either way; the next Stop re-syncs). A stale lock left by a
+// crashed run is stolen after LOCK_STALE_MS.
+function acquireLock() {
+  try {
+    fs.mkdirSync(LOCK_DIR);
+    return true;
+  } catch (err) {
+    if (err && err.code === "EEXIST") {
+      try {
+        if (Date.now() - fs.statSync(LOCK_DIR).mtimeMs > LOCK_STALE_MS) {
+          fs.rmSync(LOCK_DIR, { recursive: true, force: true });
+          fs.mkdirSync(LOCK_DIR);
+          return true;
+        }
+      } catch {
+        // lost the steal race — treat as held
+      }
+    }
+    return false;
+  }
+}
+
+function releaseLock() {
+  try {
+    fs.rmSync(LOCK_DIR, { recursive: true, force: true });
+  } catch {
+    // best effort
+  }
+}
+
 function commitIfDirty() {
   git(["add", "-A"]);
   // `diff --cached --quiet` exits 1 when there ARE staged changes.
   if (git(["diff", "--cached", "--quiet"]).status === 0) return;
   git(["commit", "--quiet", "-m", `worm autosync ${new Date().toISOString()} on ${os.hostname()}`]);
+}
+
+function sync(branch) {
+  if (mode === "pull") {
+    if (integrate(branch)) clearConflict();
+    return;
+  }
+
+  // push. Debounce first (cheap), then INTEGRATE BEFORE COMMITTING so we always
+  // build on the latest remote state — serialized sessions linearize instead of
+  // each committing a divergent snapshot of the same churning files.
+  if (debounced()) return;
+  if (!integrate(branch)) return; // conflict: marker written, repo restored
+  commitIfDirty();
+  if (git(["push", remote, branch]).status === 0) {
+    clearConflict();
+    stamp();
+    return;
+  }
+  // Push still rejected → another MACHINE pushed since our fetch (the local lock
+  // can't serialize across hosts). Integrate again and retry once.
+  if (!integrate(branch)) return;
+  if (git(["push", remote, branch]).status === 0) {
+    clearConflict();
+    stamp();
+  }
 }
 
 function main() {
@@ -128,24 +201,15 @@ function main() {
     return;
   }
 
-  if (mode === "pull") {
-    if (integrate(branch)) clearConflict();
+  // Serialize against other sessions; skip this run if one is already syncing.
+  if (!acquireLock()) {
+    console.log("autosync: another sync is in progress; skipping.");
     return;
   }
-
-  // push
-  if (debounced()) return;
-  commitIfDirty();
-  if (git(["push", remote, branch]).status === 0) {
-    clearConflict();
-    stamp();
-    return;
-  }
-  // Push rejected (diverged) — integrate, then retry once.
-  if (!integrate(branch)) return; // conflict: marker written, repo restored
-  if (git(["push", remote, branch]).status === 0) {
-    clearConflict();
-    stamp();
+  try {
+    sync(branch);
+  } finally {
+    releaseLock();
   }
 }
 

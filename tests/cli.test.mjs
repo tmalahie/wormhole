@@ -1945,6 +1945,38 @@ test("global autosync no-ops cleanly when ~/.worm has no remote", async (t) => {
   assert.equal(r.exitCode, 0, r.stderr);
 });
 
+test("global autosync serializes: a held lock makes a concurrent run skip", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init"]);
+  await setGlobalAutosync(sb);
+  const { home, bare } = await initHomeGitRemote(t, sb);
+
+  // Pre-hold the lock as if another session were mid-sync (mirrors the script's
+  // LOCK_DIR naming: OS temp dir, keyed by the sanitized worm home).
+  const lockDir = path.join(tmpdir(), `worm-autosync-${sb.wormHome.replace(/[^a-zA-Z0-9]/g, "_")}.lock`);
+  await mkdir(lockDir, { recursive: true });
+  t.after(() => rm(lockDir, { recursive: true, force: true }));
+
+  await writeFile(path.join(home, "shared", "locked.md"), "x\n");
+  const r = await sb.worm(["hook", "trigger", "--global", "stop"]);
+  assert.equal(r.exitCode, 0, r.stderr);
+
+  // Lock held → the run skipped → nothing pushed to the remote.
+  const c1 = await mkdtemp(path.join(tmpdir(), "worm-check-"));
+  t.after(() => rm(c1, { recursive: true, force: true }));
+  await execa("git", ["clone", "-q", bare, c1]);
+  await assert.rejects(stat(path.join(c1, "shared", "locked.md")), /ENOENT/, "skipped while locked");
+
+  // Release the lock → the next run pushes normally.
+  await rm(lockDir, { recursive: true, force: true });
+  await sb.worm(["hook", "trigger", "--global", "stop"]);
+  const c2 = await mkdtemp(path.join(tmpdir(), "worm-check2-"));
+  t.after(() => rm(c2, { recursive: true, force: true }));
+  await execa("git", ["clone", "-q", bare, c2]);
+  await stat(path.join(c2, "shared", "locked.md"));
+});
+
 test("worm sync --global wires the notifyPendingInput + syncGlobalPermissions global recipes", async (t) => {
   const sb = await createSandbox();
   t.after(() => sb.cleanup());
