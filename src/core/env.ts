@@ -220,8 +220,11 @@ export function renderEnvFile(vars: Record<string, string>, ctx: EnvContext): st
  */
 export function assertNoEnvCollision(config: Config): void {
   if (!config.env) return;
-  const tails = config.shared_paths.map((e) => (typeof e === "string" ? e : e.path));
-  if (tails.includes(config.env.file)) {
+  // Normalize both sides so cosmetic differences (`./x` vs `x`, a trailing slash)
+  // can't slip an identical path past the guard and clobber on sync.
+  const norm = (p: string): string => p.replace(/^\.?\/+/, "").replace(/\/+$/, "");
+  const tails = config.shared_paths.map((e) => norm(typeof e === "string" ? e : e.path));
+  if (tails.includes(norm(config.env.file))) {
     throw new WormError(
       `env.file "${config.env.file}" is also listed in shared_paths.`,
       {

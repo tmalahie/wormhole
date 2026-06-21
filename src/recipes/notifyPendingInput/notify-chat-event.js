@@ -85,13 +85,18 @@ function backgroundTurnState(transcriptPath) {
     return text.trim().length > 0;
   };
 
-  let start = 0;
+  let start = -1;
   for (let i = records.length - 1; i >= 0; i--) {
     if (isRealUserPrompt(records[i])) {
       start = i;
       break;
     }
   }
+  // No originating user prompt in the transcript (e.g. it scrolled out of a
+  // compacted/resumed session). Scanning from 0 would sweep prior turns' agent
+  // ids in and wrongly suppress this turn's final notification — so treat it as
+  // "no background state" and let the notification through.
+  if (start === -1) return none;
   const blob = records.slice(start).map(textOf).join("\n");
 
   const launched = new Set();

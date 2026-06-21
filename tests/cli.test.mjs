@@ -1914,6 +1914,42 @@ test("global autosync never auto-resolves: conflict → clean repo + marker + st
   await assert.rejects(stat(path.join(home, ".autosync-conflict.json")), /ENOENT/, "marker cleared");
 });
 
+test("global autosync never strands UNCOMMITTED local work on a conflicting push", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init"]);
+  await setGlobalAutosync(sb);
+  const { home, bare, branch } = await initHomeGitRemote(t, sb);
+  await execa("git", ["-C", home, "push", "-q", "origin", branch]);
+
+  // Another clone pushes a conflicting change to the same file.
+  const other = await mkdtemp(path.join(tmpdir(), "worm-other-"));
+  t.after(() => rm(other, { recursive: true, force: true }));
+  await execa("git", ["clone", "-q", bare, other]);
+  await execa("git", ["-C", other, "config", "user.email", "o@e.com"]);
+  await execa("git", ["-C", other, "config", "user.name", "Other"]);
+  await writeFile(path.join(other, "shared", "global-rules.md"), "REMOTE\n");
+  await execa("git", ["-C", other, "commit", "-aqm", "remote change"]);
+  await execa("git", ["-C", other, "push", "-q", "origin", branch]);
+
+  // Local work is UNCOMMITTED (the case the old `rebase --autostash` mishandled:
+  // a pop-conflict stranded it in refs/stash with no marker). Fire the push.
+  await writeFile(path.join(home, "shared", "global-rules.md"), "LOCAL\n");
+  const r = await sb.worm(["hook", "trigger", "--global", "stop"]);
+  assert.equal(r.exitCode, 0, r.stderr);
+
+  // Conflict marker written, working tree clean (rebase aborted)…
+  await stat(path.join(home, ".autosync-conflict.json"));
+  const st = await execa("git", ["-C", home, "status", "--porcelain"]);
+  assert.equal(st.stdout.trim(), "", "rebase aborted → clean working tree");
+  // …and the local work is SAFE on HEAD (committed before integrating), not lost
+  // to a dangling stash.
+  const head = await execa("git", ["-C", home, "show", "HEAD:shared/global-rules.md"]);
+  assert.equal(head.stdout, "LOCAL", "uncommitted work was committed, not stranded");
+  const stash = await execa("git", ["-C", home, "stash", "list"]);
+  assert.equal(stash.stdout.trim(), "", "nothing stranded in refs/stash");
+});
+
 test("global autosync no-ops cleanly when ~/.worm has no remote", async (t) => {
   const sb = await createSandbox();
   t.after(() => sb.cleanup());

@@ -12,6 +12,12 @@
 import { existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 
+// Wrap a value in single quotes for safe interpolation into a shell command,
+// escaping any embedded single quote as the standard '\'' sequence.
+function shQuote(s) {
+  return `'${String(s).replace(/'/g, "'\\''")}'`;
+}
+
 function findTerminalNotifier() {
   for (const p of ["/opt/homebrew/bin/terminal-notifier", "/usr/local/bin/terminal-notifier"]) {
     if (existsSync(p)) return p;
@@ -30,7 +36,12 @@ export function notify({ title, message, sound = false, focusPath = "", focusApp
         // Clicking opens focusPath in focusApp — for a folder-based editor (VS
         // Code, Cursor, Windsurf…) `open -a` raises the existing window rooted at
         // that folder (no new tab). Skipped when either is unset → plain notification.
-        if (focusApp && focusPath) args.push("-execute", `open -a "${focusApp}" '${focusPath}'`);
+        // terminal-notifier runs `-execute` through a shell, so single-quote both
+        // values (a path/app name may legally contain spaces or even a quote, e.g.
+        // ~/git/o'brien) — otherwise the click action breaks or mis-parses.
+        if (focusApp && focusPath) {
+          args.push("-execute", `open -a ${shQuote(focusApp)} ${shQuote(focusPath)}`);
+        }
         spawnSync(tn, args, { stdio: "ignore" });
         return;
       }

@@ -14,16 +14,18 @@
 // Runs are SERIALIZED by a machine-local lock: many VS Code windows firing
 // SessionStart/Stop at once must not run git on ~/.worm concurrently (that races
 // on .git/index.lock and self-inflicts divergence). A held lock → skip this run.
-// On push it integrates (fetch + rebase) BEFORE committing, so serialized sessions
-// build on the latest state instead of diverging.
+// We COMMIT local work first, then rebase onto the remote — never `--autostash`,
+// whose pop can conflict and strand changes in refs/stash with no marker. A
+// committed change is always recoverable; a stashed one silently isn't.
 //
 // Conflicts are NEVER auto-resolved: a clean `git rebase --abort` restores the
-// repo, then a durable marker (.autosync-conflict.json, surfaced by `worm
-// status`) plus an OS notification tell the human. The next clean sync clears it.
-// Always exits 0 — a sync hiccup must never block a session.
+// repo (HEAD back on our commit), then a durable marker (.autosync-conflict.json,
+// surfaced by `worm status`) plus an OS notification tell the human. The next
+// clean sync clears it. Always exits 0 — a sync hiccup must never block a session.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { notify as osNotify } from "../_lib/notify.js";
 
@@ -48,6 +50,10 @@ const STAMP_FILE = path.join(home, ".autosync-last-push");
 // worm home so a custom WORM_HOME (tests) gets its own lock. Held only for the
 // duration of one run; stale locks (a crashed process) are stolen after a grace.
 const LOCK_DIR = path.join(os.tmpdir(), `worm-autosync-${home.replace(/[^a-zA-Z0-9]/g, "_")}.lock`);
+const LOCK_OWNER_FILE = path.join(LOCK_DIR, "owner");
+// A per-run id written into the lock dir so we only ever release OUR OWN lock —
+// never one a stale-steal handed to another racer (which would un-serialize them).
+const LOCK_OWNER = randomUUID();
 const LOCK_STALE_MS = 120000;
 
 function git(args) {
@@ -89,10 +95,11 @@ function recordConflict(detail) {
 }
 
 /**
- * Integrate the remote branch by rebasing onto it (autostash for any local edits).
- * Returns true when in sync (or there's nothing remote to integrate yet); false
- * when it hit a conflict — in which case it has already aborted cleanly and
- * recorded the marker.
+ * Integrate the remote branch by rebasing our commits onto it. The caller commits
+ * any local work FIRST, so the tree is clean and no `--autostash` is needed (its
+ * pop could conflict and strand changes invisibly). Returns true when in sync (or
+ * there's nothing remote to integrate yet); false on a conflict — in which case it
+ * has already aborted cleanly (HEAD back on our commit) and recorded the marker.
  */
 function integrate(branch) {
   git(["fetch", remote, branch]);
@@ -100,7 +107,7 @@ function integrate(branch) {
   if (git(["rev-parse", "--verify", "--quiet", ref]).status !== 0) {
     return true; // remote branch doesn't exist yet — nothing to integrate
   }
-  if (git(["rebase", "--autostash", ref]).status === 0) return true;
+  if (git(["rebase", ref]).status === 0) return true;
   git(["rebase", "--abort"]);
   recordConflict(`rebase onto ${ref} hit conflicts`);
   return false;
@@ -127,28 +134,47 @@ function stamp() {
 // mkdir is atomic across processes: it succeeds for exactly one racer. If the
 // lock is held we SKIP this run (another session is syncing — the shared ~/.worm
 // will be up to date either way; the next Stop re-syncs). A stale lock left by a
-// crashed run is stolen after LOCK_STALE_MS.
+// crashed run is stolen after LOCK_STALE_MS — but via an atomic RENAME so two
+// racers can't both "steal" it (a plain rm+mkdir lets the loser delete the
+// winner's fresh dir). Whoever wins writes its owner id; release only removes a
+// lock that still bears OUR id.
+function takeLock() {
+  fs.mkdirSync(LOCK_DIR); // throws EEXIST unless we won
+  fs.writeFileSync(LOCK_OWNER_FILE, LOCK_OWNER);
+}
+
 function acquireLock() {
   try {
-    fs.mkdirSync(LOCK_DIR);
+    takeLock();
     return true;
   } catch (err) {
-    if (err && err.code === "EEXIST") {
-      try {
-        if (Date.now() - fs.statSync(LOCK_DIR).mtimeMs > LOCK_STALE_MS) {
-          fs.rmSync(LOCK_DIR, { recursive: true, force: true });
-          fs.mkdirSync(LOCK_DIR);
-          return true;
-        }
-      } catch {
-        // lost the steal race — treat as held
-      }
-    }
+    if (!err || err.code !== "EEXIST") return false;
+  }
+  // Held. Only consider stealing once it's been stale past the grace.
+  try {
+    if (Date.now() - fs.statSync(LOCK_DIR).mtimeMs <= LOCK_STALE_MS) return false;
+    // Atomic steal: exactly one racer can rename the stale dir away; the rest get
+    // ENOENT and back off. The winner clears it, then re-creates a fresh lock.
+    fs.renameSync(LOCK_DIR, `${LOCK_DIR}.stale-${LOCK_OWNER}`);
+    fs.rmSync(`${LOCK_DIR}.stale-${LOCK_OWNER}`, { recursive: true, force: true });
+  } catch {
+    return false; // lost the steal race (or it vanished) — treat as held
+  }
+  try {
+    takeLock(); // a fresh racer may have grabbed it in the gap → EEXIST → back off
+    return true;
+  } catch {
     return false;
   }
 }
 
 function releaseLock() {
+  try {
+    // Don't delete a lock that's no longer ours (a stale-steal gave it away).
+    if (fs.readFileSync(LOCK_OWNER_FILE, "utf8") !== LOCK_OWNER) return;
+  } catch {
+    return; // owner file gone/unreadable — not safely ours
+  }
   try {
     fs.rmSync(LOCK_DIR, { recursive: true, force: true });
   } catch {
@@ -156,25 +182,36 @@ function releaseLock() {
   }
 }
 
+// Commit any local work. Returns true when the tree is clean afterwards (nothing
+// to commit, or the commit landed); false when the commit FAILED (e.g. unset git
+// identity, a failing commit hook) — the caller must then bail rather than push a
+// half-integrated HEAD and stamp success over un-committed work.
 function commitIfDirty() {
   git(["add", "-A"]);
   // `diff --cached --quiet` exits 1 when there ARE staged changes.
-  if (git(["diff", "--cached", "--quiet"]).status === 0) return;
-  git(["commit", "--quiet", "-m", `worm autosync ${new Date().toISOString()} on ${os.hostname()}`]);
+  if (git(["diff", "--cached", "--quiet"]).status === 0) return true;
+  return (
+    git(["commit", "--quiet", "-m", `worm autosync ${new Date().toISOString()} on ${os.hostname()}`])
+      .status === 0
+  );
 }
 
 function sync(branch) {
+  // Push debounces first (cheap) so a busy session doesn't run git every turn.
+  if (mode === "push" && debounced()) return;
+
+  // COMMIT BEFORE INTEGRATING (both modes): a committed change survives a rebase
+  // conflict (we abort and it's still on HEAD), whereas an autostash pop-conflict
+  // would strand it. A failed commit aborts the whole run — never push over it.
+  if (!commitIfDirty()) return;
+
   if (mode === "pull") {
     if (integrate(branch)) clearConflict();
     return;
   }
 
-  // push. Debounce first (cheap), then INTEGRATE BEFORE COMMITTING so we always
-  // build on the latest remote state — serialized sessions linearize instead of
-  // each committing a divergent snapshot of the same churning files.
-  if (debounced()) return;
+  // push: rebase our commit onto the latest remote, then push.
   if (!integrate(branch)) return; // conflict: marker written, repo restored
-  commitIfDirty();
   if (git(["push", remote, branch]).status === 0) {
     clearConflict();
     stamp();
