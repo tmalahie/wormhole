@@ -2031,10 +2031,10 @@ test("notifyPendingInput runs through the global dispatch and exits cleanly (no 
   const sb = await createSandbox();
   t.after(() => sb.cleanup());
   await sb.worm(["init"]);
-  // A custom `editor` exercises the configurable click-target.
+  // A custom `openOnClick` exercises the configurable click-target.
   await writeFile(
     path.join(sb.wormHome, "config.json"),
-    JSON.stringify({ recipes: { notifyPendingInput: { editor: "Cursor" } } })
+    JSON.stringify({ recipes: { notifyPendingInput: { openOnClick: "Cursor" } } })
   );
 
   // A sub-agent payload (agent_id present) → the script reads stdin and returns

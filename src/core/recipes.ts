@@ -383,8 +383,8 @@ const notifyPendingInputRecipe: Recipe<NotifyPendingInputRecipeConfig> = {
   select: (recipes) => recipes.notifyPendingInput,
   hooks(_ctx, cfg) {
     const script = packagedRecipeScript("notifyPendingInput", "notify-chat-event.js");
-    // cfg.editor is read live at trigger time → editor changes need no re-wire.
-    const command = `node "${script}" "${cfg.editor}"`;
+    // cfg.openOnClick is read live at trigger time → changes need no re-wire.
+    const command = `node "${script}" "${cfg.openOnClick}"`;
     return { stop: [{ command }], "permission-request": [{ command }] };
   },
 };

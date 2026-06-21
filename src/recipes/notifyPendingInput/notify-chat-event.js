@@ -12,8 +12,8 @@ import path from "node:path";
 import { notify } from "../_lib/notify.js";
 
 // The macOS app a notification click opens the project folder in (passed by the
-// recipe from its `editor` config). Empty → no click action.
-const EDITOR = process.argv[2] ?? "";
+// recipe from its `openOnClick` config). Empty → no click action.
+const OPEN_ON_CLICK = process.argv[2] ?? "";
 
 // The live `data.cwd` drifts to subfolders during a session (a `Bash cd`, an
 // active file's dir, etc.), so focusing it would spawn a NEW VS Code window rooted
@@ -158,7 +158,7 @@ function main() {
     message: isPermission ? `Waiting for approval${toolName ? `: ${toolName}` : ""}` : "Response ready",
     sound: true,
     focusPath: cwd,
-    focusApp: EDITOR,
+    focusApp: OPEN_ON_CLICK,
   });
 }
 
