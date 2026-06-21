@@ -97,7 +97,6 @@ worm universe rm my-other-feature
 | `worm template render <file> [KEY=VALUE …]` | Render a `{{var}}` template file to stdout (worm's templating primitive; leaves shell `${VAR}` untouched). For setup scripts that want to drop hand-rolled sed. |
 | `worm cd <branch>` / `worm tp <N>` | Change directory into a slot by branch name or 0-based index. Requires the shell-init wrapper. |
 | `worm path <ref>` | Print the worktree path for a branch or slot index (what `cd`/`tp` use under the hood). |
-| `worm config <key> [value]` | Read or write machine-level worm settings in `~/.worm/config.json` (scalar keys, e.g. `editor`; `shared_paths`/`stores` are edited in the JSON directly). `--list` prints everything; `--unset` clears a key. |
 | `worm destroy [--force]` | Unbind the project: remove sibling universes, `.worm/`, and the global profile. **Slot 0 (your repo) is left intact.** Prompts unless `--force`. |
 | `worm shell-init` | Print the shell function described in [Shell integration](#shell-integration-recommended). |
 | `worm completion <bash\|zsh>` | Print a tab-completion script for the chosen shell. |

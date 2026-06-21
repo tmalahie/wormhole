@@ -34,7 +34,7 @@ One file per command. Each exports a single `runX(args, options)` async function
 | `destroy.ts` | Remove sibling universes + `.worm/` + the global profile. **Slot 0 is left intact.** |
 | `hook.ts` | `worm hook trigger <event>` — internal recipe-hook dispatcher invoked by each slot's `settings.local.json` (one static entry per event). Events: `pre-tool-use` (filter), `user-prompt-submit` (context), `session-start` / `session-end` / `stop` / `permission-request` (run). Resolves the live slot, runs enabled **project-scope** recipes with injected env, and owns logging. `--global` runs **global-scope** recipes (`autosync`, `notifyPendingInput`, `syncGlobalPermissions`) from `~/.worm/config.json` with NO project context (the form `worm sync --global` writes into `~/.claude/settings.json`); it forwards stdin so payload-reading recipes (`notifyPendingInput`) work. Must never throw; fails open on the hot path. Recipe scripts live in `src/recipes/<name>/`; shared script helpers (the notification backend) in `src/recipes/_lib/`. |
 | `template.ts` | `worm template render <file> KEY=VALUE …` — render a `{{var}}` template file to stdout (worm's templating primitive, for user setup scripts). |
-| `path.ts` / `shell-init.ts` / `completion.ts` / `config.ts` | Navigation helpers, shell wrapper, tab-completion, and machine-level settings. |
+| `path.ts` / `shell-init.ts` / `completion.ts` | Navigation helpers, shell wrapper, and tab-completion. |
 
 ### `core/`
 Domain primitives. Pure functions where possible; the only side effects are filesystem and `git`.

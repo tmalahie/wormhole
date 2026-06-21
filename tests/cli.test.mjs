@@ -1194,30 +1194,6 @@ test("worm shell-init prints a sourceable shell function", async (t) => {
   assert.match(r.stdout, /builtin cd/);
 });
 
-test("worm config round-trips through ~/.worm/config.json", async (t) => {
-  const sb = await createSandbox();
-  t.after(() => sb.cleanup());
-
-  await sb.worm(["init"]);
-
-  const empty = await sb.worm(["config", "editor"]);
-  assert.equal(empty.exitCode, 0, empty.stderr);
-  assert.match(empty.stdout, /\(unset\)/);
-
-  const set = await sb.worm(["config", "editor", "code"]);
-  assert.equal(set.exitCode, 0, set.stderr);
-
-  const persisted = JSON.parse(await readFile(path.join(sb.wormHome, "config.json"), "utf8"));
-  assert.equal(persisted.editor, "code");
-
-  const get = await sb.worm(["config", "editor"]);
-  assert.match(get.stdout, /^code$/m);
-
-  const bad = await sb.worm(["config", "made-up-key"]);
-  assert.notEqual(bad.exitCode, 0);
-  assert.match(bad.stderr, /Unknown config key/);
-});
-
 test("worm destroy --force removes siblings, .worm/, and the global profile; Slot 0 survives", async (t) => {
   const sb = await createSandbox();
   t.after(() => sb.cleanup());
@@ -1285,7 +1261,7 @@ test("worm sync --global links HOME-scope shared paths (existing + sprouted) and
   // Two global tails: one with an existing source, one to be sprouted.
   await writeFile(
     path.join(sb.wormHome, "config.json"),
-    JSON.stringify({ editor: "code", shared_paths: [".claude/commands", ".claude/skills"] })
+    JSON.stringify({ shared_paths: [".claude/commands", ".claude/skills"] })
   );
   await mkdir(path.join(sb.wormHome, "shared", ".claude", "commands"), { recursive: true });
   await writeFile(path.join(sb.wormHome, "shared", ".claude", "commands", "x.md"), "hi\n");

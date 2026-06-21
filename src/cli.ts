@@ -3,7 +3,6 @@ import { logger } from "./utils/logger.js";
 import { isWormError } from "./utils/errors.js";
 import { runInit } from "./commands/init.js";
 import { runStatus } from "./commands/status.js";
-import { runConfig } from "./commands/config.js";
 import { runPath, runShellAlias } from "./commands/path.js";
 import { runShellInit } from "./commands/shell-init.js";
 import { runDestroy } from "./commands/destroy.js";
@@ -128,15 +127,6 @@ program
   .option("--json", "Output as JSON.")
   .action(async (opts) => {
     await runStatus(opts);
-  });
-
-program
-  .command("config [key] [value]")
-  .description("Read or write machine-level worm settings (~/.worm/config.json).")
-  .option("--list", "Print all keys and values.")
-  .option("--unset", "Remove a key.")
-  .action(async (key: string | undefined, value: string | undefined, opts) => {
-    await runConfig(key, value, opts);
   });
 
 program
