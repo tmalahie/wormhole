@@ -7,9 +7,10 @@
 //
 // The live global file can't be a symlink into worm — Claude's permission dialog
 // edits it in place — hence this copy-and-merge. IMPORTANT: the live file also
-// holds hooks / marketplaces / trustedDirectories; we replace ONLY `permissions`,
-// never the whole file. The canonical copy holds ONLY `{permissions}` so the rest
-// of the global config stays local and untracked.
+// holds hooks / marketplaces / trustedDirectories; we replace only `permissions`
+// (bidirectional union) and `sandbox` (one-way from canonical), never the whole
+// file. The canonical copy holds `{permissions, sandbox}` — the version-tracked
+// surface — so the rest of the global config stays local and untracked.
 //
 // Invoked by the GLOBAL dispatch (`worm hook trigger --global <session-start|stop|
 // session-end>`). Ignores stdin.
@@ -83,15 +84,22 @@ function main() {
 
   const mergedPermissions = mergePermissions(canon.permissions, live.permissions);
 
-  // Canonical holds ONLY permissions (the tracked, git-diffable surface); the live
-  // file keeps every other key untouched, with only its permissions block updated.
+  // The `sandbox` block is sourced ONE-WAY from the canonical: unlike permissions
+  // (which the permission dialog edits in the live file, so they're unioned both
+  // ways), the sandbox block is only ever hand-edited, so the canonical is its
+  // single source of truth — kept there and pushed onto the live file, overriding
+  // whatever was there. Omitted if the canonical has none (live's is left as-is).
+  const sandboxKey = canon.sandbox !== undefined ? { sandbox: canon.sandbox } : {};
+
+  // Canonical holds permissions + sandbox (the tracked, git-diffable surface); the
+  // live file keeps every other key untouched, with only permissions + sandbox set.
   const wroteCanon = writeIfChanged(
     canonicalFile,
-    JSON.stringify({ permissions: mergedPermissions }, null, 2) + "\n"
+    JSON.stringify({ permissions: mergedPermissions, ...sandboxKey }, null, 2) + "\n"
   );
   const wroteLive = writeIfChanged(
     liveFile,
-    JSON.stringify({ ...live, permissions: mergedPermissions }, null, 2) + "\n"
+    JSON.stringify({ ...live, permissions: mergedPermissions, ...sandboxKey }, null, 2) + "\n"
   );
 
   if (wroteCanon || wroteLive) {
