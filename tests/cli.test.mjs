@@ -1950,6 +1950,71 @@ test("global autosync never strands UNCOMMITTED local work on a conflicting push
   assert.equal(stash.stdout.trim(), "", "nothing stranded in refs/stash");
 });
 
+test("global autosync retries (no conflict marker) when a racing writer dirties the tree mid-rebase", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init"]);
+  await setGlobalAutosync(sb);
+  const { home, bare, branch } = await initHomeGitRemote(t, sb);
+  await execa("git", ["-C", home, "push", "-q", "origin", branch]);
+
+  // A non-conflicting remote commit (different file), so the local rebase has real
+  // work to do and actually invokes the pre-rebase hook below (git short-circuits
+  // "up to date" without running hooks when HEAD is merely ahead).
+  const other = await mkdtemp(path.join(tmpdir(), "worm-other-"));
+  t.after(() => rm(other, { recursive: true, force: true }));
+  await execa("git", ["clone", "-q", bare, other]);
+  await execa("git", ["-C", other, "config", "user.email", "o@e.com"]);
+  await execa("git", ["-C", other, "config", "user.name", "Other"]);
+  await writeFile(path.join(other, "shared", "remote-only.md"), "REMOTE\n");
+  await execa("git", ["-C", other, "add", "-A"]);
+  await execa("git", ["-C", other, "commit", "-qm", "remote change"]);
+  await execa("git", ["-C", other, "push", "-q", "origin", branch]);
+
+  // Simulate a concurrent writer (syncGlobalPermissions / a permission-dialog write
+  // through a tunnel) landing in the commit→rebase window: a ONE-SHOT pre-rebase
+  // hook dirties a tracked file and refuses the FIRST rebase, then steps aside. The
+  // sync must absorb the racing write (re-commit) and retry — NOT cry conflict.
+  const hookPath = path.join(home, ".git", "hooks", "pre-rebase");
+  const sentinel = path.join(home, ".git", ".inject-dirty"); // absolute; lives in .git so `git add -A` never sees it
+  await writeFile(
+    hookPath,
+    `#!/bin/sh
+if [ -f "${sentinel}" ]; then
+  rm -f "${sentinel}"
+  printf 'racing write\\n' > shared/global-rules.md
+  exit 1
+fi
+exit 0
+`
+  );
+  await chmod(hookPath, 0o755);
+  await writeFile(sentinel, "");
+
+  // A normal local change, then fire the push (Stop).
+  await writeFile(path.join(home, "shared", "newfile.md"), "hello\n");
+  const r = await sb.worm(["hook", "trigger", "--global", "stop"]);
+  assert.equal(r.exitCode, 0, r.stderr);
+
+  // No conflict marker — the dirty-tree failure was transient and got retried.
+  await assert.rejects(stat(path.join(home, ".autosync-conflict.json")), /ENOENT/, "no false conflict");
+  // The injection fired exactly once (sentinel consumed) and the tree is clean.
+  await assert.rejects(stat(sentinel), /ENOENT/, "injection consumed");
+  const st = await execa("git", ["-C", home, "status", "--porcelain"]);
+  assert.equal(st.stdout.trim(), "", "clean working tree after retry");
+
+  // Both the real change AND the absorbed racing write reached the remote.
+  const checkout = await mkdtemp(path.join(tmpdir(), "worm-check-"));
+  t.after(() => rm(checkout, { recursive: true, force: true }));
+  await execa("git", ["clone", "-q", bare, checkout]);
+  await stat(path.join(checkout, "shared", "newfile.md"));
+  assert.equal(
+    await readFile(path.join(checkout, "shared", "global-rules.md"), "utf8"),
+    "racing write\n",
+    "racing write was committed + pushed, not lost"
+  );
+});
+
 test("global autosync no-ops cleanly when ~/.worm has no remote", async (t) => {
   const sb = await createSandbox();
   t.after(() => sb.cleanup());

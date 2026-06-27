@@ -14,12 +14,22 @@
 // Runs are SERIALIZED by a machine-local lock: many VS Code windows firing
 // SessionStart/Stop at once must not run git on ~/.worm concurrently (that races
 // on .git/index.lock and self-inflicts divergence). A held lock → skip this run.
-// We COMMIT local work first, then rebase onto the remote — never `--autostash`,
-// whose pop can conflict and strand changes in refs/stash with no marker. A
-// committed change is always recoverable; a stashed one silently isn't.
 //
-// Conflicts are NEVER auto-resolved: a clean `git rebase --abort` restores the
-// repo (HEAD back on our commit), then a durable marker (.autosync-conflict.json,
+// Order of operations matters. We FETCH FIRST (the slow network round-trip to the
+// remote), THEN commit local work, THEN rebase immediately. A dirty working tree
+// is harmless during fetch (it only updates remote-tracking refs/objects), so
+// keeping the slow part out of the commit→rebase window leaves a concurrent writer
+// almost no room to dirty the tree between our commit and the rebase. Such writers
+// DO exist and are NOT covered by our lock: the `syncGlobalPermissions` recipe and
+// Claude's own permission dialog both write tracked files inside ~/.worm
+// (settings.json / settings.local.json) at arbitrary moments. If one lands mid-
+// rebase, `git rebase` bails non-zero with NO real content conflict — so we
+// re-absorb the change (re-commit) and retry the rebase a few times before giving
+// up. We COMMIT local work (never `--autostash`, whose pop can conflict and strand
+// changes in refs/stash with no marker — a committed change is always recoverable).
+//
+// Genuine conflicts are NEVER auto-resolved: a clean `git rebase --abort` restores
+// the repo (HEAD back on our commit), then a durable marker (.autosync-conflict.json,
 // surfaced by `worm status`) plus an OS notification tell the human. The next
 // clean sync clears it. Always exits 0 — a sync hiccup must never block a session.
 import fs from "node:fs";
@@ -33,6 +43,12 @@ const remote = process.argv[2] || "origin";
 const debounceMin = Number(process.argv[3] || "0");
 const notify = process.argv[4] === "1";
 const mode = process.argv[5]; // "pull" | "push"
+
+// A rebase that bails because a concurrent writer (syncGlobalPermissions, a
+// permission-dialog write through a tunnel) dirtied the tree is transient — we
+// re-commit the racing change and retry. Bounded so a genuinely stuck state can't
+// spin: each retry's rebase is purely local (no fetch), so a few attempts is cheap.
+const REBASE_ATTEMPTS = 3;
 
 const home =
   process.env.WORM_HOME && process.env.WORM_HOME.trim()
@@ -95,22 +111,37 @@ function recordConflict(detail) {
 }
 
 /**
- * Integrate the remote branch by rebasing our commits onto it. The caller commits
- * any local work FIRST, so the tree is clean and no `--autostash` is needed (its
- * pop could conflict and strand changes invisibly). Returns true when in sync (or
- * there's nothing remote to integrate yet); false on a conflict — in which case it
- * has already aborted cleanly (HEAD back on our commit) and recorded the marker.
+ * Rebase our committed work onto the ALREADY-FETCHED remote ref (the caller fetches
+ * first, then commits, then calls this — so the slow network round-trip is out of
+ * the dirty-sensitive window and the tree is clean going in). Returns:
+ *   "ok"           — in sync (rebase clean / nothing to replay)
+ *   "conflict"     — genuine content conflict: aborted cleanly, marker recorded
+ *   "commit-failed"— a re-commit failed (unset identity, failing hook); caller bails
+ *
+ * A concurrent writer (another session's syncGlobalPermissions, or a Claude
+ * permission-dialog write arriving through a tunnel symlink) can dirty the tree in
+ * the narrow window before the rebase, making `git rebase` bail non-zero with NO
+ * real conflict. We absorb that write (re-commit) and retry. Only a rebase that
+ * still fails with a clean tree — nothing new to re-commit — is treated as a real
+ * conflict; `rebase --abort` has by then restored HEAD to our commit either way.
  */
-function integrate(branch) {
-  git(["fetch", remote, branch]);
-  const ref = `${remote}/${branch}`;
+function rebaseOnto(ref) {
   if (git(["rev-parse", "--verify", "--quiet", ref]).status !== 0) {
-    return true; // remote branch doesn't exist yet — nothing to integrate
+    return "ok"; // remote branch doesn't exist yet — nothing to rebase onto
   }
-  if (git(["rebase", ref]).status === 0) return true;
-  git(["rebase", "--abort"]);
+  for (let attempt = 1; attempt <= REBASE_ATTEMPTS; attempt++) {
+    if (git(["rebase", ref]).status === 0) return "ok";
+    git(["rebase", "--abort"]); // no-op (harmless non-zero) if a dirty preflight blocked the rebase
+    if (attempt === REBASE_ATTEMPTS) break;
+    // Re-absorb a racing write and retry. If there's nothing new to commit, the
+    // tree is clean and the failure is a genuine conflict — stop and record it.
+    const c = commitWork();
+    if (c === "failed") return "commit-failed";
+    if (c === "clean") break;
+    // c === "committed" → a racing write was absorbed; loop and retry the rebase.
+  }
   recordConflict(`rebase onto ${ref} hit conflicts`);
-  return false;
+  return "conflict";
 }
 
 function debounced() {
@@ -189,47 +220,56 @@ function releaseLock() {
   }
 }
 
-// Commit any local work. Returns true when the tree is clean afterwards (nothing
-// to commit, or the commit landed); false when the commit FAILED (e.g. unset git
-// identity, a failing commit hook) — the caller must then bail rather than push a
-// half-integrated HEAD and stamp success over un-committed work.
-function commitIfDirty() {
+// Stage and commit any local work. Returns "clean" (nothing to commit), "committed"
+// (the commit landed), or "failed" (the commit errored — unset git identity, a
+// failing commit hook). The caller must bail on "failed" rather than push a half-
+// integrated HEAD and stamp success over un-committed work.
+function commitWork() {
   git(["add", "-A"]);
-  // `diff --cached --quiet` exits 1 when there ARE staged changes.
-  if (git(["diff", "--cached", "--quiet"]).status === 0) return true;
-  return (
-    git(["commit", "--quiet", "-m", `worm autosync ${new Date().toISOString()} on ${os.hostname()}`])
-      .status === 0
-  );
+  // `diff --cached --quiet` exits non-zero when there ARE staged changes.
+  if (git(["diff", "--cached", "--quiet"]).status === 0) return "clean";
+  return git(["commit", "--quiet", "-m", `worm autosync ${new Date().toISOString()} on ${os.hostname()}`])
+    .status === 0
+    ? "committed"
+    : "failed";
 }
 
 function sync(branch) {
   // Push debounces first (cheap) so a busy session doesn't run git every turn.
   if (mode === "push" && debounced()) return;
 
-  // COMMIT BEFORE INTEGRATING (both modes): a committed change survives a rebase
+  // FETCH FIRST (the slow part). A dirty tree is harmless during fetch — it only
+  // updates remote-tracking refs/objects — so doing it before the commit keeps the
+  // network round-trip OUT of the commit→rebase window a concurrent writer could
+  // slip into. commit + rebase then run back-to-back.
+  git(["fetch", remote, branch]);
+  const ref = `${remote}/${branch}`;
+
+  // COMMIT BEFORE REBASING (both modes): a committed change survives a rebase
   // conflict (we abort and it's still on HEAD), whereas an autostash pop-conflict
   // would strand it. A failed commit aborts the whole run — never push over it.
-  // NOTE: this means even pull (session-start) now no-ops on a commit failure
-  // (e.g. unset git identity) where it used to fetch/rebase regardless — safer,
-  // but a behavior change from the old `rebase --autostash` pull path.
-  if (!commitIfDirty()) return;
+  // NOTE: this means even pull (session-start) no-ops on a commit failure (e.g.
+  // unset git identity) where the old `rebase --autostash` pull fetched regardless.
+  if (commitWork() === "failed") return;
 
   if (mode === "pull") {
-    if (integrate(branch)) clearConflict();
+    // A clean rebase (or nothing remote yet) → in sync; clear any stale marker.
+    if (rebaseOnto(ref) === "ok") clearConflict();
     return;
   }
 
-  // push: rebase our commit onto the latest remote, then push.
-  if (!integrate(branch)) return; // conflict: marker written, repo restored
+  // push: rebase our commit onto the latest remote (if any), then push.
+  if (rebaseOnto(ref) !== "ok") return; // conflict/commit-fail: handled, repo restored
   if (git(["push", remote, branch]).status === 0) {
     clearConflict();
     stamp();
     return;
   }
-  // Push still rejected → another MACHINE pushed since our fetch (the local lock
-  // can't serialize across hosts). Integrate again and retry once.
-  if (!integrate(branch)) return;
+  // Push rejected → another MACHINE advanced the remote since our fetch (the local
+  // lock can't serialize across hosts). Re-fetch, re-commit, re-rebase, retry once.
+  git(["fetch", remote, branch]);
+  if (commitWork() === "failed") return;
+  if (rebaseOnto(ref) !== "ok") return;
   if (git(["push", remote, branch]).status === 0) {
     clearConflict();
     stamp();
