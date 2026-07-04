@@ -1,16 +1,31 @@
 #!/usr/bin/env node
 // The `syncGlobalPermissions` recipe's worker, shipped WITH worm. The GLOBAL
-// analogue of the per-project `syncPermissions` recipe: bidirectionally unions the
-// `permissions` block of the user-level ~/.claude/settings.json with a git-tracked
-// canonical copy in the worm repo, so global allow/deny rules are version-
-// controlled (and synced across machines once autosync pushes them).
+// analogue of the per-project `syncPermissions` recipe: keeps the `permissions`
+// and `sandbox` blocks of the user-level ~/.claude/settings.json in step with a
+// git-tracked canonical copy in the worm repo, so global allow/deny rules are
+// version-controlled (and synced across machines once autosync pushes them).
 //
 // The live global file can't be a symlink into worm — Claude's permission dialog
 // edits it in place — hence this copy-and-merge. IMPORTANT: the live file also
-// holds hooks / marketplaces / trustedDirectories; we replace only `permissions`
-// (bidirectional union) and `sandbox` (one-way from canonical), never the whole
-// file. The canonical copy holds `{permissions, sandbox}` — the version-tracked
-// surface — so the rest of the global config stays local and untracked.
+// holds hooks / marketplaces / trustedDirectories; we only ever touch
+// `permissions` and `sandbox`, never the whole file. The canonical copy holds
+// `{permissions, sandbox}` — the version-tracked surface — so the rest of the
+// global config stays local and untracked.
+//
+// Conflict resolution is a THREE-WAY merge against a machine-local "base"
+// snapshot (`~/.worm/.sync-global-settings.base.json`, gitignored) recording the
+// synced surface as of the last run — the common ancestor:
+//   - permission arrays (allow/deny/ask): a rule present in the base survives only
+//     if it's still on BOTH sides (so removing it from EITHER file propagates); a
+//     rule absent from the base is kept if EITHER side added it (so approvals still
+//     flow across slots/machines). No base yet → falls back to a plain union, which
+//     never loses a rule.
+//   - scalar keys (permissions.defaultMode, the whole `sandbox` block): the side
+//     that changed vs the base wins; if BOTH changed, the more-recently-edited file
+//     (by mtime) wins. This is the "last edited file is the source of truth" rule,
+//     scoped to values a set-union can't express.
+// After merging, both files AND the base snapshot are rewritten to the result, so
+// the next run has an up-to-date ancestor.
 //
 // Invoked by the GLOBAL dispatch (`worm hook trigger --global <session-start|stop|
 // session-end>`). Ignores stdin.
@@ -25,6 +40,10 @@ const wormHome =
 
 const liveFile = path.join(os.homedir(), ".claude", "settings.json");
 const canonicalFile = path.join(wormHome, "shared", ".claude", "settings.json");
+// Machine-local 3-way ancestor. Kept out of git (see ensureIgnored) so autosync
+// never pushes it — each machine tracks divergence against its OWN last sync.
+const baseFile = path.join(wormHome, ".sync-global-settings.base.json");
+const BASE_IGNORE_NAME = ".sync-global-settings.base.json";
 
 function readJson(filePath) {
   try {
@@ -34,31 +53,66 @@ function readJson(filePath) {
   }
 }
 
-function unionArrays(a = [], b = []) {
-  const seen = new Set();
+function mtime(filePath) {
+  try {
+    return fs.statSync(filePath).mtimeMs;
+  } catch {
+    return -Infinity;
+  }
+}
+
+const jkey = (value) => JSON.stringify(value ?? null);
+
+// Three-way set merge over the elements of three arrays. Preserves order: base
+// elements first (in base order), then live-only additions, then canon-only.
+function mergeSet(base = [], live = [], canon = []) {
+  const inLive = new Set(live.map(jkey));
+  const inCanon = new Set(canon.map(jkey));
+  const inBase = new Set(base.map(jkey));
+  const keep = (k) => (inBase.has(k) ? inLive.has(k) && inCanon.has(k) : inLive.has(k) || inCanon.has(k));
+
   const out = [];
-  for (const value of [...a, ...b]) {
-    const key = JSON.stringify(value);
-    if (!seen.has(key)) {
-      seen.add(key);
+  const emitted = new Set();
+  for (const value of [...base, ...live, ...canon]) {
+    const k = jkey(value);
+    if (emitted.has(k)) continue;
+    if (keep(k)) {
+      emitted.add(k);
       out.push(value);
     }
   }
   return out;
 }
 
-function mergePermissions(canon = {}, local = {}) {
-  const out = { ...canon };
-  for (const key of new Set([...Object.keys(canon), ...Object.keys(local)])) {
-    const canonValue = canon[key];
-    const localValue = local[key];
-    if (Array.isArray(canonValue) || Array.isArray(localValue)) {
-      out[key] = unionArrays(
-        Array.isArray(canonValue) ? canonValue : [],
-        Array.isArray(localValue) ? localValue : []
+// Three-way resolution for a value a set-union can't express (scalar / object).
+// The side that diverged from the base wins; if both diverged, the more-recently
+// edited file wins.
+function mergeScalar(base, live, canon, liveNewer) {
+  const changedLive = jkey(live) !== jkey(base);
+  const changedCanon = jkey(canon) !== jkey(base);
+  if (changedLive && changedCanon) return liveNewer ? live : canon;
+  if (changedLive) return live;
+  if (changedCanon) return canon;
+  // Neither diverged (or no base): prefer whichever value actually exists.
+  return live !== undefined ? live : canon !== undefined ? canon : base;
+}
+
+function mergePermissions(base = {}, live = {}, canon = {}, liveNewer) {
+  const out = {};
+  const keys = new Set([...Object.keys(base), ...Object.keys(live), ...Object.keys(canon)]);
+  for (const key of keys) {
+    const b = base[key];
+    const l = live[key];
+    const c = canon[key];
+    if (Array.isArray(l) || Array.isArray(c) || Array.isArray(b)) {
+      out[key] = mergeSet(
+        Array.isArray(b) ? b : [],
+        Array.isArray(l) ? l : [],
+        Array.isArray(c) ? c : []
       );
-    } else if (canonValue === undefined) {
-      out[key] = localValue;
+    } else {
+      const merged = mergeScalar(b, l, c, liveNewer);
+      if (merged !== undefined) out[key] = merged;
     }
   }
   return out;
@@ -77,30 +131,49 @@ function writeIfChanged(filePath, content) {
   return true;
 }
 
+// Defensively ensure the base snapshot is gitignored even on installs whose
+// ~/.worm/.gitignore predates this file (init.ts owns the canonical list, but the
+// recipe may run — and autosync fire — before the user re-runs `worm init`).
+function ensureIgnored(name) {
+  const gitignore = path.join(wormHome, ".gitignore");
+  let current = "";
+  try {
+    current = fs.readFileSync(gitignore, "utf8");
+  } catch {
+    return; // no ~/.worm/.gitignore yet → not a git-tracked worm home; nothing to guard
+  }
+  if (current.split(/\r?\n/).includes(name)) return;
+  fs.writeFileSync(gitignore, current.replace(/\n?$/, "\n") + name + "\n");
+}
+
 function main() {
   const live = readJson(liveFile);
   if (live === null) return; // no global settings file — nothing to sync
   const canon = readJson(canonicalFile) || {};
+  const base = readJson(baseFile) || {};
+  const liveNewer = mtime(liveFile) >= mtime(canonicalFile);
 
-  const mergedPermissions = mergePermissions(canon.permissions, live.permissions);
-
-  // The `sandbox` block is sourced ONE-WAY from the canonical: unlike permissions
-  // (which the permission dialog edits in the live file, so they're unioned both
-  // ways), the sandbox block is only ever hand-edited, so the canonical is its
-  // single source of truth — kept there and pushed onto the live file, overriding
-  // whatever was there. Omitted if the canonical has none (live's is left as-is).
-  const sandboxKey = canon.sandbox !== undefined ? { sandbox: canon.sandbox } : {};
-
-  // Canonical holds permissions + sandbox (the tracked, git-diffable surface); the
-  // live file keeps every other key untouched, with only permissions + sandbox set.
-  const wroteCanon = writeIfChanged(
-    canonicalFile,
-    JSON.stringify({ permissions: mergedPermissions, ...sandboxKey }, null, 2) + "\n"
+  const mergedPermissions = mergePermissions(
+    base.permissions,
+    live.permissions,
+    canon.permissions,
+    liveNewer
   );
+  const mergedSandbox = mergeScalar(base.sandbox, live.sandbox, canon.sandbox, liveNewer);
+  const sandboxKey = mergedSandbox !== undefined ? { sandbox: mergedSandbox } : {};
+
+  const surface = { permissions: mergedPermissions, ...sandboxKey };
+
+  // Canonical holds the tracked surface (permissions + sandbox); the live file
+  // keeps every other key untouched, with only that surface overwritten.
+  const wroteCanon = writeIfChanged(canonicalFile, JSON.stringify(surface, null, 2) + "\n");
   const wroteLive = writeIfChanged(
     liveFile,
-    JSON.stringify({ ...live, permissions: mergedPermissions, ...sandboxKey }, null, 2) + "\n"
+    JSON.stringify({ ...live, ...surface }, null, 2) + "\n"
   );
+  // Advance the 3-way ancestor to the state both files now hold.
+  ensureIgnored(BASE_IGNORE_NAME);
+  writeIfChanged(baseFile, JSON.stringify(surface, null, 2) + "\n");
 
   if (wroteCanon || wroteLive) {
     const count = Array.isArray(mergedPermissions.allow) ? mergedPermissions.allow.length : 0;

@@ -2079,7 +2079,7 @@ test("worm sync --global wires the notifyPendingInput + syncGlobalPermissions gl
   assert.equal(s.hooks.Stop.length, 1);
 });
 
-test("syncGlobalPermissions merges the global permissions block bidirectionally", async (t) => {
+test("syncGlobalPermissions merges the global permissions block bidirectionally (no base → union)", async (t) => {
   const sb = await createSandbox();
   t.after(() => sb.cleanup());
   await sb.worm(["init"]);
@@ -2105,6 +2105,100 @@ test("syncGlobalPermissions merges the global permissions block bidirectionally"
   const canon = JSON.parse(await readFile(canonFile, "utf8"));
   assert.deepEqual(new Set(canon.permissions.allow), new Set(["Bash(live)", "Bash(canon)"]));
   assert.ok(!canon.trustedDirectories, "canonical holds permissions only");
+  // The 3-way base snapshot is written for next time — and gitignored.
+  const base = JSON.parse(await readFile(path.join(sb.wormHome, ".sync-global-settings.base.json"), "utf8"));
+  assert.deepEqual(new Set(base.permissions.allow), new Set(["Bash(live)", "Bash(canon)"]));
+  const gitignore = await readFile(path.join(sb.wormHome, ".gitignore"), "utf8");
+  assert.match(gitignore, /^\.sync-global-settings\.base\.json$/m, "base snapshot is gitignored");
+});
+
+test("syncGlobalPermissions propagates a removal from the live file (3-way merge)", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init"]);
+  await writeFile(
+    path.join(sb.wormHome, "config.json"),
+    JSON.stringify({ recipes: { syncGlobalPermissions: {} } })
+  );
+
+  const liveFile = path.join(sb.wormHome, ".claude", "settings.json");
+  const canonFile = path.join(sb.wormHome, "shared", ".claude", "settings.json");
+  await mkdir(path.dirname(liveFile), { recursive: true });
+  await mkdir(path.dirname(canonFile), { recursive: true });
+
+  // Round 1: both hold [A, B] → establishes the base snapshot.
+  await writeFile(liveFile, JSON.stringify({ permissions: { allow: ["Bash(A)", "Bash(B)"] } }));
+  await writeFile(canonFile, JSON.stringify({ permissions: { allow: ["Bash(A)", "Bash(B)"] } }));
+  await sb.worm(["hook", "trigger", "--global", "session-start"]);
+
+  // The user removes B from the LIVE file (e.g. an agent tightened permissions).
+  await writeFile(liveFile, JSON.stringify({ permissions: { allow: ["Bash(A)"] } }));
+  await sb.worm(["hook", "trigger", "--global", "session-start"]);
+
+  // Under the OLD grow-only union B would come back; the 3-way merge drops it.
+  const live = JSON.parse(await readFile(liveFile, "utf8"));
+  const canon = JSON.parse(await readFile(canonFile, "utf8"));
+  assert.deepEqual(live.permissions.allow, ["Bash(A)"], "removal survives on the live file");
+  assert.deepEqual(canon.permissions.allow, ["Bash(A)"], "removal propagated to the canonical file");
+});
+
+test("syncGlobalPermissions: an addition on one side still flows while a removal on the other propagates", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init"]);
+  await writeFile(
+    path.join(sb.wormHome, "config.json"),
+    JSON.stringify({ recipes: { syncGlobalPermissions: {} } })
+  );
+
+  const liveFile = path.join(sb.wormHome, ".claude", "settings.json");
+  const canonFile = path.join(sb.wormHome, "shared", ".claude", "settings.json");
+  await mkdir(path.dirname(liveFile), { recursive: true });
+  await mkdir(path.dirname(canonFile), { recursive: true });
+
+  // Base = [A, B].
+  await writeFile(liveFile, JSON.stringify({ permissions: { allow: ["Bash(A)", "Bash(B)"] } }));
+  await writeFile(canonFile, JSON.stringify({ permissions: { allow: ["Bash(A)", "Bash(B)"] } }));
+  await sb.worm(["hook", "trigger", "--global", "session-start"]);
+
+  // Live removes B; canon (e.g. pulled from another machine) adds C.
+  await writeFile(liveFile, JSON.stringify({ permissions: { allow: ["Bash(A)"] } }));
+  await writeFile(canonFile, JSON.stringify({ permissions: { allow: ["Bash(A)", "Bash(B)", "Bash(C)"] } }));
+  await sb.worm(["hook", "trigger", "--global", "session-start"]);
+
+  const live = JSON.parse(await readFile(liveFile, "utf8"));
+  assert.deepEqual(new Set(live.permissions.allow), new Set(["Bash(A)", "Bash(C)"]), "B removed, C added");
+});
+
+test("syncGlobalPermissions: sandbox is now bidirectional (last-edited-wins, not one-way)", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init"]);
+  await writeFile(
+    path.join(sb.wormHome, "config.json"),
+    JSON.stringify({ recipes: { syncGlobalPermissions: {} } })
+  );
+
+  const liveFile = path.join(sb.wormHome, ".claude", "settings.json");
+  const canonFile = path.join(sb.wormHome, "shared", ".claude", "settings.json");
+  await mkdir(path.dirname(liveFile), { recursive: true });
+  await mkdir(path.dirname(canonFile), { recursive: true });
+
+  // Base: both agree sandbox is enabled.
+  await writeFile(liveFile, JSON.stringify({ permissions: {}, sandbox: { enabled: true } }));
+  await writeFile(canonFile, JSON.stringify({ permissions: {}, sandbox: { enabled: true } }));
+  await sb.worm(["hook", "trigger", "--global", "session-start"]);
+
+  // The user edits sandbox in the LIVE file only. The old recipe forced canonical
+  // onto live one-way and reverted this; the 3-way merge keeps the live edit and
+  // pushes it to canonical.
+  await writeFile(liveFile, JSON.stringify({ permissions: {}, sandbox: { enabled: false } }));
+  await sb.worm(["hook", "trigger", "--global", "session-start"]);
+
+  const live = JSON.parse(await readFile(liveFile, "utf8"));
+  const canon = JSON.parse(await readFile(canonFile, "utf8"));
+  assert.deepEqual(live.sandbox, { enabled: false }, "live sandbox edit preserved");
+  assert.deepEqual(canon.sandbox, { enabled: false }, "live sandbox edit propagated to canonical");
 });
 
 test("notifyPendingInput runs through the global dispatch and exits cleanly (no fire on sub-agent events)", async (t) => {

@@ -229,25 +229,36 @@ async function ensureGlobalRoot(): Promise<void> {
 
   // Machine-local state must never sync across machines (it holds absolute slot
   // paths / per-host markers) — exclude it so the `autosync` recipe doesn't
-  // commit & push it and create cross-machine conflicts on every node.
-  await writeTextIfMissing(
-    path.join(root, ".gitignore"),
-    [
-      "# Machine-local worm state — not meant to sync across machines.",
-      ".managed-links.json",
-      ".detached-links.json",
-      ".autosync-conflict.json",
-      ".autosync-last-push",
-      "projects/*/logs/",
-      "",
-    ].join("\n")
-  );
+  // commit & push it and create cross-machine conflicts on every node. Reconcile
+  // (append missing lines) rather than write-if-missing, so a re-run of `init`
+  // heals older installs whose .gitignore predates a newly-added entry.
+  await ensureGitignoreLines(path.join(root, ".gitignore"), [
+    "# Machine-local worm state — not meant to sync across machines.",
+    ".managed-links.json",
+    ".detached-links.json",
+    ".autosync-conflict.json",
+    ".autosync-last-push",
+    ".sync-global-settings.base.json",
+    "projects/*/logs/",
+  ]);
 
   await initGitRepoIfNeeded(root);
 
   if (firstRun) {
     logger.info(`🪐 First run — created your wormhole at ${logger.dim(root)}`);
   }
+}
+
+// Ensure every line in `lines` is present in the .gitignore at `file`, appending
+// any that are missing (order-preserving, no duplicates). Idempotent.
+async function ensureGitignoreLines(file: string, lines: string[]): Promise<void> {
+  let current = "";
+  if (await pathExists(file)) current = await fs.readFile(file, "utf8");
+  const present = new Set(current.split(/\r?\n/));
+  const missing = lines.filter((line) => !present.has(line));
+  if (missing.length === 0) return;
+  const prefix = current === "" || current.endsWith("\n") ? current : current + "\n";
+  await fs.writeFile(file, prefix + missing.join("\n") + "\n");
 }
 
 async function initGitRepoIfNeeded(root: string): Promise<void> {
