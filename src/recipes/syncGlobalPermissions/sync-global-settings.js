@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 // The `syncGlobalPermissions` recipe's worker, shipped WITH worm. The GLOBAL
-// analogue of the per-project `syncPermissions` recipe: keeps the `permissions`
-// and `sandbox` blocks of the user-level ~/.claude/settings.json in step with a
-// git-tracked canonical copy in the worm repo, so global allow/deny rules are
-// version-controlled (and synced across machines once autosync pushes them).
+// analogue of the per-project `syncPermissions` recipe: keeps a configurable set
+// of top-level keys of the user-level ~/.claude/settings.json (default:
+// `permissions` + `sandbox`) in step with a git-tracked canonical copy in the
+// worm repo, so those settings are version-controlled (and synced across machines
+// once autosync pushes them). The key set is passed as CLI args by the recipe
+// wiring, e.g. `node sync-global-settings.js permissions sandbox env tui`.
 //
 // The live global file can't be a symlink into worm — Claude's permission dialog
 // edits it in place — hence this copy-and-merge. IMPORTANT: the live file also
@@ -146,6 +148,36 @@ function ensureIgnored(name) {
   fs.writeFileSync(gitignore, current.replace(/\n?$/, "\n") + name + "\n");
 }
 
+// `hooks` is never synced (belt-and-suspenders with the config schema): worm owns
+// it per-machine and it carries machine-specific absolute paths.
+const NEVER_SYNC = new Set(["hooks"]);
+// The two structured blocks worm has always synced, regardless of mode.
+const ALWAYS_SYNC = ["permissions", "sandbox"];
+// Explicit key set from CLI args (recipe config `keys`), else auto mode.
+const EXPLICIT_KEYS = process.argv.slice(2).filter((k) => !NEVER_SYNC.has(k));
+
+// A value cheap enough to overwrite wholesale: string/number/boolean/null. Arrays
+// and objects are structural (env, extraKnownMarketplaces, trustedDirectories, …)
+// and stay machine-local unless named explicitly.
+const isPrimitive = (v) => v === null || typeof v !== "object";
+
+// Resolve which top-level keys to sync this run. Explicit config wins; otherwise
+// AUTO mode = permissions + sandbox + every top-level primitive-valued key found
+// on either side (so scalar prefs like effortLevel/tui sync with zero config,
+// while structural keys stay local).
+function syncedKeys(live, canon, base) {
+  if (EXPLICIT_KEYS.length) return EXPLICIT_KEYS;
+  const keys = new Set(ALWAYS_SYNC);
+  for (const src of [live, canon, base]) {
+    if (!src) continue;
+    for (const [k, v] of Object.entries(src)) {
+      if (NEVER_SYNC.has(k) || ALWAYS_SYNC.includes(k)) continue;
+      if (isPrimitive(v)) keys.add(k);
+    }
+  }
+  return [...keys];
+}
+
 function main() {
   const live = readJson(liveFile);
   if (live === null) return; // no global settings file — nothing to sync
@@ -153,18 +185,21 @@ function main() {
   const base = readJson(baseFile) || {};
   const liveNewer = mtime(liveFile) >= mtime(canonicalFile);
 
-  const mergedPermissions = mergePermissions(
-    base.permissions,
-    live.permissions,
-    canon.permissions,
-    liveNewer
-  );
-  const mergedSandbox = mergeScalar(base.sandbox, live.sandbox, canon.sandbox, liveNewer);
-  const sandboxKey = mergedSandbox !== undefined ? { sandbox: mergedSandbox } : {};
+  // The synced surface: each key three-way-merged. `permissions` gets the nested
+  // set/scalar merge; every other key is merged as an opaque value (last-edited-
+  // file wins), matching how `sandbox` has always behaved.
+  const surface = {};
+  for (const key of syncedKeys(live, canon, base)) {
+    if (key === "permissions") {
+      surface.permissions = mergePermissions(base.permissions, live.permissions, canon.permissions, liveNewer);
+    } else {
+      const merged = mergeScalar(base[key], live[key], canon[key], liveNewer);
+      if (merged !== undefined) surface[key] = merged;
+    }
+  }
+  const mergedPermissions = surface.permissions || {};
 
-  const surface = { permissions: mergedPermissions, ...sandboxKey };
-
-  // Canonical holds the tracked surface (permissions + sandbox); the live file
+  // Canonical holds only the tracked surface (the configured keys); the live file
   // keeps every other key untouched, with only that surface overwritten.
   const wroteCanon = writeIfChanged(canonicalFile, JSON.stringify(surface, null, 2) + "\n");
   const wroteLive = writeIfChanged(

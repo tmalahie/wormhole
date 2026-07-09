@@ -43,7 +43,22 @@ export const ShareMemoryRecipeSchema = z.object({}).strict();
 export const NotifyPendingInputRecipeSchema = z
   .object({ openOnClick: z.string().default("") })
   .strict();
-export const SyncGlobalPermissionsRecipeSchema = z.object({}).strict();
+// `keys` — the top-level ~/.claude/settings.json keys kept in step with the
+// git-tracked canonical copy. Omit for AUTO mode: permissions + sandbox + every
+// top-level primitive-valued key (strings/numbers/booleans like effortLevel/tui),
+// leaving structural keys (env, extraKnownMarketplaces, trustedDirectories) local.
+// Set it to pin an explicit list instead. `hooks` is refused either way: worm owns
+// that surface via `worm sync --global` and it holds machine-specific paths.
+export const SyncGlobalPermissionsRecipeSchema = z
+  .object({
+    keys: z
+      .array(z.string())
+      .refine((keys) => !keys.includes("hooks"), {
+        message: "`hooks` cannot be synced — worm manages it per-machine via `worm sync --global`",
+      })
+      .optional(),
+  })
+  .strict();
 
 // autosync is a GLOBAL-scope recipe (the others are project-scope): declared in
 // the GLOBAL ~/.worm/config.json `recipes` block and wired by `worm sync --global`

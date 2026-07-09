@@ -9,7 +9,7 @@
 // `focusPath` in `focusApp`, e.g. focusing the editor window for that folder),
 // else falls back to `osascript`. Linux: `notify-send`. `focusApp` is a macOS
 // application name (e.g. "Visual Studio Code", "Cursor"); empty → no click action.
-import { existsSync } from "node:fs";
+import { existsSync, appendFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 
 // Wrap a value in single quotes for safe interpolation into a shell command,
@@ -28,6 +28,17 @@ function findTerminalNotifier() {
 
 export function notify({ title, message, sound = false, focusPath = "", focusApp = "" } = {}) {
   try {
+    // Test seam: when WORM_NOTIFY_SINK is set, record the payload instead of
+    // firing a real OS notification. Lets the suite assert whether (and with
+    // what) a notification would have fired without popping toasts during a run.
+    // Unset in normal use, so this is a no-op in production.
+    if (process.env.WORM_NOTIFY_SINK) {
+      appendFileSync(
+        process.env.WORM_NOTIFY_SINK,
+        JSON.stringify({ title, message, sound, focusPath, focusApp }) + "\n"
+      );
+      return;
+    }
     if (process.platform === "darwin") {
       const tn = findTerminalNotifier();
       if (tn) {

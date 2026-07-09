@@ -390,16 +390,20 @@ const notifyPendingInputRecipe: Recipe<NotifyPendingInputRecipeConfig> = {
 };
 
 // --- the syncGlobalPermissions recipe (GLOBAL scope) -------------------------
-// The global analogue of syncPermissions: version-controls the `permissions` block
-// of ~/.claude/settings.json by merging it with a git-tracked canonical copy in
-// ~/.worm. Bidirectional + idempotent, so it runs on every session boundary/turn.
+// The global analogue of syncPermissions: version-controls a configurable set of
+// top-level ~/.claude/settings.json keys (auto: permissions + sandbox + primitives)
+// by three-way-merging them with a git-tracked canonical copy in ~/.worm.
+// Bidirectional + idempotent, so it runs on every session boundary/turn.
 const syncGlobalPermissionsRecipe: Recipe<SyncGlobalPermissionsRecipeConfig> = {
   name: "syncGlobalPermissions",
   scope: "global",
   select: (recipes) => recipes.syncGlobalPermissions,
-  hooks() {
+  hooks(_ctx, cfg) {
     const script = packagedRecipeScript("syncGlobalPermissions", "sync-global-settings.js");
-    const command = `node "${script}"`;
+    // Pass the configured key set as CLI args; the script defaults to
+    // permissions + sandbox when none are given.
+    const keys = cfg?.keys?.length ? " " + cfg.keys.map((k) => `"${k}"`).join(" ") : "";
+    const command = `node "${script}"${keys}`;
     return {
       "session-start": [{ command }],
       stop: [{ command }],

@@ -42,7 +42,8 @@ function workspaceRootFromTranscript(transcriptPath) {
 // yields and auto-resumes as each agent reports in. Those intermediate yields
 // aren't "your turn" — we want a SINGLE notification, on the final response.
 // Scoped to the current user turn so it only affects turns that used background
-// agents. Signals: launch = "Async agent launched successfully.\nagentId: <id>",
+// agents. Signals: launch = "Async agent launched successfully. (…)\nagentId: <id>"
+// (a parenthetical metadata note now sits between the two, so match non-greedily),
 // completion = <task-id><id></task-id>; pending = launched ids with no completion.
 function backgroundTurnState(transcriptPath) {
   const none = { usedBg: false, pending: 0, finalText: "" };
@@ -102,7 +103,7 @@ function backgroundTurnState(transcriptPath) {
   const launched = new Set();
   const completed = new Set();
   let m;
-  const reLaunch = /Async agent launched successfully\.\s*agentId:\s*([0-9a-f]+)/g;
+  const reLaunch = /Async agent launched successfully\.[\s\S]*?agentId:\s*([0-9a-f]+)/g;
   const reDone = /<task-id>\s*([0-9a-f]+)\s*<\/task-id>/g;
   while ((m = reLaunch.exec(blob))) launched.add(m[1]);
   while ((m = reDone.exec(blob))) completed.add(m[1]);

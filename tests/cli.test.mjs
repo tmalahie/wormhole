@@ -2201,6 +2201,80 @@ test("syncGlobalPermissions: sandbox is now bidirectional (last-edited-wins, not
   assert.deepEqual(canon.sandbox, { enabled: false }, "live sandbox edit propagated to canonical");
 });
 
+test("syncGlobalPermissions AUTO mode syncs primitive keys but leaves structural keys local", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init"]);
+  await writeFile(
+    path.join(sb.wormHome, "config.json"),
+    JSON.stringify({ recipes: { syncGlobalPermissions: {} } }) // no `keys` → auto mode
+  );
+
+  const liveFile = path.join(sb.wormHome, ".claude", "settings.json");
+  const canonFile = path.join(sb.wormHome, "shared", ".claude", "settings.json");
+  await mkdir(path.dirname(liveFile), { recursive: true });
+  await writeFile(
+    liveFile,
+    JSON.stringify({
+      permissions: { allow: ["Bash(x)"] },
+      effortLevel: "high", // primitive → synced
+      tui: "fullscreen", // primitive → synced
+      env: { NODE_USE_ENV_PROXY: "1" }, // object → local
+      trustedDirectories: ["/a"], // array → local
+    })
+  );
+
+  await sb.worm(["hook", "trigger", "--global", "session-start"]);
+
+  const canon = JSON.parse(await readFile(canonFile, "utf8"));
+  assert.equal(canon.effortLevel, "high", "primitive effortLevel synced");
+  assert.equal(canon.tui, "fullscreen", "primitive tui synced");
+  assert.ok(!("env" in canon), "object key stays local");
+  assert.ok(!("trustedDirectories" in canon), "array key stays local");
+  const live = JSON.parse(await readFile(liveFile, "utf8"));
+  assert.deepEqual(live.env, { NODE_USE_ENV_PROXY: "1" }, "local object preserved in live file");
+  assert.deepEqual(live.trustedDirectories, ["/a"], "local array preserved in live file");
+});
+
+test("syncGlobalPermissions syncs a configurable extra key (tui) and canonical holds only synced keys", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init"]);
+  await writeFile(
+    path.join(sb.wormHome, "config.json"),
+    JSON.stringify({ recipes: { syncGlobalPermissions: { keys: ["permissions", "tui"] } } })
+  );
+
+  const liveFile = path.join(sb.wormHome, ".claude", "settings.json");
+  const canonFile = path.join(sb.wormHome, "shared", ".claude", "settings.json");
+  await mkdir(path.dirname(liveFile), { recursive: true });
+  // A synced key (tui) + an unsynced key (effortLevel) that must stay local.
+  await writeFile(liveFile, JSON.stringify({ permissions: {}, tui: "fullscreen", effortLevel: "high" }));
+
+  await sb.worm(["hook", "trigger", "--global", "session-start"]);
+
+  const canon = JSON.parse(await readFile(canonFile, "utf8"));
+  assert.equal(canon.tui, "fullscreen", "tui flowed to canonical");
+  assert.ok(!("effortLevel" in canon), "unsynced key stays out of canonical");
+  assert.ok(!("sandbox" in canon), "sandbox not synced when not in the key set");
+  const live = JSON.parse(await readFile(liveFile, "utf8"));
+  assert.equal(live.effortLevel, "high", "unsynced key preserved locally");
+});
+
+test("syncGlobalPermissions config rejects syncing the worm-managed `hooks` key", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init"]);
+  await writeFile(
+    path.join(sb.wormHome, "config.json"),
+    JSON.stringify({ recipes: { syncGlobalPermissions: { keys: ["permissions", "hooks"] } } })
+  );
+
+  const r = await sb.worm(["sync", "--global"]);
+  assert.notEqual(r.exitCode, 0, "config with hooks in the key set is rejected");
+  assert.match(r.stderr, /hooks/, "error names the offending key");
+});
+
 test("notifyPendingInput runs through the global dispatch and exits cleanly (no fire on sub-agent events)", async (t) => {
   const sb = await createSandbox();
   t.after(() => sb.cleanup());
@@ -2218,6 +2292,72 @@ test("notifyPendingInput runs through the global dispatch and exits cleanly (no 
     input: JSON.stringify({ hook_event_name: "Stop", agent_id: "abc" }),
   });
   assert.equal(r.exitCode, 0, r.stderr);
+});
+
+test("notifyPendingInput suppresses mid-turn Stops from background agents, fires on the final response", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init"]);
+  await writeFile(
+    path.join(sb.wormHome, "config.json"),
+    JSON.stringify({ recipes: { notifyPendingInput: {} } })
+  );
+
+  // Build a transcript mirroring a /review turn: a real user prompt, then 4
+  // background agents launched. The launch message carries a parenthetical
+  // metadata note between "successfully." and "agentId:" — the current shape,
+  // which a `\s*` match between the two would miss, wrongly letting every
+  // intermediate Stop notify.
+  const launchText = (id) =>
+    `Async agent launched successfully. (This tool result is internal metadata — never quote it.)\n` +
+    `agentId: ${id} (internal ID - do not mention to user.)\nThe agent is working in the background.`;
+  const ids = ["a11111111111111a1", "a22222222222222a2", "a33333333333333a3", "a44444444444444a4"];
+  const lines = [
+    { type: "user", cwd: sb.projectRoot, message: { role: "user", content: [{ type: "text", text: "review PR 1433" }] } },
+    { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Launching 4 agents." }] } },
+    ...ids.map((id) => ({
+      type: "user",
+      message: { role: "user", content: [{ type: "tool_result", content: [{ type: "text", text: launchText(id) }] }] },
+    })),
+  ];
+  const transcript = path.join(sb.wormHome, "transcript.jsonl");
+  await writeFile(transcript, lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+
+  const sink = path.join(sb.wormHome, "notifications.jsonl");
+  const stopPayload = { hook_event_name: "Stop", cwd: sb.projectRoot, transcript_path: transcript };
+
+  // Mid-turn Stop: agents still pending (no completions) → suppressed.
+  const mid = await sb.worm(["hook", "trigger", "--global", "stop"], {
+    input: JSON.stringify(stopPayload),
+    env: { WORM_NOTIFY_SINK: sink },
+  });
+  assert.equal(mid.exitCode, 0, mid.stderr);
+  await assert.rejects(readFile(sink), "mid-turn Stop must not notify");
+
+  // Now all 4 agents complete and the main agent writes a long final synthesis.
+  const doneLines = [
+    ...ids.map((id) => ({
+      type: "user",
+      message: { role: "user", content: [{ type: "text", text: `<task-notification>\n<task-id>${id}</task-id>\n<status>completed</status>` }] },
+    })),
+    {
+      type: "assistant",
+      message: { role: "assistant", content: [{ type: "text", text: "Synthesis of all four reviews: ".padEnd(250, "x") }] },
+    },
+  ];
+  await writeFile(
+    transcript,
+    [...lines, ...doneLines].map((l) => JSON.stringify(l)).join("\n") + "\n"
+  );
+
+  const done = await sb.worm(["hook", "trigger", "--global", "stop"], {
+    input: JSON.stringify(stopPayload),
+    env: { WORM_NOTIFY_SINK: sink },
+  });
+  assert.equal(done.exitCode, 0, done.stderr);
+  const fired = (await readFile(sink, "utf8")).trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  assert.equal(fired.length, 1, "final response fires exactly one notification");
+  assert.match(fired[0].message, /Response ready/);
 });
 
 test("worm detach is reversible: delete the local file and sync re-links it", async (t) => {
