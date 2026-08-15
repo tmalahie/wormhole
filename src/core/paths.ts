@@ -72,6 +72,18 @@ export function globalProjectFile(projectName: string, fileName: string): string
   return path.join(globalProjectDir(projectName), fileName);
 }
 
+/**
+ * The `syncPermissions` recipe's three-way base snapshot for ONE slot
+ * (`~/.worm/projects/<name>/.sync-permissions.base.<slot>.json`). Per-slot because
+ * each slot diverges from the canonical store independently, and machine-local
+ * (gitignored by `ensureGlobalRoot`) because every machine has a slot called
+ * `main` — mirroring `.sync-global-settings.base.json` at the global scope.
+ */
+export function syncPermissionsBaseFile(projectName: string, slotName: string): string {
+  const safe = slotName.replace(/[^A-Za-z0-9_-]/g, "-");
+  return globalProjectFile(projectName, `.sync-permissions.base.${safe}.json`);
+}
+
 export function globalProjectScriptsDir(projectName: string): string {
   return path.join(globalProjectDir(projectName), SCRIPTS_DIR_NAME);
 }

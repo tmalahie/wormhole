@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFile, readlink, realpath, stat, writeFile, mkdir, chmod } from "node:fs/promises";
+import { readFile, readlink, realpath, stat, writeFile, mkdir, chmod, utimes } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -575,7 +575,8 @@ test("syncPermissions script unions permissions while preserving other keys", as
     })
   );
 
-  const run = await execa("node", [script, canonical], {
+  const base = path.join(sb.projectRoot, ".worm", "permissions.base.json"); // no base yet → union
+  const run = await execa("node", [script, canonical, base], {
     cwd: sb.projectRoot,
     env: { ...process.env, CLAUDE_PROJECT_DIR: sb.projectRoot },
     reject: false,
@@ -598,6 +599,42 @@ test("syncPermissions script unions permissions while preserving other keys", as
     new Set(canonAfter.permissions.allow),
     new Set(["Bash(ls:*)", "Bash(git status:*)"])
   );
+});
+
+test("syncPermissions propagates a revoked rule instead of resurrecting it (3-way base)", async (t) => {
+  const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
+  t.after(() => rm(templateDir, { recursive: true, force: true }));
+  await writeFile(
+    path.join(templateDir, "config.json"),
+    JSON.stringify({ shared_paths: [], hooks: {}, recipes: { syncPermissions: {} } })
+  );
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init", "--template", templateDir]);
+
+  const canonical = path.join(
+    sb.wormHome, "projects", path.basename(await realpath(sb.projectRoot)), ".claude", "settings.local.json"
+  );
+  await mkdir(path.dirname(canonical), { recursive: true });
+  await writeFile(canonical, JSON.stringify({ permissions: { allow: ["Bash(ls:*)", "Bash(rm:*)"] } }));
+  const localFile = path.join(sb.projectRoot, ".claude", "settings.local.json");
+
+  // First sync establishes the base: both sides agree on the two rules.
+  await sb.worm(["hook", "trigger", "session-start"]);
+  const seeded = JSON.parse(await readFile(localFile, "utf8"));
+  assert.deepEqual(new Set(seeded.permissions.allow), new Set(["Bash(ls:*)", "Bash(rm:*)"]));
+
+  // The user revokes one rule in the slot. The old union-only merge pulled it
+  // straight back from canonical; the 3-way merge must propagate the removal.
+  seeded.permissions.allow = ["Bash(ls:*)"];
+  await writeFile(localFile, JSON.stringify(seeded));
+  await sb.worm(["hook", "trigger", "session-start"]);
+
+  const after = JSON.parse(await readFile(localFile, "utf8"));
+  const canonAfter = JSON.parse(await readFile(canonical, "utf8"));
+  assert.deepEqual(after.permissions.allow, ["Bash(ls:*)"], "revoked rule is not resurrected");
+  assert.deepEqual(canonAfter.permissions.allow, ["Bash(ls:*)"], "removal propagated to canonical");
+  assert.ok(after.hooks.SessionStart, "worm's own dispatcher entry is untouched");
 });
 
 const claudeSlug = (p) => p.replace(/[/.]/g, "-");
@@ -2261,7 +2298,158 @@ test("syncGlobalPermissions syncs a configurable extra key (tui) and canonical h
   assert.equal(live.effortLevel, "high", "unsynced key preserved locally");
 });
 
-test("syncGlobalPermissions config rejects syncing the worm-managed `hooks` key", async (t) => {
+test("syncGlobalPermissions merges an object-valued key PER LEAF, not as an opaque value", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init"]);
+  await writeFile(
+    path.join(sb.wormHome, "config.json"),
+    JSON.stringify({ recipes: { syncGlobalPermissions: { keys: ["permissions", "autoMode"] } } })
+  );
+
+  const liveFile = path.join(sb.wormHome, ".claude", "settings.json");
+  const canonFile = path.join(sb.wormHome, "shared", ".claude", "settings.json");
+  await mkdir(path.dirname(liveFile), { recursive: true });
+  await mkdir(path.dirname(canonFile), { recursive: true });
+
+  // Base: both sides agree on one soft_deny rule.
+  const agreed = { permissions: {}, autoMode: { soft_deny: ["rule-shared"] } };
+  await writeFile(liveFile, JSON.stringify(agreed));
+  await writeFile(canonFile, JSON.stringify(agreed));
+  await sb.worm(["hook", "trigger", "--global", "session-start"]);
+
+  // Now BOTH diverge, in DIFFERENT sub-keys — the case an opaque last-edited-wins
+  // resolved by discarding one side's whole autoMode block.
+  await writeFile(
+    liveFile,
+    JSON.stringify({ permissions: {}, autoMode: { soft_deny: ["rule-shared"], environment: ["from-live"] } })
+  );
+  await writeFile(
+    canonFile,
+    JSON.stringify({ permissions: {}, autoMode: { soft_deny: ["rule-shared", "from-canon"] } })
+  );
+  // Make canonical unambiguously the more recently edited file, so a fallback to
+  // last-edited-wins would drop the live side's addition.
+  const past = new Date(Date.now() - 60_000);
+  await utimes(liveFile, past, past);
+
+  await sb.worm(["hook", "trigger", "--global", "session-start"]);
+
+  const live = JSON.parse(await readFile(liveFile, "utf8"));
+  assert.deepEqual(
+    new Set(live.autoMode.soft_deny),
+    new Set(["rule-shared", "from-canon"]),
+    "canonical's array addition merged in"
+  );
+  assert.deepEqual(live.autoMode.environment, ["from-live"], "live's sibling key survived the merge");
+  const canon = JSON.parse(await readFile(canonFile, "utf8"));
+  assert.deepEqual(canon.autoMode.environment, ["from-live"], "…and propagated to canonical");
+});
+
+test("syncGlobalPermissions syncs the user's own hooks but never worm's dispatcher entries", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init"]);
+  await writeFile(
+    path.join(sb.wormHome, "config.json"),
+    JSON.stringify({ recipes: { syncGlobalPermissions: { keys: ["permissions", "hooks"] } } })
+  );
+  await sb.worm(["sync", "--global"]); // wires worm's own `hook trigger --global` entries
+
+  const liveFile = path.join(sb.wormHome, ".claude", "settings.json");
+  const canonFile = path.join(sb.wormHome, "shared", ".claude", "settings.json");
+  const live = JSON.parse(await readFile(liveFile, "utf8"));
+  assert.ok(
+    live.hooks.SessionStart.some((e) => e.hooks[0].command.includes("hook trigger")),
+    "worm wired its own entry"
+  );
+  // The user adds their own hook alongside worm's.
+  live.hooks.SessionStart.push({ hooks: [{ type: "command", command: "bash ~/.worm/shared/scripts/mine.sh" }] });
+  await writeFile(liveFile, JSON.stringify(live));
+
+  await sb.worm(["hook", "trigger", "--global", "session-start"]);
+
+  const canon = JSON.parse(await readFile(canonFile, "utf8"));
+  const canonCmds = canon.hooks.SessionStart.map((e) => e.hooks[0].command);
+  assert.deepEqual(canonCmds, ["bash ~/.worm/shared/scripts/mine.sh"], "only the user's entry is tracked");
+  assert.ok(
+    !JSON.stringify(canon.hooks).includes("hook trigger"),
+    "worm's dispatcher entries never reach the canonical copy"
+  );
+
+  // Re-wiring must not fight the sync: worm's entry stays, unduplicated, and the
+  // user's entry survives both writers.
+  await sb.worm(["sync", "--global"]);
+  await sb.worm(["hook", "trigger", "--global", "session-start"]);
+  const after = JSON.parse(await readFile(liveFile, "utf8"));
+  const cmds = after.hooks.SessionStart.map((e) => e.hooks[0].command);
+  assert.equal(cmds.filter((c) => c.includes("hook trigger")).length, 1, "no duplicate worm entry");
+  assert.ok(cmds.includes("bash ~/.worm/shared/scripts/mine.sh"), "user's hook survives re-wiring");
+});
+
+test('syncGlobalPermissions keys:"*" syncs every key but the denylist', async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init"]);
+  await writeFile(
+    path.join(sb.wormHome, "config.json"),
+    JSON.stringify({ recipes: { syncGlobalPermissions: { keys: "*" } } })
+  );
+
+  const liveFile = path.join(sb.wormHome, ".claude", "settings.json");
+  const canonFile = path.join(sb.wormHome, "shared", ".claude", "settings.json");
+  await mkdir(path.dirname(liveFile), { recursive: true });
+  await writeFile(
+    liveFile,
+    JSON.stringify({
+      permissions: { allow: ["Bash(x)"] },
+      autoMode: { soft_deny: ["a-rule"] }, // object → swept up by the wildcard
+      extraKnownMarketplaces: { m: { source: "github" } },
+      tui: "fullscreen",
+      env: { ANTHROPIC_API_KEY: "sk-secret" }, // denylisted → must stay local
+      trustedDirectories: ["/a"], // denylisted → must stay local
+    })
+  );
+
+  await sb.worm(["hook", "trigger", "--global", "session-start"]);
+
+  const canon = JSON.parse(await readFile(canonFile, "utf8"));
+  assert.deepEqual(canon.autoMode, { soft_deny: ["a-rule"] }, "structured key synced");
+  assert.deepEqual(canon.extraKnownMarketplaces, { m: { source: "github" } });
+  assert.equal(canon.tui, "fullscreen");
+  assert.ok(!("env" in canon), "env is denylisted — never reaches the git-tracked copy");
+  assert.ok(!("trustedDirectories" in canon), "trustedDirectories is denylisted");
+  assert.ok(!JSON.stringify(canon).includes("sk-secret"), "no credential leaked into the repo");
+  const live = JSON.parse(await readFile(liveFile, "utf8"));
+  assert.deepEqual(live.env, { ANTHROPIC_API_KEY: "sk-secret" }, "denylisted keys survive locally");
+  assert.deepEqual(live.trustedDirectories, ["/a"]);
+});
+
+test('syncGlobalPermissions keys:["*","env"] opts a denylisted key back in', async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init"]);
+  await writeFile(
+    path.join(sb.wormHome, "config.json"),
+    JSON.stringify({ recipes: { syncGlobalPermissions: { keys: ["*", "env"] } } })
+  );
+
+  const liveFile = path.join(sb.wormHome, ".claude", "settings.json");
+  const canonFile = path.join(sb.wormHome, "shared", ".claude", "settings.json");
+  await mkdir(path.dirname(liveFile), { recursive: true });
+  await writeFile(
+    liveFile,
+    JSON.stringify({ permissions: {}, env: { NODE_USE_ENV_PROXY: "1" }, trustedDirectories: ["/a"] })
+  );
+
+  await sb.worm(["hook", "trigger", "--global", "session-start"]);
+
+  const canon = JSON.parse(await readFile(canonFile, "utf8"));
+  assert.deepEqual(canon.env, { NODE_USE_ENV_PROXY: "1" }, "explicitly named key beats the denylist");
+  assert.ok(!("trustedDirectories" in canon), "the rest of the denylist still applies");
+});
+
+test("syncGlobalPermissions pulls a hooks entry that only the canonical copy has", async (t) => {
   const sb = await createSandbox();
   t.after(() => sb.cleanup());
   await sb.worm(["init"]);
@@ -2270,9 +2458,24 @@ test("syncGlobalPermissions config rejects syncing the worm-managed `hooks` key"
     JSON.stringify({ recipes: { syncGlobalPermissions: { keys: ["permissions", "hooks"] } } })
   );
 
-  const r = await sb.worm(["sync", "--global"]);
-  assert.notEqual(r.exitCode, 0, "config with hooks in the key set is rejected");
-  assert.match(r.stderr, /hooks/, "error names the offending key");
+  const liveFile = path.join(sb.wormHome, ".claude", "settings.json");
+  const canonFile = path.join(sb.wormHome, "shared", ".claude", "settings.json");
+  await mkdir(path.dirname(liveFile), { recursive: true });
+  await mkdir(path.dirname(canonFile), { recursive: true });
+  await writeFile(liveFile, JSON.stringify({ permissions: {} }));
+  // As if another machine pushed its hook through the worm repo.
+  await writeFile(
+    canonFile,
+    JSON.stringify({
+      permissions: {},
+      hooks: { Stop: [{ hooks: [{ type: "command", command: "bash from-other-machine.sh" }] }] },
+    })
+  );
+
+  await sb.worm(["hook", "trigger", "--global", "session-start"]);
+
+  const live = JSON.parse(await readFile(liveFile, "utf8"));
+  assert.equal(live.hooks.Stop[0].hooks[0].command, "bash from-other-machine.sh", "hook landed locally");
 });
 
 test("notifyPendingInput runs through the global dispatch and exits cleanly (no fire on sub-agent events)", async (t) => {

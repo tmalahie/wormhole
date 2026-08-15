@@ -17,6 +17,7 @@ import { ensureSymlink } from "./symlinks.js";
 import { hookEnv } from "./hooks.js";
 import {
   globalProjectFile,
+  syncPermissionsBaseFile,
   globalProjectMemoryDir,
   globalRoot,
   localLogsDir,
@@ -240,19 +241,29 @@ function logged(command: string, logFile: string, label: string): string {
 // sandbox recipe's) are left intact, which is what lets the two recipes share
 // the same settings.local.json.
 
+/** Render a recipe's `keys` config as quoted CLI args for its standalone worker.
+ *  The wildcard is passed through as the literal `"*"` (quoted, so no globbing)
+ *  and expanded by the worker, which is the side that can see the live files. */
+function keyArgs(keys: string[] | "*" | undefined): string {
+  const list = keys === "*" ? ["*"] : (keys ?? []);
+  return list.length > 0 ? " " + list.map((k) => `"${k}"`).join(" ") : "";
+}
+
 const syncPermissionsRecipe: Recipe<SyncPermissionsRecipeConfig> = {
   name: "syncPermissions",
   select: (recipes) => recipes.syncPermissions,
   // No artifacts: the sync script is worm-owned code that lives ONCE in the
   // package (parameterized at run time), never copied into a project.
-  hooks({ projectName }) {
+  hooks({ projectName, slot }, cfg) {
     const script = packagedRecipeScript("syncPermissions", "sync-claude-settings.js");
-    // The canonical union store lives in the PERSISTENT global profile (in
-    // ~/.worm — committed, shared across slots, surviving re-clones), NOT the
-    // ephemeral local .worm/recipes/. It's also where a user's accumulated
-    // allowlist already lives, so existing permissions are pulled in on first run.
+    // The canonical store lives in the PERSISTENT global profile (in ~/.worm —
+    // committed, shared across slots, surviving re-clones), NOT the ephemeral
+    // local .worm/recipes/. It's also where a user's accumulated allowlist
+    // already lives, so existing permissions are pulled in on first run.
     const canonical = globalProjectFile(projectName, path.join(".claude", "settings.local.json"));
-    const command = `node "${script}" "${canonical}"`;
+    // Three-way ancestor, one per slot (each diverges from canonical on its own).
+    const base = syncPermissionsBaseFile(projectName, slot.name);
+    const command = `node "${script}" "${canonical}" "${base}"${keyArgs(cfg?.keys)}`;
     // Same bidirectional sync on both boundaries: pull on start, push on end.
     return { "session-start": [{ command }], "session-end": [{ command }] };
   },
@@ -400,10 +411,9 @@ const syncGlobalPermissionsRecipe: Recipe<SyncGlobalPermissionsRecipeConfig> = {
   select: (recipes) => recipes.syncGlobalPermissions,
   hooks(_ctx, cfg) {
     const script = packagedRecipeScript("syncGlobalPermissions", "sync-global-settings.js");
-    // Pass the configured key set as CLI args; the script defaults to
-    // permissions + sandbox when none are given.
-    const keys = cfg?.keys?.length ? " " + cfg.keys.map((k) => `"${k}"`).join(" ") : "";
-    const command = `node "${script}"${keys}`;
+    // Pass the configured key set as CLI args; the script falls back to auto mode
+    // (permissions + sandbox + primitives) when none are given.
+    const command = `node "${script}"${keyArgs(cfg?.keys)}`;
     return {
       "session-start": [{ command }],
       stop: [{ command }],

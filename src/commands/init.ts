@@ -239,6 +239,7 @@ async function ensureGlobalRoot(): Promise<void> {
     ".autosync-conflict.json",
     ".autosync-last-push",
     ".sync-global-settings.base.json",
+    "projects/*/.sync-permissions.base.*.json",
     "projects/*/logs/",
   ]);
 

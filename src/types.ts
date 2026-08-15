@@ -29,8 +29,20 @@ export const SandboxRecipeSchema = z
   })
   .strict();
 
-// These recipes have no options yet — presence is the signal.
-export const SyncPermissionsRecipeSchema = z.object({}).strict();
+// The key set a sync recipe tracks: an explicit list, or `"*"` for "every
+// top-level key". `"*"` may also appear INSIDE the list, which is how you re-add
+// a key the wildcard excludes by default (`["*", "env"]`).
+export const SyncKeysSchema = z.union([z.literal("*"), z.array(z.string())]);
+
+// `keys` — the top-level settings.local.json keys kept in step across the
+// project's slots. Defaults to `["permissions"]`; `"*"` syncs every key (see
+// SyncGlobalPermissionsRecipeSchema for the wildcard's rules). Unlike the global
+// recipe there is no auto mode: a slot's settings.local.json is mostly
+// worm-generated territory, so widening it is a deliberate act. `hooks` may be
+// named — only the USER's own entries sync, worm's dispatch entries are filtered.
+export const SyncPermissionsRecipeSchema = z
+  .object({ keys: SyncKeysSchema.optional() })
+  .strict();
 export const ShareHistoryRecipeSchema = z.object({}).strict();
 export const ShareMemoryRecipeSchema = z.object({}).strict();
 // GLOBAL-scope (like autosync), declared in ~/.worm/config.json:
@@ -45,19 +57,22 @@ export const NotifyPendingInputRecipeSchema = z
   .strict();
 // `keys` — the top-level ~/.claude/settings.json keys kept in step with the
 // git-tracked canonical copy. Omit for AUTO mode: permissions + sandbox + every
-// top-level primitive-valued key (strings/numbers/booleans like effortLevel/tui),
-// leaving structural keys (env, extraKnownMarketplaces, trustedDirectories) local.
-// Set it to pin an explicit list instead. `hooks` is refused either way: worm owns
-// that surface via `worm sync --global` and it holds machine-specific paths.
+// top-level primitive-valued key (strings/numbers/booleans like effortLevel/tui).
+// Set it to pin an explicit list instead — the merge is recursive, so structural
+// keys (autoMode, extraKnownMarketplaces, hooks, …) merge per leaf and are safe
+// to name. They stay OUT of auto mode because whether they SHOULD follow you to
+// another machine is a judgement call, not because the merge can't handle them.
+// `"*"` takes that judgement in one go: every key syncs EXCEPT a small denylist
+// the worker owns (`env`, which is where an API key would live, and
+// `trustedDirectories`, which records a per-machine "I vetted this checkout"
+// decision). Name one of those alongside the wildcard (`["*", "env"]`) to opt it
+// back in. A wildcard also means keys Claude Code adds in FUTURE versions start
+// syncing on their own — that's the trade you're making by choosing it.
+// `hooks` is special-cased in the worker: only the user's own entries sync — the
+// `worm hook trigger …` entries are worm's, re-wired per machine by
+// `worm sync --global`, and never leave it.
 export const SyncGlobalPermissionsRecipeSchema = z
-  .object({
-    keys: z
-      .array(z.string())
-      .refine((keys) => !keys.includes("hooks"), {
-        message: "`hooks` cannot be synced — worm manages it per-machine via `worm sync --global`",
-      })
-      .optional(),
-  })
+  .object({ keys: SyncKeysSchema.optional() })
   .strict();
 
 // autosync is a GLOBAL-scope recipe (the others are project-scope): declared in
