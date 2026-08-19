@@ -34,6 +34,11 @@ export async function createSandbox() {
         ...process.env,
         WORM_HOME: opts.wormHome ?? wormHome,
         HOME: opts.home ?? wormHome,
+        // Assertions match on plain text, so the CLI must never colourize.
+        // picocolors enables colour on an inherited FORCE_COLOR *or* CI — both
+        // of which the parent process may well have — so pin NO_COLOR, which it
+        // checks first and which wins over either.
+        NO_COLOR: "1",
         ...opts.env,
       },
       // Always close the child's stdin (empty when no input). Hooks read stdin
