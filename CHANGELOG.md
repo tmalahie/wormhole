@@ -7,6 +7,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-19
+
+A "settings sync" release. Both permission-sync recipes graduate from a one-key
+union to a **recursive three-way merge over a configurable key set**, so
+revocations propagate and two machines editing different keys both win — and
+`autosync` stops mistaking a concurrent writer for a merge conflict.
+
+### Added
+
+- **`keys` on `syncGlobalPermissions`** — sync any set of top-level
+  `~/.claude/settings.json` keys, not just `permissions`. Omit it for **auto
+  mode** (`permissions` + `sandbox` + every top-level scalar, e.g. `effortLevel`,
+  `tui`), name keys explicitly to add structured ones (`autoMode`, `env`,
+  `hooks`, …), or set `"keys": "*"` for every key except a denylist — **`env`**
+  (where an API key would live, and the canonical copy is committed and pushed)
+  and **`trustedDirectories`** (a per-machine "I vetted this checkout" answer).
+  Name one alongside the wildcard — `["*", "env"]` — to opt it back in.
+- **`keys` on `syncPermissions`** (default `["permissions"]`) — the same control
+  for a slot's `settings.local.json`, wildcard included.
+- **The wildcard is expanded by the worker, not the wiring**, against the live
+  files — so a key a future Claude Code version introduces starts syncing on its
+  own, with no re-wire.
+- **`hooks` may now be synced.** Only *your* entries travel: the
+  `worm hook trigger …` entries are peeled off before the merge and re-attached
+  afterwards, keeping `worm sync --global` the single writer of that block.
+- **A shared merge engine** (`src/recipes/_lib/settings-merge.js`) behind both
+  recipes: arrays merge as sets (a rule leaving either file propagates as a
+  removal), objects merge **per key** (both sides' additions survive), and only a
+  scalar edited on both sides falls back to last-edited-file-wins by mtime. With
+  no base snapshot yet the merge degrades to a union, which never loses data.
+
+### Changed
+
+- **`syncPermissions` is a three-way merge, not a union.** It diffs against a
+  **per-slot** base snapshot (`.sync-permissions.base.<slot>.json`), so a rule you
+  **revoke** in one slot now propagates instead of being resurrected by the union
+  on the next session.
+- **`syncGlobalPermissions` auto mode reaches past `permissions`.** `sandbox` and
+  every top-level scalar now sync too, where 0.2.0 touched `permissions` alone —
+  so more of `~/.claude/settings.json` starts flowing to the git-tracked canonical
+  copy after this upgrade. Pin `"keys": ["permissions"]` to keep the old, narrower
+  behaviour. `sandbox` in particular is now bidirectional (last-edited-wins)
+  rather than one-way.
+- **`autosync` fetches *before* committing.** The slow network round-trip moves
+  out of the commit→rebase window, leaving a concurrent writer almost no room to
+  dirty the tree between the two.
+- **`worm init` reconciles `~/.worm/.gitignore`** — missing machine-local entries
+  are appended rather than written only when the file is absent, so re-running
+  `init` heals an older install. Both merge base snapshots are gitignored.
+- **`worm --version` reads `package.json` at runtime**, retiring the two-place
+  version bump that the 0.2.0 cut needed.
+
+### Fixed
+
+- **`notifyPendingInput` fired on sub-agent turns.** Claude Code now emits a
+  parenthetical metadata note between `Async agent launched successfully.` and
+  `agentId:`, which the launch-marker regex no longer matched — so a
+  background-agent turn looked finished and every intermediate `Stop` yield
+  notified. Matched non-greedily now: one notification, on the final response.
+- **`autosync` recorded false conflicts when a concurrent writer raced it.** A
+  `syncGlobalPermissions` run or a permission-dialog write landing inside
+  `~/.worm` mid-rebase makes `git rebase` bail non-zero with **no** real content
+  conflict. The racing write is now re-absorbed and the rebase retried (up to
+  three times); only a rebase that still fails with a clean tree — nothing new to
+  commit — is treated as a genuine conflict and marked for the human.
+- **The test suite no longer depends on the ambient environment for colour.**
+  Sandboxed CLI runs pin `NO_COLOR`, so output assertions hold whether or not the
+  parent process had a TTY, `FORCE_COLOR`, or `CI` set — the last of which broke
+  one test in CI.
+
 ## [0.2.0] - 2026-06-21
 
 A "flow rework" release: declarative **per-worktree environments**, a seam to use
@@ -76,5 +146,6 @@ machines.
 - Hook dispatch entries are now `worm hook trigger [--global] <event>` (see
   breaking changes above).
 
-[Unreleased]: https://github.com/tmalahie/wormhole/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/tmalahie/wormhole/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/tmalahie/wormhole/releases/tag/v0.3.0
 [0.2.0]: https://github.com/tmalahie/wormhole/releases/tag/v0.2.0
