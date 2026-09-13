@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Directory globs in `shared_paths`** — a tail ending in `/*` (e.g.
+  `".claude/skills/*"`) links each **child** of that store directory
+  individually instead of the directory itself, so the slot's parent dir stays a
+  real, git-tracked directory that can also hold entries committed to the repo.
+  New children are picked up by `worm sync` with no config change; removed ones
+  are pruned. `*` is allowed only as the whole final segment (anything else
+  raises a clean error), dot-prefixed children are skipped as a shell `*` would,
+  and a missing profile container is sprouted as an empty dir. Works with named
+  stores too. Motivating case: personal Claude skills sharing `.claude/skills/`
+  with skills the team commits to the repo.
+
+### Fixed
+
+- **`notifyPendingInput` names the slot the turn is actually in.** A session
+  resumed or moved to another slot keeps writing to the same transcript, and the
+  notification was labelled (and its click focused) from the transcript's
+  *opening* `cwd` — the worktree the work had left. It now reads the cwd of the
+  newest real user prompt: newest so a mid-session move is picked up, a prompt
+  because every other record carries the live cwd, which drifts into subfolders
+  on a `Bash cd` and would focus a new editor window rooted there. The transcript
+  is also parsed once now instead of once per lookup.
+
 ## [0.3.0] - 2026-08-19
 
 A "settings sync" release. Both permission-sync recipes graduate from a one-key

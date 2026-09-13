@@ -115,6 +115,8 @@ export const StoreSchema = z
 
 // A shared_path is either a bare tail (profile store) or `{ path, store }`
 // pulling that tail from a named store. `store` is optional → defaults to profile.
+// A tail ending in `/*` is a directory glob: each CHILD of that store dir is
+// linked individually, leaving the parent dir real in the slot (see stores.ts).
 export const SharedPathSchema = z.union([
   z.string().min(1),
   z.object({ path: z.string().min(1), store: z.string().min(1).optional() }).strict(),

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFile, readlink, realpath, stat, writeFile, mkdir, chmod, utimes } from "node:fs/promises";
+import { readFile, readlink, realpath, stat, lstat, writeFile, mkdir, chmod, utimes } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -215,6 +215,85 @@ test("worm sync reconciles links and prunes removed shared_paths via the manifes
   // Idempotent.
   const r2 = await sb.worm(["sync"]);
   assert.equal(r2.exitCode, 0, r2.stderr);
+});
+
+test("a `/*` shared_path links each child, keeps the parent real, and tracks adds/removes", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await createBranch(sb.projectRoot, "feature-a");
+
+  const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
+  t.after(() => rm(templateDir, { recursive: true, force: true }));
+  await writeFile(
+    path.join(templateDir, "config.json"),
+    JSON.stringify({ shared_paths: [".claude/skills/*"], hooks: {} })
+  );
+
+  // A skill committed to the REPO — the whole point of globbing: the slot's
+  // .claude/skills/ must stay a real dir that can hold repo-tracked entries.
+  const repoSkill = path.join(sb.projectRoot, ".claude", "skills", "committed");
+  await mkdir(repoSkill, { recursive: true });
+  await writeFile(path.join(repoSkill, "SKILL.md"), "in the repo\n");
+
+  await sb.worm(["init", "--template", templateDir]);
+
+  // Personal skills live in the profile; a dotfile must be skipped like a shell `*`.
+  const name = path.basename(sb.projectRoot);
+  const store = path.join(sb.wormHome, "projects", name, ".claude", "skills");
+  await stat(store); // missing profile container was sprouted
+  await mkdir(path.join(store, "daily"), { recursive: true });
+  await writeFile(path.join(store, "daily", "SKILL.md"), "personal\n");
+  await writeFile(path.join(store, ".DS_Store"), "junk");
+
+  await sb.worm(["universe", "add", "feature-a", "--skip-hook"]);
+  const r = await sb.worm(["sync"]);
+  assert.equal(r.exitCode, 0, r.stderr);
+
+  const root = await realpath(sb.projectRoot);
+  for (const slot of [root, siblingPath(root, 1)]) {
+    const link = await readlink(path.join(slot, ".claude", "skills", "daily"));
+    assert.match(link, /projects\/.+\/\.claude\/skills\/daily$/, "child is linked at the profile");
+    // The container itself is a real dir, not a symlink.
+    assert.equal(
+      (await lstat(path.join(slot, ".claude", "skills"))).isSymbolicLink(),
+      false,
+      "the globbed parent stays a real directory"
+    );
+    await assert.rejects(
+      stat(path.join(slot, ".claude", "skills", ".DS_Store")),
+      /ENOENT/,
+      "dot-prefixed children are skipped"
+    );
+  }
+  // Slot 0's committed skill is untouched (it only exists there — siblings
+  // branched before it was added).
+  assert.equal((await readFile(path.join(repoSkill, "SKILL.md"), "utf8")), "in the repo\n");
+  assert.equal((await lstat(repoSkill)).isSymbolicLink(), false);
+
+  // A new child needs no config change; a removed one is pruned.
+  await mkdir(path.join(store, "weekly"), { recursive: true });
+  await writeFile(path.join(store, "weekly", "SKILL.md"), "personal\n");
+  await rm(path.join(store, "daily"), { recursive: true, force: true });
+  const r2 = await sb.worm(["sync"]);
+  assert.equal(r2.exitCode, 0, r2.stderr);
+  await readlink(path.join(root, ".claude", "skills", "weekly"));
+  await assert.rejects(stat(path.join(root, ".claude", "skills", "daily")), /ENOENT/, "pruned");
+});
+
+test("a wildcard anywhere but the final segment is a clean config error", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+
+  const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
+  t.after(() => rm(templateDir, { recursive: true, force: true }));
+  await writeFile(
+    path.join(templateDir, "config.json"),
+    JSON.stringify({ shared_paths: [".claude/*/SKILL.md"], hooks: {} })
+  );
+
+  const r = await sb.worm(["init", "--template", templateDir]);
+  assert.notEqual(r.exitCode, 0);
+  assert.match(r.stderr + r.stdout, /Unsupported wildcard/);
 });
 
 test("worm init adopts existing local files into the profile and creates symlinks", async (t) => {
@@ -2561,6 +2640,52 @@ test("notifyPendingInput suppresses mid-turn Stops from background agents, fires
   const fired = (await readFile(sink, "utf8")).trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
   assert.equal(fired.length, 1, "final response fires exactly one notification");
   assert.match(fired[0].message, /Response ready/);
+});
+
+test("notifyPendingInput names the slot the turn is in, not the one the session opened in", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init"]);
+  await writeFile(
+    path.join(sb.wormHome, "config.json"),
+    JSON.stringify({ recipes: { notifyPendingInput: { openOnClick: "Cursor" } } })
+  );
+
+  // A session that started in slot 0 and was later resumed in slot 1: the
+  // transcript keeps recording, so its OPENING cwd names the slot the work has
+  // left. Interleaved records carry the live cwd, which drifts into subfolders
+  // (a `Bash cd`) — only the user's own prompts name the workspace itself.
+  const slot0 = sb.projectRoot;
+  const slot1 = `${sb.projectRoot}-1`;
+  const prompt = (cwd, text) => ({
+    type: "user",
+    cwd,
+    message: { role: "user", content: [{ type: "text", text }] },
+  });
+  const lines = [
+    prompt(slot0, "start here"),
+    { type: "assistant", cwd: slot0, message: { role: "assistant", content: [{ type: "text", text: "ok" }] } },
+    prompt(slot1, "continue over here"),
+    { type: "assistant", cwd: path.join(slot1, "apps", "frontend"), message: { role: "assistant", content: [{ type: "text", text: "done" }] } },
+  ];
+  const transcript = path.join(sb.wormHome, "transcript.jsonl");
+  await writeFile(transcript, lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+
+  const sink = path.join(sb.wormHome, "notifications.jsonl");
+  const r = await sb.worm(["hook", "trigger", "--global", "stop"], {
+    // The payload's own cwd is the drifted one — the transcript must win.
+    input: JSON.stringify({
+      hook_event_name: "Stop",
+      cwd: path.join(slot1, "apps", "frontend"),
+      transcript_path: transcript,
+    }),
+    env: { WORM_NOTIFY_SINK: sink },
+  });
+  assert.equal(r.exitCode, 0, r.stderr);
+
+  const fired = JSON.parse((await readFile(sink, "utf8")).trim());
+  assert.equal(fired.title, `Claude Code — ${path.basename(slot1)}`, "labelled with the current slot");
+  assert.equal(fired.focusPath, slot1, "click focuses the current slot, not a subfolder");
 });
 
 test("worm detach is reversible: delete the local file and sync re-links it", async (t) => {

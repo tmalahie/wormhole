@@ -15,42 +15,12 @@ import { notify } from "../_lib/notify.js";
 // recipe from its `openOnClick` config). Empty → no click action.
 const OPEN_ON_CLICK = process.argv[2] ?? "";
 
-// The live `data.cwd` drifts to subfolders during a session (a `Bash cd`, an
-// active file's dir, etc.), so focusing it would spawn a NEW VS Code window rooted
-// at that subfolder. The directory the session launched in IS the workspace folder
-// VS Code has open, recorded as the first `cwd` entry in the transcript — prefer it.
-function workspaceRootFromTranscript(transcriptPath) {
-  if (!transcriptPath || !fs.existsSync(transcriptPath)) return "";
+// Both the workspace lookup and the background-agent state below read the whole
+// transcript, which is tens of MB by the end of a long session — parse it once.
+function readRecords(transcriptPath) {
+  if (!transcriptPath || !fs.existsSync(transcriptPath)) return [];
   try {
-    for (const line of fs.readFileSync(transcriptPath, "utf8").split("\n")) {
-      if (!line) continue;
-      try {
-        const rec = JSON.parse(line);
-        if (rec && typeof rec.cwd === "string" && rec.cwd) return rec.cwd;
-      } catch {
-        // skip non-JSON / partial lines
-      }
-    }
-  } catch {
-    // unreadable transcript -> fall back to caller's cwd
-  }
-  return "";
-}
-
-// A turn that launches background agents (Agent with run_in_background, e.g. the
-// /review command's parallel reviewers) fires Stop repeatedly: the main agent
-// yields and auto-resumes as each agent reports in. Those intermediate yields
-// aren't "your turn" — we want a SINGLE notification, on the final response.
-// Scoped to the current user turn so it only affects turns that used background
-// agents. Signals: launch = "Async agent launched successfully. (…)\nagentId: <id>"
-// (a parenthetical metadata note now sits between the two, so match non-greedily),
-// completion = <task-id><id></task-id>; pending = launched ids with no completion.
-function backgroundTurnState(transcriptPath) {
-  const none = { usedBg: false, pending: 0, finalText: "" };
-  if (!transcriptPath || !fs.existsSync(transcriptPath)) return none;
-  let records;
-  try {
-    records = fs
+    return fs
       .readFileSync(transcriptPath, "utf8")
       .split("\n")
       .filter(Boolean)
@@ -58,45 +28,80 @@ function backgroundTurnState(transcriptPath) {
         try {
           return JSON.parse(line);
         } catch {
-          return null;
+          return null; // skip partial / non-JSON lines
         }
       })
       .filter(Boolean);
   } catch {
-    return none;
+    return []; // unreadable transcript -> fall back to the payload's own cwd
   }
+}
 
-  const textOf = (node) => {
-    const out = [];
-    const walk = (n) => {
-      if (typeof n === "string") out.push(n);
-      else if (Array.isArray(n)) n.forEach(walk);
-      else if (n && typeof n === "object") Object.values(n).forEach(walk);
-    };
-    walk(node);
-    return out.join("\n");
+const textOf = (node) => {
+  const out = [];
+  const walk = (n) => {
+    if (typeof n === "string") out.push(n);
+    else if (Array.isArray(n)) n.forEach(walk);
+    else if (n && typeof n === "object") Object.values(n).forEach(walk);
   };
+  walk(node);
+  return out.join("\n");
+};
 
-  const isRealUserPrompt = (r) => {
-    if (!r || r.type !== "user") return false;
-    const content = r.message && r.message.content;
-    const text = textOf(content);
-    if (text.includes("<task-notification>")) return false; // background completion injection
-    if (Array.isArray(content) && content.every((c) => c && c.type === "tool_result")) return false;
-    return text.trim().length > 0;
-  };
+// A user record the human actually submitted, as opposed to the tool results and
+// injections that also land as `type: "user"`.
+const isRealUserPrompt = (r) => {
+  if (!r || r.type !== "user") return false;
+  const content = r.message && r.message.content;
+  const text = textOf(content);
+  if (text.includes("<task-notification>")) return false; // background completion injection
+  if (Array.isArray(content) && content.every((c) => c && c.type === "tool_result")) return false;
+  return text.trim().length > 0;
+};
 
+// Where the CURRENT turn is being held. Two things make this harder than reading
+// `data.cwd`:
+//   - the live cwd drifts to subfolders during a session (a `Bash cd`, a sibling
+//     repo), so focusing it would spawn a NEW VS Code window rooted there;
+//   - a session outlives the slot it opened in — resumed or moved, its workspace
+//     changes mid-transcript (11% of the transcripts here do this), so the
+//     opening `cwd` names the worktree the work STARTED in, not where it is now.
+// Every record carries the cwd live at the moment it was written, except the
+// user's own prompts: those consistently carry the workspace root. So the newest
+// real user prompt answers both — newest for "which slot now", a prompt for "not
+// a subfolder". Returns the anchor index too: the same prompt starts the turn the
+// background-agent scan below is scoped to.
+function turnAnchor(records) {
   let start = -1;
+  let cwd = "";
   for (let i = records.length - 1; i >= 0; i--) {
-    if (isRealUserPrompt(records[i])) {
-      start = i;
+    if (!isRealUserPrompt(records[i])) continue;
+    if (start === -1) start = i;
+    if (typeof records[i].cwd === "string" && records[i].cwd) {
+      cwd = records[i].cwd;
       break;
     }
   }
-  // No originating user prompt in the transcript (e.g. it scrolled out of a
-  // compacted/resumed session). Scanning from 0 would sweep prior turns' agent
-  // ids in and wrongly suppress this turn's final notification — so treat it as
-  // "no background state" and let the notification through.
+  // No prompt in the transcript (e.g. it scrolled out of a compacted/resumed
+  // session): the opening cwd is the best remaining guess at the workspace.
+  if (!cwd) cwd = records.find((r) => typeof r.cwd === "string" && r.cwd)?.cwd ?? "";
+  return { start, cwd };
+}
+
+// A turn that launches background agents (Agent with run_in_background, e.g. the
+// /review command's parallel reviewers) fires Stop repeatedly: the main agent
+// yields and auto-resumes as each agent reports in. Those intermediate yields
+// aren't "your turn" — we want a SINGLE notification, on the final response.
+// Scoped to the current user turn (from `start`) so it only affects turns that
+// used background agents. Signals: launch = "Async agent launched successfully.
+// (…)\nagentId: <id>" (a parenthetical metadata note now sits between the two, so
+// match non-greedily), completion = <task-id><id></task-id>; pending = launched
+// ids with no completion.
+function backgroundTurnState(records, start) {
+  const none = { usedBg: false, pending: 0, finalText: "" };
+  // No originating user prompt in the transcript. Scanning from 0 would sweep
+  // prior turns' agent ids in and wrongly suppress this turn's final
+  // notification — so treat it as "no background state" and let it through.
   if (start === -1) return none;
   const blob = records.slice(start).map(textOf).join("\n");
 
@@ -146,7 +151,9 @@ function main() {
   // "finished"); only act on its permission_prompt variant.
   if (event === "Notification" && type !== "permission_prompt") return;
 
-  const cwd = workspaceRootFromTranscript(data.transcript_path) || data.cwd || "";
+  const records = readRecords(data.transcript_path);
+  const anchor = turnAnchor(records);
+  const cwd = anchor.cwd || data.cwd || "";
   const project = cwd ? path.basename(cwd) : "Claude Code";
   const toolName = data.tool_name || "";
   const isPermission = event === "PermissionRequest" || type === "permission_prompt";
@@ -155,7 +162,7 @@ function main() {
   // turn produces into one notification on the final synthesis (see above). A short
   // (<200 char) final in such a turn is treated as a status yield, not the answer.
   if (!isPermission) {
-    const bg = backgroundTurnState(data.transcript_path);
+    const bg = backgroundTurnState(records, anchor.start);
     if (bg.usedBg && (bg.pending > 0 || bg.finalText.trim().length < 200)) return;
   }
 
