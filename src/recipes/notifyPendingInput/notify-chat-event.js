@@ -48,13 +48,27 @@ const textOf = (node) => {
   return out.join("\n");
 };
 
+// Turns the HARNESS submitted on the user's behalf: a background agent's
+// hand-back (`origin.kind: "peer"`) and its completion notice
+// (`"task-notification"`) both land as `type: "user"` records with the same
+// shape as a real prompt. Modern transcripts label them; older ones don't, so
+// fall back to the text the injections carry.
+const isInjectedTurn = (r) => {
+  const kind = r.origin && r.origin.kind;
+  if (typeof r.turnOrigin === "string") return r.turnOrigin !== "human";
+  if (typeof kind === "string") return kind !== "human";
+  if (r.promptSource === "system") return true;
+  const text = textOf(r.message && r.message.content);
+  return text.includes("<task-notification>") || text.includes("<agent-message from=");
+};
+
 // A user record the human actually submitted, as opposed to the tool results and
 // injections that also land as `type: "user"`.
 const isRealUserPrompt = (r) => {
   if (!r || r.type !== "user") return false;
+  if (isInjectedTurn(r)) return false;
   const content = r.message && r.message.content;
   const text = textOf(content);
-  if (text.includes("<task-notification>")) return false; // background completion injection
   if (Array.isArray(content) && content.every((c) => c && c.type === "tool_result")) return false;
   return text.trim().length > 0;
 };
@@ -95,8 +109,11 @@ function turnAnchor(records) {
 // Scoped to the current user turn (from `start`) so it only affects turns that
 // used background agents. Signals: launch = "Async agent launched successfully.
 // (…)\nagentId: <id>" (a parenthetical metadata note now sits between the two, so
-// match non-greedily), completion = <task-id><id></task-id>; pending = launched
-// ids with no completion.
+// match non-greedily), completion = the agent's hand-back
+// (<agent-message from="<id>">) or its <task-id><id></task-id> notice, whichever
+// lands first — the hand-back carries the report and arrives a beat earlier, so
+// waiting for the notice alone would suppress the final synthesis; pending =
+// launched ids with neither.
 function backgroundTurnState(records, start) {
   const none = { usedBg: false, pending: 0, finalText: "" };
   // No originating user prompt in the transcript. Scanning from 0 would sweep
@@ -110,8 +127,10 @@ function backgroundTurnState(records, start) {
   let m;
   const reLaunch = /Async agent launched successfully\.[\s\S]*?agentId:\s*([0-9a-f]+)/g;
   const reDone = /<task-id>\s*([0-9a-f]+)\s*<\/task-id>/g;
+  const reHandback = /<agent-message from="([0-9a-f]+)"/g;
   while ((m = reLaunch.exec(blob))) launched.add(m[1]);
   while ((m = reDone.exec(blob))) completed.add(m[1]);
+  while ((m = reHandback.exec(blob))) completed.add(m[1]);
   let pending = 0;
   for (const id of launched) if (!completed.has(id)) pending++;
 

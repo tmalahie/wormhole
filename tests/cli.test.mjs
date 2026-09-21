@@ -2642,6 +2642,81 @@ test("notifyPendingInput suppresses mid-turn Stops from background agents, fires
   assert.match(fired[0].message, /Response ready/);
 });
 
+test("notifyPendingInput: a background agent's hand-back does not re-anchor the turn", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await sb.worm(["init"]);
+  await writeFile(
+    path.join(sb.wormHome, "config.json"),
+    JSON.stringify({ recipes: { notifyPendingInput: {} } })
+  );
+
+  // A background agent reports back through an injected `type: "user"` record
+  // (`turnOrigin: "peer"`), which looks exactly like a prompt the human typed.
+  // Counting it as one would move the turn anchor PAST the launch records, lose
+  // the background state, and let every agent completion fire "Response ready".
+  const launchText = (id) =>
+    `Async agent launched successfully. (internal metadata)\nagentId: ${id} (internal ID)`;
+  const ids = ["a11111111111111a1", "a22222222222222a2"];
+  const handback = (id) => ({
+    type: "user",
+    isMeta: true,
+    turnOrigin: "peer",
+    origin: { kind: "peer", from: id, senderTaskId: id, handback: true },
+    promptSource: "system",
+    cwd: sb.projectRoot,
+    message: {
+      role: "user",
+      content: `Another Claude session sent a message:\n<agent-message from="${id}">\n[Subagent hand-back] Review findings…`,
+    },
+  });
+  const base = [
+    {
+      type: "user",
+      turnOrigin: "human",
+      origin: { kind: "human" },
+      cwd: sb.projectRoot,
+      message: { role: "user", content: [{ type: "text", text: "review PR 1433" }] },
+    },
+    ...ids.map((id) => ({
+      type: "user",
+      message: { role: "user", content: [{ type: "tool_result", content: [{ type: "text", text: launchText(id) }] }] },
+    })),
+    handback(ids[0]),
+    { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Agent 1 reported. Waiting on agent 2." }] } },
+  ];
+  const transcript = path.join(sb.wormHome, "transcript.jsonl");
+  const write = (lines) => writeFile(transcript, lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+  await write(base);
+
+  const sink = path.join(sb.wormHome, "notifications.jsonl");
+  const stopPayload = { hook_event_name: "Stop", cwd: sb.projectRoot, transcript_path: transcript };
+  const stop = () =>
+    sb.worm(["hook", "trigger", "--global", "stop"], {
+      input: JSON.stringify(stopPayload),
+      env: { WORM_NOTIFY_SINK: sink },
+    });
+
+  const mid = await stop();
+  assert.equal(mid.exitCode, 0, mid.stderr);
+  await assert.rejects(readFile(sink), "a hand-back mid-turn must not notify");
+
+  // The last agent hands back and the main agent writes the synthesis. The
+  // hand-back counts as that agent's completion — its <task-notification> only
+  // lands after this Stop, so waiting for it would swallow the real answer.
+  await write([
+    ...base,
+    handback(ids[1]),
+    { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Synthesis: ".padEnd(250, "x") }] } },
+  ]);
+
+  const done = await stop();
+  assert.equal(done.exitCode, 0, done.stderr);
+  const fired = (await readFile(sink, "utf8")).trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  assert.equal(fired.length, 1, "exactly one notification, on the synthesis");
+  assert.equal(fired[0].title, `Claude Code — ${path.basename(sb.projectRoot)}`);
+});
+
 test("notifyPendingInput names the slot the turn is in, not the one the session opened in", async (t) => {
   const sb = await createSandbox();
   t.after(() => sb.cleanup());
