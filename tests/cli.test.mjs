@@ -2717,10 +2717,91 @@ test("notifyPendingInput: a background agent's hand-back does not re-anchor the 
   assert.equal(fired[0].title, `Claude Code — ${path.basename(sb.projectRoot)}`);
 });
 
-test("notifyPendingInput names the slot the turn is in, not the one the session opened in", async (t) => {
+test("notifyPendingInput stays quiet for a nested agent's report after the answer went out", async (t) => {
   const sb = await createSandbox();
   t.after(() => sb.cleanup());
   await sb.worm(["init"]);
+  await writeFile(
+    path.join(sb.wormHome, "config.json"),
+    JSON.stringify({ recipes: { notifyPendingInput: {} } })
+  );
+
+  // Agents nest: a /review agent spawns its own background agents, and those
+  // grandchildren hand back to THIS session — it owns the whole tree — carrying
+  // ids it never launched. They keep arriving long after the synthesis went out,
+  // and each one is a full report, so neither "nothing pending" nor "the text is
+  // long" can tell them from the answer. The launched set can.
+  const ours = "a11111111111111a1";
+  const nested = "a99999999999999a9";
+  const launch = {
+    type: "user",
+    message: {
+      role: "user",
+      content: [
+        {
+          type: "tool_result",
+          content: [{ type: "text", text: `Async agent launched successfully. (metadata)\nagentId: ${ours} (internal ID)` }],
+        },
+      ],
+    },
+  };
+  const handback = (id) => ({
+    type: "user",
+    turnOrigin: "peer",
+    origin: { kind: "peer", from: id, senderTaskId: id, handback: true },
+    cwd: sb.projectRoot,
+    message: { role: "user", content: `Another Claude session sent a message:\n<agent-message from="${id}">\n[Subagent hand-back] Findings…` },
+  });
+  const notice = (id) => ({
+    type: "user",
+    turnOrigin: "task_notification",
+    origin: { kind: "task-notification" },
+    cwd: sb.projectRoot,
+    message: { role: "user", content: `<task-notification>\n<task-id>${id}</task-id>\n<status>completed</status>\n</task-notification>` },
+  });
+  const says = (text) => ({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text }] } });
+
+  const answered = [
+    { type: "user", turnOrigin: "human", origin: { kind: "human" }, cwd: sb.projectRoot, message: { role: "user", content: [{ type: "text", text: "review PR 1433" }] } },
+    launch,
+    says("Agent launched."),
+    handback(ours),
+    says("The review: ".padEnd(400, "x")),
+  ];
+  const transcript = path.join(sb.wormHome, "transcript.jsonl");
+  const write = (lines) => writeFile(transcript, lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+  const sink = path.join(sb.wormHome, "notifications.jsonl");
+  const stop = () =>
+    sb.worm(["hook", "trigger", "--global", "stop"], {
+      input: JSON.stringify({ hook_event_name: "Stop", cwd: sb.projectRoot, transcript_path: transcript }),
+      env: { WORM_NOTIFY_SINK: sink },
+    });
+
+  await write(answered);
+  const answer = await stop();
+  assert.equal(answer.exitCode, 0, answer.stderr);
+  assert.equal((await readFile(sink, "utf8")).trim().split("\n").length, 1, "the synthesis notifies");
+
+  // The notice trailing our own agent's hand-back repeats what already arrived.
+  await write([...answered, notice(ours), says("Already covered above. ".padEnd(400, "x"))]);
+  const trailing = await stop();
+  assert.equal(trailing.exitCode, 0, trailing.stderr);
+  assert.equal((await readFile(sink, "utf8")).trim().split("\n").length, 1, "the trailing notice adds nothing");
+
+  // A grandchild reports: this turn never launched it, so its addendum is not
+  // the answer — the answer went out with its parent's report.
+  await write([...answered, notice(ours), says("Already covered."), handback(nested), says("An addendum: ".padEnd(900, "x"))]);
+  const grandchild = await stop();
+  assert.equal(grandchild.exitCode, 0, grandchild.stderr);
+  assert.equal((await readFile(sink, "utf8")).trim().split("\n").length, 1, "a nested agent's report must not notify");
+});
+
+test("notifyPendingInput names the worktree the turn is in, not the slot it opened in nor a subfolder", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await createBranch(sb.projectRoot, "feature-a");
+  await sb.worm(["init"]);
+  await sb.worm(["universe", "add", "feature-a", "--skip-hook"]);
   await writeFile(
     path.join(sb.wormHome, "config.json"),
     JSON.stringify({ recipes: { notifyPendingInput: { openOnClick: "Cursor" } } })
@@ -2728,10 +2809,12 @@ test("notifyPendingInput names the slot the turn is in, not the one the session 
 
   // A session that started in slot 0 and was later resumed in slot 1: the
   // transcript keeps recording, so its OPENING cwd names the slot the work has
-  // left. Interleaved records carry the live cwd, which drifts into subfolders
-  // (a `Bash cd`) — only the user's own prompts name the workspace itself.
-  const slot0 = sb.projectRoot;
-  const slot1 = `${sb.projectRoot}-1`;
+  // left. Every record carries the live cwd — prompts included, so a `Bash cd`
+  // in one turn leaks into the next prompt. The newest prompt taken at a
+  // worktree root is the one that survives both.
+  const slot0 = await realpath(sb.projectRoot);
+  const slot1 = siblingPath(slot0, 1);
+  const drifted = path.join(slot1, "src");
   const prompt = (cwd, text) => ({
     type: "user",
     cwd,
@@ -2741,7 +2824,9 @@ test("notifyPendingInput names the slot the turn is in, not the one the session 
     prompt(slot0, "start here"),
     { type: "assistant", cwd: slot0, message: { role: "assistant", content: [{ type: "text", text: "ok" }] } },
     prompt(slot1, "continue over here"),
-    { type: "assistant", cwd: path.join(slot1, "apps", "frontend"), message: { role: "assistant", content: [{ type: "text", text: "done" }] } },
+    { type: "assistant", cwd: drifted, message: { role: "assistant", content: [{ type: "text", text: "moved into src" }] } },
+    prompt(drifted, "same window, the shell just wandered"),
+    { type: "assistant", cwd: drifted, message: { role: "assistant", content: [{ type: "text", text: "done" }] } },
   ];
   const transcript = path.join(sb.wormHome, "transcript.jsonl");
   await writeFile(transcript, lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
@@ -2749,18 +2834,14 @@ test("notifyPendingInput names the slot the turn is in, not the one the session 
   const sink = path.join(sb.wormHome, "notifications.jsonl");
   const r = await sb.worm(["hook", "trigger", "--global", "stop"], {
     // The payload's own cwd is the drifted one — the transcript must win.
-    input: JSON.stringify({
-      hook_event_name: "Stop",
-      cwd: path.join(slot1, "apps", "frontend"),
-      transcript_path: transcript,
-    }),
+    input: JSON.stringify({ hook_event_name: "Stop", cwd: drifted, transcript_path: transcript }),
     env: { WORM_NOTIFY_SINK: sink },
   });
   assert.equal(r.exitCode, 0, r.stderr);
 
   const fired = JSON.parse((await readFile(sink, "utf8")).trim());
-  assert.equal(fired.title, `Claude Code — ${path.basename(slot1)}`, "labelled with the current slot");
-  assert.equal(fired.focusPath, slot1, "click focuses the current slot, not a subfolder");
+  assert.equal(fired.title, `Claude Code — ${path.basename(slot1)}`, "labelled with the current worktree");
+  assert.equal(fired.focusPath, slot1, "click focuses the worktree, not the subfolder the shell wandered to");
 });
 
 test("worm detach is reversible: delete the local file and sync re-links it", async (t) => {

@@ -22,14 +22,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **`notifyPendingInput` names the slot the turn is actually in.** A session
+- **`notifyPendingInput` fires once per background-agent turn, not once per
+  agent.** A `/review` turn yields every time an agent reports in, and the
+  debounce that collapses those yields into a single notification was being
+  defeated twice over. A background agent's hand-back arrives as an injected
+  `type: "user"` record that looked exactly like a prompt the human typed, so it
+  re-anchored the turn and pushed the launch records out of the scan window —
+  the turn stopped counting as a background turn at the first hand-back. Turns
+  are now classified from the transcript's own label for who submitted them
+  (`turnOrigin` / `origin.kind`), with the old text match as a fallback for
+  transcripts predating those fields. And agents nest: a grandchild hands back to
+  the session that owns the tree, not to the agent that spawned it, so reports
+  kept arriving — each one long, with nothing pending — after the synthesis had
+  gone out. A report from an id this turn never launched is now never the answer.
+  A hand-back also settles its agent (its trailing `<task-id>` notice lands a
+  beat later, after the synthesis it triggers), and that notice, having no new
+  content, never notifies on its own. Replayed against a real nested `/review`:
+  10 notifications down to 1, on the final report.
+
+- **`notifyPendingInput` names the worktree the turn is actually in.** A session
   resumed or moved to another slot keeps writing to the same transcript, and the
   notification was labelled (and its click focused) from the transcript's
   *opening* `cwd` — the worktree the work had left. It now reads the cwd of the
-  newest real user prompt: newest so a mid-session move is picked up, a prompt
-  because every other record carries the live cwd, which drifts into subfolders
-  on a `Bash cd` and would focus a new editor window rooted there. The transcript
-  is also parsed once now instead of once per lookup.
+  newest user prompt taken at a **worktree root** (`.git` present, so a linked
+  worktree counts). Newest picks up a mid-session move; the root test discards a
+  cwd the shell wandered to, since every record — prompts included — carries the
+  live cwd, so a `Bash cd` leaks into the next prompt and the notification would
+  announce "src" and focus a new editor window rooted there. A session held
+  entirely below a root (an editor opened on a subfolder) finds no rooted prompt
+  and keeps its own cwd. The transcript is also parsed once now instead of once
+  per lookup.
 
 ## [0.3.0] - 2026-08-19
 
