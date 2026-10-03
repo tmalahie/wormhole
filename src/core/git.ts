@@ -2,6 +2,7 @@ import path from "node:path";
 import { run, runOrThrow } from "../utils/exec.js";
 import { WormError } from "../utils/errors.js";
 import { ensureDir, fs } from "../utils/fs.js";
+import { logger } from "../utils/logger.js";
 
 export interface WorktreeEntry {
   path: string;
@@ -116,13 +117,22 @@ export async function worktreeAdd(
     }
   }
 
-  await runOrThrow(
-    "git",
-    args,
-    { cwd: repoRoot },
-    `Failed to add git worktree at ${targetPath}`
+  const { exitCode, stderr } = await run("git", args, { cwd: repoRoot });
+  if (exitCode === 0) return;
+  // A failing post-checkout hook becomes git's exit status even though the
+  // checkout itself succeeded — e.g. husky's `.husky/_/post-checkout` sourcing an
+  // `h` that only exists once the new worktree's own install has run. If git
+  // registered the worktree, it is there: carry on (the caller wires and sets it up).
+  const registered = (await listWorktrees(repoRoot)).some(
+    (w) => path.resolve(w.path) === path.resolve(targetPath)
   );
+  if (!registered) {
+    throw new WormError(`Failed to add git worktree at ${targetPath}`, { hint: stderr.trim() || undefined });
+  }
+  logger.warn(`git's post-checkout hook failed in the new worktree (checkout kept): ${lastLine(stderr)}`);
 }
+
+const lastLine = (s: string) => s.trim().split("\n").filter(Boolean).pop() ?? "";
 
 export async function worktreeRemove(
   repoRoot: string,

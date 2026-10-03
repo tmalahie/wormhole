@@ -1013,6 +1013,25 @@ test("worktree add on a missing branch creates it from origin/<baseBranch>, untr
   await stat(wtPath(root, "new-2"));
 });
 
+test("worktree add keeps a checkout whose post-checkout hook fails (husky before install)", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await createBranch(sb.projectRoot, "feature-a");
+  // husky's layout: a relative hooksPath whose hook sources a file the new
+  // worktree only gets from its own install — so the hook fails there.
+  const hooks = path.join(sb.projectRoot, ".hooks");
+  await mkdir(hooks, { recursive: true });
+  await writeFile(path.join(hooks, "post-checkout"), '#!/bin/sh\n. "$(dirname "$0")/h"\n', { mode: 0o755 });
+  await execa("git", ["config", "core.hooksPath", ".hooks"], { cwd: sb.projectRoot });
+  await sb.worm(["init"]);
+
+  const r = await sb.worm(["worktree", "add", "feature-a", "--no-setup"]);
+  assert.equal(r.exitCode, 0, r.stderr);
+  assert.match(r.stderr, /post-checkout hook failed/);
+  const wt = wtPath(await realpath(sb.projectRoot), "feature-a");
+  await stat(path.join(wt, ".worktree-keep"));
+});
+
 test("worktree rm: protects main, refuses dirty without --force, cleans up after itself", async (t) => {
   const sb = await createSandbox();
   t.after(() => sb.cleanup());
