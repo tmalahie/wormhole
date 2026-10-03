@@ -33,11 +33,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Claude Code's worktree hooks.** Every wired worktree's
-  `.claude/settings.local.json` gets `WorktreeCreate` → `worm hook
-  worktree-create` and `WorktreeRemove` → `worm hook worktree-remove`, so
-  `EnterWorktree`, `claude --worktree` and Claude Desktop create (and remove)
-  worktrees through worm: same place, wired, set up.
+- **Claude Code's worktree hooks.** `worm sync --global` installs
+  `WorktreeCreate` → `worm hook worktree-create` and `WorktreeRemove` →
+  `worm hook worktree-remove` in `~/.claude/settings.json`, so `EnterWorktree`,
+  `claude --worktree` and Claude Desktop create (and remove) worktrees through
+  worm: same place, wired, set up. User settings because Claude Desktop only
+  auto-trusts a hook-made worktree when the hook comes from that tier; in a repo
+  that isn't a worm project the hooks do what Claude does without one.
 - **`env` expressions** gain text values: `'quoted strings'`, `==` / `!=`,
   `cond ? a : b` and string `+`, plus the text vars `name`, `profile`, `root`,
   `worktree`.

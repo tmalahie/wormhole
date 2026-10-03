@@ -6,7 +6,10 @@ import { reserveStdout } from "../utils/logger.js";
 import { branchExists, remoteBranchExists } from "../core/git.js";
 import { pathExists } from "../utils/fs.js";
 import {
+  createPlainWorktree,
   createWorktree,
+  removePlainWorktree,
+  repoAt,
   listProjectWorktrees,
   openProject,
   removeWorktree,
@@ -156,6 +159,9 @@ function parsePayload(raw: string): WorktreeHookPayload {
 }
 
 /**
+ * In a repo that isn't a worm project, both hooks do what Claude does without
+ * one (the hooks are installed machine-wide, by `worm sync --global`).
+ *
  * `worm hook worktree-create` — stdin `{ name, cwd, … }`; stdout: the worktree's
  * absolute path, nothing else (all logs and the setup script's output go to
  * stderr). Idempotent: an existing worktree of that name is returned as is. The
@@ -167,7 +173,13 @@ export async function runHookWorktreeCreate(): Promise<void> {
   reserveStdout();
   const payload = parsePayload(await readStdin());
   if (!payload.name) throw new WormError("WorktreeCreate payload has no name.");
-  const project = await openProject(payload.cwd || process.cwd());
+  const repo = await repoAt(payload.cwd || process.cwd());
+  if (!repo) throw new WormError(`Not inside a git repository: ${payload.cwd || process.cwd()}`);
+  if (!repo.isWormProject) {
+    process.stdout.write((await createPlainWorktree(repo.mainRoot, payload.name)) + "\n");
+    return;
+  }
+  const project = await openProject(repo.mainRoot);
   const name = worktreeNameForBranch(payload.name);
   const worktrees = await listProjectWorktrees(project.mainRoot, project.projectName);
 
@@ -200,6 +212,12 @@ export async function runHookWorktreeRemove(): Promise<void> {
   const payload = parsePayload(await readStdin());
   const target = payload.worktree_path || payload.cwd;
   if (!target || !(await pathExists(target))) return;
+  const repo = await repoAt(target);
+  if (!repo) return;
+  if (!repo.isWormProject) {
+    if (path.resolve(target) !== path.resolve(repo.mainRoot)) await removePlainWorktree(repo.mainRoot, target);
+    return;
+  }
   const project = await openProject(target);
   const wt = resolveWorktreeRef(path.resolve(target), await listProjectWorktrees(project.mainRoot, project.projectName));
   if (wt.isMain) {

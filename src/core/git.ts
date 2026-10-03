@@ -252,3 +252,13 @@ export async function fetchBranch(repoRoot: string, remote: string, branch: stri
   });
   return exitCode === 0;
 }
+
+/** The remote's default branch as a ref (`origin/main`), from `refs/remotes/<remote>/HEAD`; null when unknown. */
+export async function remoteDefaultRef(repoRoot: string, remote = "origin"): Promise<string | null> {
+  const { stdout, exitCode } = await run(
+    "git",
+    ["symbolic-ref", "--quiet", "--short", `refs/remotes/${remote}/HEAD`],
+    { cwd: repoRoot }
+  );
+  return exitCode === 0 && stdout.trim() ? stdout.trim() : null;
+}

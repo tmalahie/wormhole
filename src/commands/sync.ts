@@ -249,7 +249,7 @@ async function runGlobalSync(): Promise<void> {
   // regardless of shared_paths (removing `autosync` from config + re-running
   // strips the hooks). autosync needs a git remote on ~/.worm to do anything.
   if (await applyGlobalRecipeWiring(recipes)) {
-    logger.step("⚡ wired global recipe hooks → ~/.claude/settings.json");
+    logger.step("⚡ wired worm's hooks (recipes, worktree create/remove) → ~/.claude/settings.json");
   }
   // Independent of whether the wiring changed this run: as long as autosync is
   // enabled without the remote it targets, it silently no-ops, so surface the

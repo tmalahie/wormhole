@@ -174,11 +174,16 @@ const DISPATCH_MARKER = "hook trigger ";
 const WORM_HOOK_RE = /hook (trigger |worktree-(create|remove)\b)/;
 
 /**
- * Claude Code's worktree hooks, wired into every worktree regardless of recipes:
- * whoever creates a worktree through Claude (`EnterWorktree`, `--worktree`,
- * Desktop) gets worm's — `.claude/worktrees/<name>`, wired and set up — and
- * removal goes through worm too. Setup can take a while (dependency install),
- * hence the long timeout.
+ * Claude Code's worktree hooks, installed machine-wide by `worm sync --global`
+ * (regardless of recipes): whoever creates a worktree through Claude
+ * (`EnterWorktree`, `--worktree`, Claude Desktop) gets worm's —
+ * `.claude/worktrees/<name>`, wired and set up — and removal goes through worm
+ * too. In a repo worm doesn't manage, the hook does what Claude does without one.
+ *
+ * User settings, not a project's: Claude Desktop auto-trusts a hook-made
+ * worktree only when the hook comes from the user tier (a repo's own
+ * .claude/settings*.json could be committed by anyone). Setup can take a while
+ * (dependency install), hence the long timeout.
  */
 const WORKTREE_HOOKS: SettingsContribution = {
   WorktreeCreate: [{ hooks: [{ type: "command", command: "worm hook worktree-create", timeout: 600 }] }],
@@ -514,9 +519,6 @@ export async function applyRecipeWiring(
     if (meta.matcher) entry.matcher = meta.matcher;
     (install[meta.claudeEvent] ??= []).push(entry);
   }
-  for (const [event, entries] of Object.entries(WORKTREE_HOOKS)) {
-    (install[event] ??= []).push(...entries);
-  }
   return writeWorktreeHooks(worktree.path, install);
 }
 
@@ -564,6 +566,9 @@ export async function applyGlobalRecipeWiring(recipes: RecipesConfig): Promise<b
     };
     if (meta.matcher) entry.matcher = meta.matcher;
     (install[meta.claudeEvent] ??= []).push(entry);
+  }
+  for (const [event, entries] of Object.entries(WORKTREE_HOOKS)) {
+    (install[event] ??= []).push(...entries);
   }
   return writeHooksFile(globalSettingsPath(), install);
 }

@@ -145,12 +145,8 @@ test("worm worktree add creates .claude/worktrees/<name>, wired; ls/status show 
   const wt = wtPath(root, "feature-a");
   assert.equal(r.stdout.trim().split("\n").pop(), wt, "the last stdout line is the path");
   assert.ok((await stat(wt)).isDirectory());
-  // Wired: the keep marker Claude Desktop's GC respects, and Claude's worktree hooks.
+  // Wired: the keep marker Claude Desktop's GC respects.
   await stat(path.join(wt, ".worktree-keep"));
-  const local = JSON.parse(await readFile(path.join(wt, ".claude", "settings.local.json"), "utf8"));
-  assert.match(local.hooks.WorktreeCreate[0].hooks[0].command, /worm hook worktree-create/);
-  assert.equal(local.hooks.WorktreeCreate[0].hooks[0].timeout, 600);
-  assert.match(local.hooks.WorktreeRemove[0].hooks[0].command, /worm hook worktree-remove/);
   // Neither the worktrees dir nor the marker shows up as untracked.
   const st = await execa("git", ["status", "--porcelain"], { cwd: root });
   assert.equal(st.stdout.trim(), "", "main worktree stays clean");
@@ -1920,16 +1916,19 @@ test("worm sync --global wires autosync into ~/.claude/settings.json (and strips
   assert.match(s.hooks.SessionStart[0].hooks[0].command, /hook trigger --global session-start/);
   assert.match(s.hooks.Stop[0].hooks[0].command, /hook trigger --global stop/);
   assert.match(s.hooks.SessionEnd[0].hooks[0].command, /hook trigger --global session-end/);
-  // GLOBAL scope only — never wired into a project worktree (whose settings.local.json
-  // holds only worm's worktree hooks).
-  const local = JSON.parse(await readFile(path.join(sb.projectRoot, ".claude", "settings.local.json"), "utf8"));
-  assert.deepEqual(Object.keys(local.hooks).sort(), ["WorktreeCreate", "WorktreeRemove"]);
+  // Claude's worktree hooks live here too, in the user tier (Desktop auto-trusts those).
+  assert.match(s.hooks.WorktreeCreate[0].hooks[0].command, /^worm hook worktree-create$/);
+  assert.equal(s.hooks.WorktreeCreate[0].hooks[0].timeout, 600);
+  assert.match(s.hooks.WorktreeRemove[0].hooks[0].command, /^worm hook worktree-remove$/);
+  // GLOBAL scope only — never wired into a project worktree.
+  await assert.rejects(stat(path.join(sb.projectRoot, ".claude", "settings.local.json")), /ENOENT/);
 
   // Removing it from the global config + re-syncing strips the hooks.
   await writeFile(path.join(sb.wormHome, "config.json"), JSON.stringify({}));
   await sb.worm(["sync", "--global"]);
   const s2 = JSON.parse(await readFile(settingsPath, "utf8"));
   assert.ok(!s2.hooks?.Stop, "autosync hooks stripped after removal");
+  assert.ok(s2.hooks.WorktreeCreate, "the worktree hooks stay (they don't depend on recipes)");
 });
 
 test("global autosync push commits and pushes ~/.worm to its remote", async (t) => {
@@ -2905,27 +2904,74 @@ test("hook worktree-remove removes the worktree; refuses main; ignores a missing
   assert.equal(gone.exitCode, 0, "an already-removed worktree is not an error");
 });
 
-test("worktree hooks are worm's: syncPermissions never copies them into the canonical store", async (t) => {
+test("worktree hooks are worm's: syncGlobalPermissions never copies them; old per-worktree copies are stripped", async (t) => {
   const sb = await createSandbox();
   t.after(() => sb.cleanup());
-  const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
-  t.after(() => rm(templateDir, { recursive: true, force: true }));
+  await sb.worm(["init"]);
   await writeFile(
-    path.join(templateDir, "config.json"),
-    JSON.stringify({ shared_paths: [], hooks: {}, recipes: { syncPermissions: { keys: "*" } } })
+    path.join(sb.wormHome, "config.json"),
+    JSON.stringify({ recipes: { syncGlobalPermissions: { keys: "*" } } })
   );
-  await sb.worm(["init", "--template", templateDir]);
-  const name = path.basename(sb.projectRoot);
-  const canonicalFile = path.join(sb.wormHome, "projects", name, ".claude", "settings.local.json");
+  assert.equal((await sb.worm(["sync", "--global"])).exitCode, 0);
+  const canonicalFile = path.join(sb.wormHome, "shared", ".claude", "settings.json");
   await mkdir(path.dirname(canonicalFile), { recursive: true });
   await writeFile(canonicalFile, JSON.stringify({ permissions: { allow: ["Bash(ls:*)"] } }));
-  const r = await sb.worm(["hook", "trigger", "session-end"]);
+  const r = await sb.worm(["hook", "trigger", "--global", "session-end"]);
   assert.equal(r.exitCode, 0, r.stderr);
   const canonical = JSON.parse(await readFile(canonicalFile, "utf8"));
-  assert.equal(canonical.hooks?.WorktreeCreate, undefined, "never synced into the canonical store");
-  assert.equal(canonical.hooks?.WorktreeRemove, undefined);
-  const local = JSON.parse(await readFile(path.join(sb.projectRoot, ".claude", "settings.local.json"), "utf8"));
-  assert.ok(local.hooks.WorktreeCreate, "still in the worktree's own file");
+  assert.equal(canonical.hooks?.WorktreeCreate, undefined, "never synced into the canonical copy");
+
+  // A worktree wired by an earlier build carried its own copy: a re-sync removes it.
+  const localFile = path.join(sb.projectRoot, ".claude", "settings.local.json");
+  await mkdir(path.dirname(localFile), { recursive: true });
+  await writeFile(
+    localFile,
+    JSON.stringify({ hooks: { WorktreeCreate: [{ hooks: [{ type: "command", command: "worm hook worktree-create" }] }] } })
+  );
+  await sb.worm(["sync"]);
+  const local = JSON.parse(await readFile(localFile, "utf8"));
+  assert.equal(local.hooks?.WorktreeCreate, undefined);
+});
+
+test("worktree hooks in a repo worm doesn't manage: Claude's default layout, nothing wired", async (t) => {
+  const sb = await createSandbox(); // projectRoot is a plain clone of seedRepo — never `worm init`ed
+  t.after(() => sb.cleanup());
+  const root = await realpath(sb.projectRoot);
+  await execa("git", ["remote", "set-head", "origin", "main"], { cwd: root });
+
+  const create = await sb.worm(["hook", "worktree-create"], {
+    input: JSON.stringify({ hook_event_name: "WorktreeCreate", name: "calm-heron", cwd: root }),
+  });
+  assert.equal(create.exitCode, 0, create.stderr);
+  const wt = wtPath(root, "calm-heron");
+  assert.equal(create.stdout, wt);
+  const branch = await execa("git", ["branch", "--show-current"], { cwd: wt });
+  assert.equal(branch.stdout, "worktree-calm-heron");
+  const head = await execa("git", ["rev-parse", "HEAD"], { cwd: wt });
+  assert.equal(head.stdout, (await execa("git", ["rev-parse", "origin/main"], { cwd: root })).stdout);
+  await assert.rejects(stat(path.join(wt, ".worktree-keep")), /ENOENT/, "not wired");
+  await assert.rejects(stat(path.join(root, ".worm")), /ENOENT/, "not bound");
+  const st = await execa("git", ["status", "--porcelain"], { cwd: root });
+  assert.equal(st.stdout, "", ".claude/worktrees is excluded");
+
+  const again = await sb.worm(["hook", "worktree-create"], {
+    input: JSON.stringify({ hook_event_name: "WorktreeCreate", name: "calm-heron", cwd: root }),
+  });
+  assert.equal(again.stdout, wt, "idempotent");
+
+  const remove = await sb.worm(["hook", "worktree-remove"], {
+    input: JSON.stringify({ hook_event_name: "WorktreeRemove", worktree_path: wt }),
+  });
+  assert.equal(remove.exitCode, 0, remove.stderr);
+  await assert.rejects(stat(wt), /ENOENT/);
+  const kept = await execa("git", ["branch", "--list", "worktree-calm-heron"], { cwd: root });
+  assert.match(kept.stdout, /worktree-calm-heron/, "branch kept");
+
+  const outside = await sb.worm(["hook", "worktree-create"], {
+    cwd: tmpdir(),
+    input: JSON.stringify({ hook_event_name: "WorktreeCreate", name: "x", cwd: tmpdir() }),
+  });
+  assert.notEqual(outside.exitCode, 0, "outside a git repo the hook fails, as Claude would");
 });
 
 // --- sync: project.json and the VS Code workspace ----------------------------

@@ -12,12 +12,14 @@ import {
   pruneWorktrees,
   refExists,
   remoteBranchExists,
+  remoteDefaultRef,
   worktreeAdd,
   worktreeRemove,
 } from "./git.js";
 import {
   WORKTREE_KEEP_FILE_NAME,
   claudeProjectsDir,
+  localRoot,
   claudeSlug,
   globalProjectDir,
   syncPermissionsBaseFile,
@@ -40,7 +42,7 @@ import { resolveStoreLinks } from "./stores.js";
 import { applyRecipeWiring, materializeRecipes } from "./recipes.js";
 import { ensureSymlink } from "./symlinks.js";
 import { chooseSlot, readSlots, slotOf, writeSlots } from "./slots.js";
-import { findMainRoot, readProjectName } from "./project.js";
+import { findMainRoot, gitCommonDir, readProjectName } from "./project.js";
 import { loadLocalConfig } from "./config.js";
 import type { Config, Worktree } from "../types.js";
 
@@ -450,4 +452,49 @@ export async function removeWorktree(
     if (!branchError) branchKept = null;
   }
   return { releasedSlot, branchKept, branchError };
+}
+
+// --- repos worm doesn't manage ---------------------------------------------------
+// Claude's worktree hooks are installed machine-wide, so they also fire in repos
+// that aren't worm projects. There the hook must do what Claude does without a
+// hook: `<repo>/.claude/worktrees/<name>` on branch `worktree-<name>`, cut from
+// the remote's default branch — nothing wired, nothing installed.
+
+/** The main worktree of the repo containing `dir`, and whether it is a worm project. */
+export async function repoAt(dir: string): Promise<{ mainRoot: string; isWormProject: boolean } | null> {
+  const commonDir = await gitCommonDir(dir);
+  if (!commonDir) return null;
+  const mainRoot = path.dirname(commonDir);
+  return { mainRoot, isWormProject: await pathExists(localRoot(mainRoot)) };
+}
+
+/** Create (or return) `<repo>/.claude/worktrees/<name>` the way Claude Code would. */
+export async function createPlainWorktree(mainRoot: string, rawName: string): Promise<string> {
+  const name = worktreeNameForBranch(rawName);
+  const target = worktreeDir(mainRoot, name);
+  const existing = (await listWorktrees(mainRoot)).find((w) => path.resolve(w.path) === target);
+  if (existing) return target;
+
+  const isBranch =
+    (await branchExists(mainRoot, rawName)) || (await remoteBranchExists(mainRoot, rawName)) !== null;
+  const branch = isBranch ? rawName : `worktree-${name}`;
+  let base: string | undefined;
+  if (!isBranch && !(await branchExists(mainRoot, branch))) {
+    const remoteDefault = await remoteDefaultRef(mainRoot);
+    if (remoteDefault) {
+      const [remote, ...rest] = remoteDefault.split("/");
+      await fetchBranch(mainRoot, remote!, rest.join("/"));
+    }
+    base = remoteDefault ?? "HEAD";
+  }
+  await fs.mkdir(worktreesDir(mainRoot), { recursive: true });
+  await ensureGitExclude(mainRoot, "/.claude/worktrees/");
+  await worktreeAdd(mainRoot, target, branch, { createIfMissing: true, base });
+  return target;
+}
+
+/** Remove a worktree of a repo worm doesn't manage (the branch is kept). */
+export async function removePlainWorktree(mainRoot: string, worktreePath: string): Promise<void> {
+  await worktreeRemove(mainRoot, worktreePath, { force: true });
+  await pruneWorktrees(mainRoot);
 }
