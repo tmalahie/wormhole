@@ -7,7 +7,7 @@ import { isWormError } from "../utils/errors.js";
 import type { LinkManifest, ReconcileResult } from "./links.js";
 
 /**
- * HOME-scope shared links: the global-scope analogue of a project's per-slot
+ * HOME-scope shared links: the global-scope analogue of a project's per-worktree
  * tunnels. Each tail in the global `shared_paths` is linked as `~/<tail>` →
  * `~/.worm/shared/<tail>` (absolute), so machine-wide setup (e.g.
  * `~/.claude/commands`) lives in the personal `~/.worm` repo. Reconcile records
@@ -86,7 +86,7 @@ export async function reconcileGlobalLinks(
 }
 
 /**
- * Keep the global manifest out of the personal `~/.worm` git repo (the per-slot
+ * Keep the global manifest out of the personal `~/.worm` git repo (the per-worktree
  * manifest is hidden by `.worm/.gitignore = *`; the global root has no blanket
  * ignore, so add a targeted line). Idempotent.
  */

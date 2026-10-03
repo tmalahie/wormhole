@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // shareHistory recipe — UserPromptSubmit hook.
 //
-// Because shareHistory makes every slot share ONE conversation history, a single
-// chat can hop between worktrees as you `worm switch`. When the conversation's
+// Every worktree of a repo shares ONE conversation history (worm links their
+// Claude project dirs), so a single chat can hop between worktrees — typically an
+// old conversation resumed from another folder. When the conversation's
 // working directory changes between two consecutive prompts, this emits a
 // reminder so the model knows the active cwd switched (a git worktree switch).
 //

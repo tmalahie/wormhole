@@ -10,7 +10,7 @@ export function deriveProjectName(projectRoot: string): string {
 
 /**
  * Absolute toplevel of the working tree containing `cwd`, or null when not in a
- * git repo. Used by `worm init` to bind the current normal clone as Slot 0
+ * git repo. Used by `worm init` to bind the current normal clone as the main worktree
  * (before `.worm/` exists, so `findMainRoot` can't be used yet).
  */
 export async function gitToplevel(cwd: string): Promise<string | null> {
@@ -27,7 +27,7 @@ export async function gitToplevel(cwd: string): Promise<string | null> {
 /**
  * Absolute path to the shared git common dir (the real `.git`) for the repo
  * containing `cwd`, or null when `cwd` isn't in a git repo. From a linked
- * worktree this resolves to Slot 0's `.git`, so its parent is Slot 0.
+ * worktree this resolves to the main worktree's `.git`, so its parent is the main worktree.
  * `--path-format=absolute` requires git >= 2.31.
  */
 export async function gitCommonDir(cwd: string): Promise<string | null> {
@@ -42,8 +42,8 @@ export async function gitCommonDir(cwd: string): Promise<string | null> {
 }
 
 /**
- * Strategy 3 root resolution: Slot 0 is the primary working tree, and `.worm/`
- * always lives there. From any slot we ask git for the common dir and take its
+ * Strategy 3 root resolution: the main worktree is the primary working tree, and `.worm/`
+ * always lives there. From any worktree we ask git for the common dir and take its
  * parent, then verify a `.worm/` exists. Replaces the bare-container walk.
  */
 export async function findMainRoot(

@@ -7,7 +7,7 @@ import { readDetached, readManifest, writeDetached, writeManifest } from "../cor
 
 /**
  * `worm detach <file>` — sever a shared-path tunnel in the CURRENT worktree only,
- * replacing the symlink with an independent real copy. The other slots keep the
+ * replacing the symlink with an independent real copy. The other worktrees keep the
  * shared link, and `worm sync` won't restore this one (the reconcile deref-guard
  * leaves a real file alone). The inverse of adoption: "I want this file local to
  * this worktree" — e.g. a per-worktree `.env` tweak that mustn't leak elsewhere.
@@ -51,11 +51,11 @@ export async function runDetach(file?: string): Promise<void> {
   await fs.unlink(linkPath);
   await fs.cp(realSource, linkPath, { recursive: true });
 
-  // Drop it from this slot's managed set — it's a local file now, not a tunnel.
+  // Drop it from this worktree's managed set — it's a local file now, not a tunnel.
   manifest[key] = tails.filter((t) => t !== file);
   await writeManifest(projectName, manifest);
 
-  // Record the detach so adoption/reconcile leave this slot-local file alone
+  // Record the detach so adoption/reconcile leave this worktree-local file alone
   // (delete the file and `worm sync` to re-attach).
   const detached = await readDetached(projectName);
   const list = detached[key] ?? [];
@@ -66,5 +66,5 @@ export async function runDetach(file?: string): Promise<void> {
   logger.success(
     `🌀 detached ${logger.bold(file)} in ${logger.dim(worktreeRoot)} — now a local copy.`
   );
-  logger.hint("Other slots keep the shared link; `worm sync` won't restore this one.");
+  logger.hint("Other worktrees keep the shared link; `worm sync` won't restore this one.");
 }

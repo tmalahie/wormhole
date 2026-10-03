@@ -424,7 +424,7 @@ test("adoption refuses when the same shared path is a real file in multiple slot
 
   const r = await sb.worm(["sync", "--yes"]);
   assert.notEqual(r.exitCode, 0, "should refuse rather than silently overwrite one");
-  assert.match(r.stderr, /multiple slots/);
+  assert.match(r.stderr, /multiple worktrees/);
 
   // Both copies survive untouched.
   assert.equal(await readFile(path.join(root, "shared.txt"), "utf8"), "slot0\n");
@@ -728,7 +728,7 @@ test("syncPermissions propagates a revoked rule instead of resurrecting it (3-wa
 
 const claudeSlug = (p) => p.replace(/[/.]/g, "-");
 
-test("shareHistory recipe links a sibling's Claude history to Slot 0's", async (t) => {
+test("a worktree's Claude project dir is linked to the main worktree's", async (t) => {
   const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
   t.after(() => rm(templateDir, { recursive: true, force: true }));
   await writeFile(
@@ -743,20 +743,20 @@ test("shareHistory recipe links a sibling's Claude history to Slot 0's", async (
   const root = await realpath(sb.projectRoot);
   const projectsDir = path.join(sb.wormHome, ".claude", "projects");
 
-  // Slot 0 is the canonical store — worm must not create a self-symlink for it.
+  // The main worktree's dir is the canonical store — never a self-symlink.
   await assert.rejects(
     stat(path.join(projectsDir, claudeSlug(root))),
     /ENOENT/,
-    "Slot 0 is not self-linked"
+    "main is not self-linked"
   );
 
-  // A sibling's history dir becomes a relative symlink to Slot 0's slug.
+  // A linked worktree's dir becomes a relative symlink to the main worktree's slug.
   await sb.worm(["worktree", "add", "feature-a", "--no-setup"]);
   const link = path.join(projectsDir, claudeSlug(wtPath(root, "feature-a")));
-  assert.equal(await readlink(link), claudeSlug(root), "relative symlink → Slot 0 slug");
+  assert.equal(await readlink(link), claudeSlug(root), "relative symlink → main slug");
 });
 
-test("shareHistory refuses to clobber a real history dir", async (t) => {
+test("a real Claude project dir for a new worktree is left alone, with a warning", async (t) => {
   const templateDir = await mkdtemp(path.join(tmpdir(), "worm-tmpl-"));
   t.after(() => rm(templateDir, { recursive: true, force: true }));
   await writeFile(
@@ -777,7 +777,7 @@ test("shareHistory refuses to clobber a real history dir", async (t) => {
   assert.equal(r.exitCode, 0, "real dir is a warning, not a fatal error");
   // The real dir and its contents survive untouched.
   await stat(path.join(realDir, "session.jsonl"));
-  assert.match(r.stderr + r.stdout, /real history dir/);
+  assert.match(r.stderr, /is a real directory — merge it/);
 });
 
 test("shareHistory warns on a cwd switch via a UserPromptSubmit hook", async (t) => {

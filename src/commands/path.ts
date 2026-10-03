@@ -18,7 +18,7 @@ export async function runPath(ref: string | undefined): Promise<void> {
 }
 
 /**
- * `worm cd`/`worm tp` only change the parent shell's cwd through the `worm()`
+ * `worm cd` only changes the parent shell's cwd through the `worm()`
  * function installed by `worm shell-init`; that wrapper intercepts them before
  * they reach the binary. So if this runs at all, the integration is missing —
  * explain how to set it up rather than failing with a raw "unknown command".

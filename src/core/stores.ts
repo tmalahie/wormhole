@@ -10,7 +10,7 @@ import type { Config, StoreConfig } from "../types.js";
 
 /** One shared_path resolved to a concrete link source. */
 export interface ResolvedLink {
-  /** Slot-relative path — both the link location AND the path within the store. */
+  /** Worktree-relative path — both the link location AND the path within the store. */
   tail: string;
   /** Absolute source the link points at. */
   source: string;
@@ -30,7 +30,7 @@ export interface ResolvedLink {
  * once (and clone at most once) per call.
  *
  * A tail ending in `/*` is a DIRECTORY GLOB: it links each child of that store
- * directory individually instead of the directory itself. Use it when the slot's
+ * directory individually instead of the directory itself. Use it when the worktree's
  * parent dir must stay a real, git-tracked directory — e.g. `.claude/skills/*`
  * links your personal skills one by one into a `.claude/skills/` that also holds
  * skills committed to the repo. New children are picked up by `worm sync` with
@@ -87,7 +87,7 @@ function parseGlob(tail: string): string | null {
 /**
  * Expand a `<dir>/*` entry into one link per direct child of the store's
  * directory. Dot-prefixed children are skipped (as a shell `*` would), which
- * also keeps `.DS_Store` and sync databases out of the slots. Children never
+ * also keeps `.DS_Store` and sync databases out of the worktrees. Children never
  * sprout — they exist by construction — but a missing PROFILE container is
  * sprouted as an empty dir so it's obvious where to drop new entries.
  */

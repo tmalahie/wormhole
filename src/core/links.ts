@@ -14,7 +14,7 @@ import {
 } from "../utils/fs.js";
 import type { ResolvedLink } from "./stores.js";
 
-/** Map of resolved slot path → relative link paths worm created in that slot. */
+/** Map of resolved worktree path → relative link paths worm created in that worktree. */
 export type LinkManifest = Record<string, string[]>;
 
 export interface ReconcileResult {
@@ -29,7 +29,7 @@ export interface ReconcileResult {
 export interface AdoptionOperation {
   type: "move" | "link" | "create-dir" | "conflict";
   tail: string;
-  slotPath: string;
+  worktreePath: string;
   sourcePath: string;
   conflictReason?: string;
 }
@@ -56,7 +56,7 @@ export async function writeManifest(
   await writeJson(managedLinksFile(projectName), manifest);
 }
 
-/** Per-slot tails the user localised via `worm detach` (resolved slot path → tails). */
+/** Per-worktree tails the user localised via `worm detach` (resolved worktree path → tails). */
 export type DetachRegistry = Record<string, string[]>;
 
 export async function readDetached(projectName: string): Promise<DetachRegistry> {
@@ -77,20 +77,20 @@ export async function writeDetached(
 }
 
 /**
- * Self-heal one slot's detach list: keep only tails that are still a real
+ * Self-heal one worktree's detach list: keep only tails that are still a real
  * (non-symlink) file on disk. Deleting the local file is the way to re-attach —
  * the tunnel comes back on the next `worm sync`. Mutates `registry` in place and
- * returns the live detached tails for this slot.
+ * returns the live detached tails for this worktree.
  */
 export async function liveDetached(
-  slotPath: string,
+  worktreePath: string,
   registry: DetachRegistry
 ): Promise<string[]> {
-  const key = path.resolve(slotPath);
+  const key = path.resolve(worktreePath);
   const want = registry[key] ?? [];
   const live: string[] = [];
   for (const tail of want) {
-    const lp = path.join(slotPath, tail);
+    const lp = path.join(worktreePath, tail);
     if ((await pathExists(lp)) && !(await isSymlink(lp))) live.push(tail);
   }
   if (live.length > 0) registry[key] = live;
@@ -99,7 +99,7 @@ export async function liveDetached(
 }
 
 /**
- * Reconcile one slot's wormhole tunnels against `desired` (already resolved to
+ * Reconcile one worktree's wormhole tunnels against `desired` (already resolved to
  * concrete sources by `resolveStoreLinks`), mutating `manifest` in place. Each
  * tail is linked DIRECTLY at its source (absolute — the `.worm/shared` two-hop
  * is gone): a profile source is sprouted empty when missing; an external-store
@@ -109,11 +109,11 @@ export async function liveDetached(
  * manifest.
  */
 export async function reconcileWorktreeLinks(
-  slotPath: string,
+  worktreePath: string,
   desired: ResolvedLink[],
   manifest: LinkManifest
 ): Promise<ReconcileResult> {
-  const key = path.resolve(slotPath);
+  const key = path.resolve(worktreePath);
   const previous = manifest[key] ?? [];
   const created: string[] = [];
   const pruned: string[] = [];
@@ -125,7 +125,7 @@ export async function reconcileWorktreeLinks(
 
   for (const link of desired) {
     let sourceExists = await pathExists(link.source);
-    // Sprout an empty profile source so the slot link never dangles; never
+    // Sprout an empty profile source so the worktree link never dangles; never
     // fabricate a file inside an external store.
     if (!sourceExists && link.sprout) {
       await ensureDir(path.dirname(link.source));
@@ -136,8 +136,8 @@ export async function reconcileWorktreeLinks(
       missing.push(link.tail);
       continue;
     }
-    const linkPath = path.join(slotPath, link.tail);
-    // Deref-guard (create side): a real (non-symlink) file here is a slot-local
+    const linkPath = path.join(worktreePath, link.tail);
+    // Deref-guard (create side): a real (non-symlink) file here is a worktree-local
     // override — `worm detach` made it real, or the user dropped a file in. Never
     // clobber it (ensureSymlink would throw) and stop tracking it as managed.
     if ((await pathExists(linkPath)) && !(await isSymlink(linkPath))) {
@@ -152,7 +152,7 @@ export async function reconcileWorktreeLinks(
   const desiredTails = desired.map((d) => d.tail);
   for (const rel of previous) {
     if (desiredTails.includes(rel)) continue;
-    const linkPath = path.join(slotPath, rel);
+    const linkPath = path.join(worktreePath, rel);
     if (await isSymlink(linkPath)) {
       await fs.unlink(linkPath);
       pruned.push(rel);
@@ -166,16 +166,16 @@ export async function reconcileWorktreeLinks(
 }
 
 /**
- * Unlink every managed symlink in a slot (used before removing the worktree).
+ * Unlink every managed symlink in a worktree (used before removing the worktree).
  * Only touches entries recorded in the manifest, and only if still a symlink.
  */
 export async function stripWorktreeLinks(
-  slotPath: string,
+  worktreePath: string,
   manifest: LinkManifest
 ): Promise<void> {
-  const rels = manifest[path.resolve(slotPath)] ?? [];
+  const rels = manifest[path.resolve(worktreePath)] ?? [];
   for (const rel of rels) {
-    const linkPath = path.join(slotPath, rel);
+    const linkPath = path.join(worktreePath, rel);
     if (await isSymlink(linkPath)) {
       await fs.unlink(linkPath);
     }
@@ -205,21 +205,21 @@ async function readMaybe(p: string): Promise<string | null> {
 }
 
 /**
- * Plan adoption operations for a slot: detect real files/dirs that live in the
- * slot but should instead live in the profile (profile-store links only — never
+ * Plan adoption operations for a worktree: detect real files/dirs that live in the
+ * worktree but should instead live in the profile (profile-store links only — never
  * external stores). Each adopted entry is moved into the profile and replaced
  * with a symlink. Returns the planned operations plus whether any are conflicts.
  *
  * Per shared path:
  * - already a symlink → skip (idempotent; an adopted entry is left untouched).
- * - absent in the slot → nothing to adopt.
+ * - absent in the worktree → nothing to adopt.
  * - absent (or only a sprouted empty placeholder) in the profile → adopt.
  * - identical regular-file content in the profile → adopt (de-duplicate).
  * - real, differing content on both sides (or a directory on either side) →
  *   conflict, surfaced cleanly rather than letting the symlink step throw.
  */
 export async function planAdoption(
-  slotPath: string,
+  worktreePath: string,
   desired: ResolvedLink[]
 ): Promise<AdoptionPlan> {
   const operations: AdoptionOperation[] = [];
@@ -228,20 +228,20 @@ export async function planAdoption(
   const adopt = (tail: string, source: string): void => {
     // ensureDir is idempotent, so always staging the parent is safe and simpler
     // than probing first; create-dir ops are internal (never shown to the user).
-    operations.push({ type: "create-dir", tail, slotPath, sourcePath: path.dirname(source) });
-    operations.push({ type: "move", tail, slotPath, sourcePath: source });
-    operations.push({ type: "link", tail, slotPath, sourcePath: source });
+    operations.push({ type: "create-dir", tail, worktreePath, sourcePath: path.dirname(source) });
+    operations.push({ type: "move", tail, worktreePath, sourcePath: source });
+    operations.push({ type: "link", tail, worktreePath, sourcePath: source });
   };
   const conflict = (tail: string, source: string, reason: string): void => {
-    operations.push({ type: "conflict", tail, slotPath, sourcePath: source, conflictReason: reason });
+    operations.push({ type: "conflict", tail, worktreePath, sourcePath: source, conflictReason: reason });
   };
 
   for (const link of profileLinks) {
-    const linkPath = path.join(slotPath, link.tail);
+    const linkPath = path.join(worktreePath, link.tail);
 
     // An adopted (or otherwise managed) entry is already a symlink — leave it.
     if (await isSymlink(linkPath)) continue;
-    // Nothing real in the slot → nothing to adopt.
+    // Nothing real in the worktree → nothing to adopt.
     if (!(await pathExists(linkPath))) continue;
 
     const linkIsDir = await isDirectory(linkPath);
@@ -267,8 +267,8 @@ export async function planAdoption(
       link.tail,
       link.source,
       linkIsDir || source === "dir"
-        ? "a directory exists in both the slot and the profile"
-        : "the slot copy differs from the profile copy"
+        ? "a directory exists in both the worktree and the profile"
+        : "the worktree copy differs from the profile copy"
     );
   }
 
@@ -277,26 +277,26 @@ export async function planAdoption(
 }
 
 /**
- * Execute adoption operations: create parent dirs, move slot entries into the
+ * Execute adoption operations: create parent dirs, move worktree entries into the
  * profile (copy-then-remove, so it works across filesystems), then symlink the
- * slot path back at the profile source. `conflict` ops are inert — callers must
+ * worktree path back at the profile source. `conflict` ops are inert — callers must
  * refuse to proceed before calling this.
  */
 export async function executeAdoption(
-  slotPath: string,
+  worktreePath: string,
   operations: AdoptionOperation[]
 ): Promise<void> {
   for (const op of operations) {
     if (op.type === "create-dir") {
       await ensureDir(op.sourcePath);
     } else if (op.type === "move") {
-      const linkPath = path.join(slotPath, op.tail);
+      const linkPath = path.join(worktreePath, op.tail);
       if (await pathExists(linkPath)) {
         await fs.cp(linkPath, op.sourcePath, { recursive: true, force: true });
         await fs.rm(linkPath, { recursive: true, force: true });
       }
     } else if (op.type === "link") {
-      const linkPath = path.join(slotPath, op.tail);
+      const linkPath = path.join(worktreePath, op.tail);
       await ensureSymlink(linkPath, op.sourcePath, { relative: false });
     }
   }

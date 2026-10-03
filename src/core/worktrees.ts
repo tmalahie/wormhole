@@ -287,7 +287,12 @@ export async function createWorktree(project: ProjectRef, opts: CreateOptions): 
   await worktreeAdd(mainRoot, target, branch, { createIfMissing: true, base });
 
   const wt: Worktree = { name, path: target, isMain: false, branch, slot: null };
-  await wireWorktree(project, wt);
+  const wired = await wireWorktree(project, wt);
+  if (wired.claudeDir === "real-dir") {
+    logger.warn(
+      `${claudeSlug(target)} in ~/.claude/projects is a real directory — merge it into ${claudeSlug(mainRoot)} by hand; not linked.`
+    );
+  }
 
   if (!opts.noSetup && config.hooks.on_create) {
     const res = await runHook("on_create", config.hooks.on_create, {

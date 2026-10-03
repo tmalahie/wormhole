@@ -56,7 +56,7 @@ export const QuickActionSchema = z
 // --- Recipes: composable capabilities, keyed by name (provider-style). A
 // recipe is ENABLED iff its key is present in `recipes`; each value is validated
 // by that recipe's own schema. The engine in `core/recipes.ts` iterates the
-// enabled set to materialize artifacts and wire each slot's settings.local.json.
+// enabled set to materialize artifacts and wire each worktree's settings.local.json.
 
 export const SandboxRecipeSchema = z
   .object({
@@ -187,9 +187,9 @@ export const ConfigSchema = z
   .object({
     // The branch the main worktree stays on, and the default base for new ones.
     baseBranch: z.string().min(1).default("main"),
-    // The "wormhole tunnels": files symlinked from each slot back into a store
+    // The "wormhole tunnels": files symlinked from each worktree back into a store
     // (the profile by default). The pool is emergent — slots are born via
-    // `worm universe add <branch>`.
+    // `worm worktree add <branch>`.
     shared_paths: z.array(SharedPathSchema).default([]),
     // Named external stores referenceable by `shared_paths` (project stores
     // override same-named global ones in ~/.worm/config.json).

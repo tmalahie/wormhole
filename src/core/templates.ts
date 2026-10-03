@@ -17,8 +17,9 @@ import {
 } from "./paths.js";
 
 export const DEFAULT_SETUP_SCRIPT = `#!/usr/bin/env bash
-# Warm-up hook (on_create). Runs from inside a slot's worktree when it is
-# created via \`worm universe add\` and on \`worm switch\`.
+# Setup hook (on_create). Runs inside a worktree when it is created
+# (\`worm worktree add\`, or Claude's WorktreeCreate hook) — no slot yet, so
+# install dependencies here and leave port-dependent steps to on_assign.
 # Add your install/setup commands here, for example:
 #   npm install
 #   pip install -r requirements.txt

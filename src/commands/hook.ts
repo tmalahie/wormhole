@@ -30,9 +30,9 @@ import { loadGlobalConfig } from "../core/global-config.js";
 import type { Worktree } from "../types.js";
 
 /**
- * `worm hook trigger <event>` — the inverted-dispatch entry point. A slot's
+ * `worm hook trigger <event>` — the inverted-dispatch entry point. A worktree's
  * settings.local.json holds ONE static entry per event that calls this; here we
- * resolve the live slot, read the project's recipes, and run each enabled
+ * resolve the live worktree, read the project's recipes, and run each enabled
  * recipe's commands for the event (env injected, logging owned by the engine).
  *
  * Contract: this runs on the agent's hot path, so it must NEVER throw, and for a

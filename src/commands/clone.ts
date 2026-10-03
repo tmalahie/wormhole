@@ -35,11 +35,11 @@ export async function runClone(
     }
   }
 
-  // A plain (non-bare) clone: the checkout itself becomes Slot 0. Origin and
+  // A plain (non-bare) clone: the checkout itself becomes the main worktree. Origin and
   // remote-tracking refs are set up by git, so no refspec patching needed.
   logger.info(`🪐 Cloning ${logger.bold(url)} into ${logger.bold(dest)}`);
   await runOrThrow("git", ["clone", url, dest], {}, `git clone failed for ${url}`);
-  logger.step("📦 cloned (Slot 0)");
+  logger.step("📦 cloned (the main worktree)");
 
   await bindProject(dest, {
     name: options.name,

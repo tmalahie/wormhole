@@ -158,8 +158,8 @@ export async function gitHasRemote(cwd: string, name?: string): Promise<boolean>
 }
 
 /**
- * Absolute path to the COMMON git dir for the repo at `cwd` (shared by Slot 0
- * and every linked worktree). For Slot 0 this is `<root>/.git`; from a sibling
+ * Absolute path to the COMMON git dir for the repo at `cwd` (shared by the main worktree
+ * and every linked worktree). For the main worktree this is `<root>/.git`; from a linked
  * worktree `git` still reports the common dir, not the worktree's own gitdir.
  * Returns null when `cwd` isn't a git repo.
  */
@@ -175,7 +175,7 @@ export async function gitCommonDir(cwd: string): Promise<string | null> {
  * Idempotently add `entry` to the repo's COMMON `info/exclude`, so it ignores
  * the pattern across every worktree at once (the file is shared). Used for
  * worm-managed local files that must not show up as untracked — `.worm/` and
- * each slot's generated env file. Non-fatal: silently skips if git can't be
+ * each worktree's generated env file. Non-fatal: silently skips if git can't be
  * reached or the file can't be written.
  */
 export async function ensureGitExclude(cwd: string, entry: string): Promise<void> {
@@ -196,39 +196,6 @@ export async function ensureGitExclude(cwd: string, entry: string): Promise<void
   } catch {
     // perms or an exotic git layout — skip silently.
   }
-}
-
-/**
- * Switch the working tree at `repoRoot` to `branch` in place (no worktree
- * add/remove). The Strategy 3 daily primitive: a permanent slot just changes
- * branch. With { create:true } it creates the branch, tracking a remote of the
- * same name when one exists.
- */
-export async function switchBranch(
-  repoRoot: string,
-  branch: string,
-  options: { create?: boolean } = {}
-): Promise<void> {
-  const args = ["switch"];
-  if (await branchExists(repoRoot, branch)) {
-    args.push(branch);
-  } else {
-    if (!options.create) {
-      throw new WormError(`Branch "${branch}" does not exist.`, {
-        hint: `Pass --create to create it, or run \`git branch ${branch}\` first.`,
-      });
-    }
-    const remoteRef = await remoteBranchExists(repoRoot, branch);
-    // `git switch -c <branch> <remote-ref>` sets up tracking via autoSetupMerge.
-    if (remoteRef) args.push("-c", branch, remoteRef);
-    else args.push("-c", branch);
-  }
-  await runOrThrow(
-    "git",
-    args,
-    { cwd: repoRoot },
-    `Failed to switch to branch "${branch}" in ${repoRoot}`
-  );
 }
 
 /**

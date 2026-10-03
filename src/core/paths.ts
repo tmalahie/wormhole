@@ -75,10 +75,10 @@ export function globalProjectFile(projectName: string, fileName: string): string
 }
 
 /**
- * The `syncPermissions` recipe's three-way base snapshot for ONE slot
- * (`~/.worm/projects/<name>/.sync-permissions.base.<slot>.json`). Per-slot because
- * each slot diverges from the canonical store independently, and machine-local
- * (gitignored by `ensureGlobalRoot`) because every machine has a slot called
+ * The `syncPermissions` recipe's three-way base snapshot for ONE worktree
+ * (`~/.worm/projects/<name>/.sync-permissions.base.<worktree>.json`). Per-worktree because
+ * each worktree diverges from the canonical store independently, and machine-local
+ * (gitignored by `ensureGlobalRoot`) because every machine has a worktree called
  * `main` — mirroring `.sync-global-settings.base.json` at the global scope.
  */
 export function syncPermissionsBaseFile(projectName: string, slotName: string): string {
@@ -91,7 +91,7 @@ export function globalProjectScriptsDir(projectName: string): string {
 }
 
 /**
- * Durable per-project state lives in the profile (survives a slot-0 reclone);
+ * Durable per-project state lives in the profile (survives a reclone of the main worktree);
  * the project's `.worm/recipes` and `.worm/logs` are symlinks INTO these. The
  * materialized recipe artifacts (Dockerfile/compose/policy) are the real files.
  */
@@ -106,8 +106,8 @@ export function globalProjectLogsDir(projectName: string): string {
 /**
  * The canonical Claude memory store for a project, in the profile
  * (`~/.worm/projects/<name>/.claude/memory`). The shareMemory recipe links
- * every slot's `~/.claude/projects/<slug>/memory` at this one dir, so memory is
- * shared across slots AND durable across a slot-0 reclone.
+ * every worktree's `~/.claude/projects/<slug>/memory` at this one dir, so memory is
+ * shared across worktrees AND durable across a reclone of the main worktree.
  */
 export function globalProjectMemoryDir(projectName: string): string {
   return path.join(globalProjectDir(projectName), ".claude", "memory");
@@ -174,7 +174,7 @@ export function localLogsDir(mainRoot: string): string {
 /**
  * Path to the managed-link manifest. Lives in the PROFILE
  * (`~/.worm/projects/<name>/.managed-links.json`) so it's durable per project
- * and survives a slot-0 reclone. `worm sync` records the symlinks it creates
+ * and survives a reclone of the main worktree. `worm sync` records the symlinks it creates
  * here so prune/GC only ever touches links it owns — never real user files.
  */
 export function managedLinksFile(projectName: string): string {
@@ -183,8 +183,8 @@ export function managedLinksFile(projectName: string): string {
 
 /**
  * Path to the detach registry (`~/.worm/projects/<name>/.detached-links.json`):
- * per-slot tails the user localised with `worm detach`. Adoption and reconcile
- * skip these so a detached file stays a slot-local real copy across syncs —
+ * per-worktree tails the user localised with `worm detach`. Adoption and reconcile
+ * skip these so a detached file stays a worktree-local real copy across syncs —
  * disambiguating an intentional override from a file waiting to be adopted.
  */
 export function detachedLinksFile(projectName: string): string {

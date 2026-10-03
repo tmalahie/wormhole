@@ -64,14 +64,14 @@ export async function runInit(options: InitOptions = {}): Promise<void> {
 }
 
 /**
- * Bind a normal git clone as Slot 0 of a worm project. Shared between
+ * Bind a normal git clone as the main worktree of a worm project. Shared between
  * `worm init` (current repo) and `worm clone` (freshly cloned repo).
  */
 export async function bindProject(
   projectRoot: string,
   options: InitOptions = {}
 ): Promise<void> {
-  // Canonicalise so every later resolution (git --git-common-dir, scanUniverses,
+  // Canonicalise so every later resolution (git --git-common-dir, listProjectWorktrees,
   // manifest keys) agrees on one path even across /var → /private/var symlinks.
   projectRoot = await fs.realpath(projectRoot);
 
@@ -84,7 +84,7 @@ export async function bindProject(
 
   const projectName = options.name ?? deriveProjectName(projectRoot);
   logger.info(
-    `🛸 Binding ${logger.bold(projectName)} as Slot 0 (${logger.dim(projectRoot)})`
+    `🛸 Binding ${logger.bold(projectName)} as the main worktree (${logger.dim(projectRoot)})`
   );
 
   const existed = await globalProfileExists(projectName);
@@ -117,17 +117,17 @@ export async function bindProject(
     logger.step("📝 wrote .worm/.gitignore (self-contained)");
   }
 
-  // Slot 0 is a real working tree, so git would otherwise see .worm/ as
+  // the main worktree is a real working tree, so git would otherwise see .worm/ as
   // untracked. Exclude it LOCALLY (.git/info/exclude, not the tracked
   // .gitignore) so `git status` stays clean without touching the repo's files.
   await ensureGitExclude(projectRoot, "/.worm/");
 
-  // Reconcile Slot 0's wormhole tunnels (links straight into the profile) and
+  // Reconcile the main worktree's wormhole tunnels (links straight into the profile) and
   // seed the manifest. First, adopt any existing local files into the profile.
   const manifest = await readManifest(projectName);
   const links = await resolveStoreLinks(config, projectName);
 
-  // Plan and execute adoption (move slot-local files into profile, then symlink).
+  // Plan and execute adoption (move worktree-local files into profile, then symlink).
   const adoptionPlan = await planAdoption(projectRoot, links);
   if (adoptionPlan.operations.length > 0) {
     if (adoptionPlan.hasConflicts) {
@@ -136,7 +136,7 @@ export async function bindProject(
         .map((o) => `  ${o.tail} — ${o.conflictReason}`)
         .join("\n");
       throw new WormError(
-        `Cannot adopt — a real file exists in both Slot 0 and the profile:\n${conflicts}`,
+        `Cannot adopt — a real file exists in both the main worktree and the profile:\n${conflicts}`,
         { hint: "Keep the copy you want (delete the other), then re-run `worm init`." }
       );
     }
@@ -188,7 +188,7 @@ export async function bindProject(
     `   Edit ${logger.bold("config.json")} (shared_paths, hooks, recipes) and ${logger.bold("scripts/setup.sh")} (warm-up commands) there.`
   );
   logger.raw(
-    `   Spin up a parallel universe with ${logger.bold("worm universe add <branch>")}; inspect with ${logger.bold("worm status")}.`
+    `   Add a worktree with ${logger.bold("worm worktree add <branch>")}, give it ports with ${logger.bold("worm slot assign")}; inspect with ${logger.bold("worm status")}.`
   );
 }
 
@@ -214,7 +214,7 @@ async function ensureGlobalRoot(): Promise<void> {
     "# wormhole personal repo\n\nThis directory is managed by the `worm` CLI.\nIt holds per-project profiles (projects/), shared rules (shared/), and templates (templates/).\n"
   );
 
-  // Machine-local state must never sync across machines (it holds absolute slot
+  // Machine-local state must never sync across machines (it holds absolute worktree
   // paths / per-host markers) — exclude it so the `autosync` recipe doesn't
   // commit & push it and create cross-machine conflicts on every node. Reconcile
   // (append missing lines) rather than write-if-missing, so a re-run of `init`

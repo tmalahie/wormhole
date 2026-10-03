@@ -38,12 +38,12 @@ export interface SyncOptions {
 }
 
 /**
- * Declarative reconciliation of the cognitive layer across every existing slot:
- * ensures each slot's wormhole tunnels (shared_paths) match the config, prunes
+ * Declarative reconciliation of the cognitive layer across every existing worktree:
+ * ensures each worktree's wormhole tunnels (shared_paths) match the config, prunes
  * managed links that are no longer declared, and drops manifest entries for
- * slots that no longer exist. Idempotent. Does NOT create or remove slots.
+ * worktrees that no longer exist. Idempotent. Does NOT create or remove worktrees.
  *
- * Detects files that exist in slots but should be in the profile (adoption
+ * Detects files that exist in worktrees but should be in the profile (adoption
  * candidates) and shows a plan before executing. With `--yes`, skips confirmation.
  *
  * With `--global`, reconciles the HOME scope instead: `~/<tail>` →
@@ -61,71 +61,71 @@ export async function runSync(options: SyncOptions = {}): Promise<void> {
   // Ensure the consolidated layout (recipes/logs symlinks into the profile,
   // manifest in the profile); migrates an old project in place.
   await ensureLocalLayout(root, projectName);
-  const slots = await listProjectWorktrees(root, projectName);
+  const worktrees = await listProjectWorktrees(root, projectName);
   // Resolve shared_paths to concrete sources once (clones any missing store).
   const links = await resolveStoreLinks(config, projectName);
 
-  // Detach registry: per-slot tails the user localised. Self-heal each live
-  // slot (a deleted local file re-attaches), GC vanished slots, then exclude
-  // detached tails per slot from BOTH adoption and reconcile so a detached file
+  // Detach registry: per-worktree tails the user localised. Self-heal each live
+  // worktree (a deleted local file re-attaches), GC vanished worktrees, then exclude
+  // detached tails per worktree from BOTH adoption and reconcile so a detached file
   // stays a local copy instead of being adopted or relinked.
   const detached = await readDetached(projectName);
-  const detachedBySlot = new Map<string, string[]>();
-  for (const slot of slots) {
-    detachedBySlot.set(path.resolve(slot.path), await liveDetached(slot.path, detached));
+  const detachedByWorktree = new Map<string, string[]>();
+  for (const worktree of worktrees) {
+    detachedByWorktree.set(path.resolve(worktree.path), await liveDetached(worktree.path, detached));
   }
-  const liveKeys = new Set(slots.map((s) => path.resolve(s.path)));
+  const liveKeys = new Set(worktrees.map((s) => path.resolve(s.path)));
   for (const key of Object.keys(detached)) {
     if (!liveKeys.has(key)) delete detached[key];
   }
   await writeDetached(projectName, detached);
-  const slotLinks = (slot: Worktree) => {
-    const d = detachedBySlot.get(path.resolve(slot.path)) ?? [];
+  const worktreeLinks = (worktree: Worktree) => {
+    const d = detachedByWorktree.get(path.resolve(worktree.path)) ?? [];
     return d.length > 0 ? links.filter((l) => !d.includes(l.tail)) : links;
   };
 
-  // Plan adoption (move slot-local files into the profile, then symlink) for
-  // every slot, then execute once the whole plan is confirmed conflict-free.
-  const allOperations: Array<{ slot: Worktree; operations: AdoptionOperation[] }> = [];
-  for (const slot of slots) {
-    const plan = await planAdoption(slot.path, slotLinks(slot));
+  // Plan adoption (move worktree-local files into the profile, then symlink) for
+  // every worktree, then execute once the whole plan is confirmed conflict-free.
+  const allOperations: Array<{ worktree: Worktree; operations: AdoptionOperation[] }> = [];
+  for (const worktree of worktrees) {
+    const plan = await planAdoption(worktree.path, worktreeLinks(worktree));
     if (plan.operations.length > 0) {
-      allOperations.push({ slot, operations: plan.operations });
+      allOperations.push({ worktree, operations: plan.operations });
     }
   }
 
   if (allOperations.length > 0) {
-    // Per-slot conflicts: a real file/dir exists in both the slot and the profile.
-    const conflicts = allOperations.flatMap(({ slot, operations }) =>
+    // Per-worktree conflicts: a real file/dir exists in both the worktree and the profile.
+    const conflicts = allOperations.flatMap(({ worktree, operations }) =>
       operations
         .filter((o) => o.type === "conflict")
-        .map((o) => `  ${slot.name}: ${o.tail} — ${o.conflictReason}`)
+        .map((o) => `  ${worktree.name}: ${o.tail} — ${o.conflictReason}`)
     );
     if (conflicts.length > 0) {
       throw new WormError(
-        `Cannot adopt — a real file exists in both the slot and the profile:\n${conflicts.join("\n")}`,
+        `Cannot adopt — a real file exists in both the worktree and the profile:\n${conflicts.join("\n")}`,
         { hint: "Keep the copy you want (delete the other), then re-run `worm sync`." }
       );
     }
 
-    // Cross-slot conflicts: two slots each hold a real file for the same shared
+    // Cross-worktree conflicts: two worktrees each hold a real file for the same shared
     // path. Adopting both would silently overwrite one in the profile, so refuse.
     const claimants = new Map<string, string[]>();
-    for (const { slot, operations } of allOperations) {
+    for (const { worktree, operations } of allOperations) {
       for (const op of operations) {
         if (op.type !== "move") continue;
         const names = claimants.get(op.sourcePath) ?? [];
-        names.push(slot.name);
+        names.push(worktree.name);
         claimants.set(op.sourcePath, names);
       }
     }
     const collisions = [...claimants.entries()].filter(([, names]) => names.length > 1);
     if (collisions.length > 0) {
       const detail = collisions
-        .map(([source, names]) => `  ${tildeify(source)} — claimed by slots ${names.join(", ")}`)
+        .map(([source, names]) => `  ${tildeify(source)} — claimed by worktrees ${names.join(", ")}`)
         .join("\n");
       throw new WormError(
-        `Cannot adopt — the same shared path is a real file in multiple slots:\n${detail}`,
+        `Cannot adopt — the same shared path is a real file in multiple worktrees:\n${detail}`,
         { hint: "Keep one copy (let the others become symlinks), then re-run `worm sync`." }
       );
     }
@@ -154,15 +154,15 @@ export async function runSync(options: SyncOptions = {}): Promise<void> {
       }
     }
 
-    for (const { slot, operations } of allOperations) {
-      await executeAdoption(slot.path, operations);
+    for (const { worktree, operations } of allOperations) {
+      await executeAdoption(worktree.path, operations);
     }
   }
 
   // Wire every worktree (links, slot env file, Claude project dir, recipe + worktree hooks).
   let created = 0;
   let pruned = 0;
-  for (const wt of slots) {
+  for (const wt of worktrees) {
     const res = await wireWorktree(project, wt);
     created += res.links.created.length;
     pruned += res.links.pruned.length;
@@ -185,7 +185,7 @@ export async function runSync(options: SyncOptions = {}): Promise<void> {
 
   // Drop manifest entries for worktrees that no longer exist.
   const manifest = await readManifest(projectName);
-  const live = new Set(slots.map((s) => path.resolve(s.path)));
+  const live = new Set(worktrees.map((s) => path.resolve(s.path)));
   for (const key of Object.keys(manifest)) {
     if (!live.has(key)) delete manifest[key];
   }
@@ -197,7 +197,7 @@ export async function runSync(options: SyncOptions = {}): Promise<void> {
   if (ws === "unparseable") logger.warn(`${projectName}.code-workspace is not plain JSON — left as-is.`);
 
   logger.success(
-    `Synced ${slots.length} worktree${slots.length === 1 ? "" : "s"} — ${created} linked, ${pruned} pruned.`
+    `Synced ${worktrees.length} worktree${worktrees.length === 1 ? "" : "s"} — ${created} linked, ${pruned} pruned.`
   );
 }
 
@@ -236,7 +236,7 @@ async function syncWorkspaceFile(
 
 /**
  * Reconcile HOME-scope shared links from the global config. Independent of any
- * project — never resolves Slot 0. Idempotent; does not provision `~/.worm`
+ * project — never resolves the main worktree. Idempotent; does not provision `~/.worm`
  * (if there's nothing configured and no prior state, it's a no-op with a hint).
  */
 async function runGlobalSync(): Promise<void> {

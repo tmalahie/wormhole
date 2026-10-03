@@ -45,10 +45,10 @@ import type {
  * contributes (1) artifacts materialized under `.worm/recipes/<name>/` and
  * (2) hook commands run by the dispatcher.
  *
- * Hooks are INVERTED: a slot's `.claude/settings.local.json` holds ONE static
+ * Hooks are INVERTED: a worktree's `.claude/settings.local.json` holds ONE static
  * entry per hook event — `node "<cli>" hook trigger <event>` — installed once.
  * At trigger time the dispatcher (`runRecipeHooks` / `runRecipeFilters` /
- * `runRecipeContext`, invoked by `worm hook trigger`) resolves the live slot,
+ * `runRecipeContext`, invoked by `worm hook trigger`) resolves the live worktree,
  * asks each enabled recipe for
  * its commands for that event, injects env (the WORM_* vars + WORM_LOG_DIR), and
  * owns logging. So enabling/disabling/updating a recipe is a pure config change —
@@ -70,7 +70,7 @@ export interface RecipeArtifact {
 /** Claude hook-event key (PreToolUse / SessionStart / SessionEnd) → entries. */
 export type SettingsContribution = Record<string, unknown[]>;
 
-/** Minimal worktree shape the wiring needs (UniverseSlot satisfies it). */
+/** Minimal worktree shape the wiring needs (Worktree satisfies it). */
 export interface WiringWorktree {
   name: string;
   path: string;
@@ -85,10 +85,10 @@ export interface RecipeWireContext {
 export interface Recipe<C = unknown> {
   readonly name: string;
   /**
-   * "project" (default) → wired per-slot by `worm sync` / `universe add` into
-   * each slot's settings.local.json. "global" → machine-wide, declared in
+   * "project" (default) → wired per-worktree by `worm sync` / `worktree add` into
+   * each worktree's settings.local.json. "global" → machine-wide, declared in
    * ~/.worm/config.json and wired by `worm sync --global` into
-   * ~/.claude/settings.json; runs without any project/slot context.
+   * ~/.claude/settings.json; runs without any project/worktree context.
    */
   readonly scope?: "project" | "global";
   /** This recipe's config slice, or undefined when it's disabled. */
@@ -99,7 +99,7 @@ export interface Recipe<C = unknown> {
    *  time by the dispatcher (and probed at wiring time to decide which static
    *  dispatcher entries to install). */
   hooks?(ctx: RecipeWireContext, cfg: C): HookContribution;
-  /** Imperative per-slot setup (idempotent), run when a worktree is wired. */
+  /** Imperative per-worktree setup (idempotent), run when a worktree is wired. */
   onWire?(ctx: RecipeWireContext, cfg: C): Promise<void>;
 }
 
@@ -253,8 +253,8 @@ function logged(command: string, logFile: string, label: string): string {
 }
 
 // --- the syncPermissions recipe ---------------------------------------------
-// Unions the `permissions` block of each slot's settings.local.json with a
-// canonical store shared across slots (so approving a command in one slot
+// Unions the `permissions` block of each worktree's settings.local.json with a
+// canonical store shared across worktrees (so approving a command in one worktree
 // teaches them all). It contributes session-start + session-end commands running
 // a merge-preserving script — only `permissions` is synced; `hooks` (e.g. the
 // sandbox recipe's) are left intact, which is what lets the two recipes share
@@ -276,11 +276,11 @@ const syncPermissionsRecipe: Recipe<SyncPermissionsRecipeConfig> = {
   hooks({ projectName, worktree }, cfg) {
     const script = packagedRecipeScript("syncPermissions", "sync-claude-settings.js");
     // The canonical store lives in the PERSISTENT global profile (in ~/.worm —
-    // committed, shared across slots, surviving re-clones), NOT the ephemeral
+    // committed, shared across worktrees, surviving re-clones), NOT the ephemeral
     // local .worm/recipes/. It's also where a user's accumulated allowlist
     // already lives, so existing permissions are pulled in on first run.
     const canonical = globalProjectFile(projectName, path.join(".claude", "settings.local.json"));
-    // Three-way ancestor, one per slot (each diverges from canonical on its own).
+    // Three-way ancestor, one per worktree (each diverges from canonical on its own).
     const base = syncPermissionsBaseFile(projectName, worktree.name);
     const command = `node "${script}" "${canonical}" "${base}"${keyArgs(cfg?.keys)}`;
     // Same bidirectional sync on both boundaries: pull on start, push on end.
@@ -289,49 +289,30 @@ const syncPermissionsRecipe: Recipe<SyncPermissionsRecipeConfig> = {
 };
 
 // --- the shareHistory recipe -------------------------------------------------
-// Symlinks each sibling slot's Claude history dir to Slot 0's canonical one, so
-// every slot shares one conversation history. Purely imperative (onWire)
-// — no artifacts, no hook commands. (Lifts the `ln -sfn` block that used to live
-// in projects' setup.sh into a first-class recipe.)
+// One conversation history per repo is core worm behaviour now: wiring a
+// worktree links its Claude project dir to the main worktree's (see
+// core/worktrees.ts:linkClaudeProjectDir). What this recipe adds is the reminder
+// for a conversation whose cwd changes between two prompts — an old conversation
+// resumed somewhere else, or a session that moved worktrees outside
+// EnterWorktree (which tells the model itself). A UserPromptSubmit hook;
+// worm-owned, config-independent code → packaged once, like the sandbox
+// interceptor. Expected to retire once no such conversations remain.
 
 const shareHistoryRecipe: Recipe<ShareHistoryRecipeConfig> = {
   name: "shareHistory",
   select: (recipes) => recipes.shareHistory,
-  // Every slot shares ONE history, so a single chat can hop between worktrees as
-  // you `worm switch`. This UserPromptSubmit hook warns the model when the
-  // conversation's cwd changes between prompts. Worm-owned, config-independent
-  // code → packaged once, not copied per project (like the sandbox interceptor).
   hooks() {
     const script = packagedRecipeScript("shareHistory", "inject-cwd-on-switch.js");
     return { "user-prompt-submit": [{ command: `node "${script}"` }] };
   },
-  async onWire({ worktree, mainRoot }) {
-    const projectsDir = claudeProjectsDir();
-    const canonicalSlug = claudeSlug(mainRoot);
-    const worktreeSlug = claudeSlug(worktree.path);
-    if (worktreeSlug === canonicalSlug) return; // Slot 0 *is* the canonical store.
-
-    const linkPath = path.join(projectsDir, worktreeSlug);
-    if ((await pathExists(linkPath)) && !(await isSymlink(linkPath))) {
-      logger.warn(
-        `${worktree.name}: ${linkPath} is a real history dir — merge it into ${canonicalSlug}/ by hand; skipping.`
-      );
-      return;
-    }
-    const res = await ensureSymlink(linkPath, path.join(projectsDir, canonicalSlug), {
-      relative: true,
-      type: "dir",
-    });
-    if (res.created) logger.step(`🔗 ${worktree.name}: Claude history → ${canonicalSlug}`);
-  },
 };
 
 // --- the shareMemory recipe --------------------------------------------------
-// Links every slot's Claude *memory* dir at ONE canonical store in the PROFILE
-// (~/.worm/projects/<name>/.claude/memory), so all slots read & write one
-// shared memory that survives a slot-0 reclone. Unlike shareHistory — whose
-// canonical store IS Slot 0, so Slot 0 is left alone — the store here lives in
-// the profile, so Slot 0 is linked too. Purely imperative (onWire).
+// Links every worktree's Claude *memory* dir at ONE canonical store in the PROFILE
+// (~/.worm/projects/<name>/.claude/memory), so all worktrees read & write one
+// shared memory that survives a reclone of the main worktree. Unlike shareHistory — whose
+// canonical store IS the main worktree, so the main worktree is left alone — the store here lives in
+// the profile, so the main worktree is linked too. Purely imperative (onWire).
 
 /** Move a real `memory/` dir into the profile to seed the shared store, with an
  *  EXDEV fallback (copy+remove) for a profile on a different filesystem. */
@@ -377,9 +358,9 @@ const shareMemoryRecipe: Recipe<ShareMemoryRecipeConfig> = {
 
 // --- the autosync recipe (GLOBAL scope) --------------------------------------
 // Keeps the ~/.worm meta-repo synced across machines. Unlike the others it isn't
-// per-slot: it's declared in ~/.worm/config.json and wired by `worm sync --global`
+// per-worktree: it's declared in ~/.worm/config.json and wired by `worm sync --global`
 // into ~/.claude/settings.json, so it fires for EVERY Claude session regardless of
-// project (even outside a worm repo). Its hooks ignore slot context — the script
+// project (even outside a worm repo). Its hooks ignore worktree context — the script
 // acts on ~/.worm via WORM_HOME. pull on session start; push (debounced) on stop
 // (the reliable trigger for an always-open session) + a flush on session end.
 const autosyncRecipe: Recipe<AutosyncConfig> = {
@@ -436,9 +417,9 @@ const syncGlobalPermissionsRecipe: Recipe<SyncGlobalPermissionsRecipeConfig> = {
   },
 };
 
-// shareMemory is registered AFTER shareHistory so that, when both are enabled, a
-// sibling's whole project dir is already a symlink to Slot 0's before shareMemory
-// touches its memory subdir (it then resolves to Slot 0's link — a no-op).
+// shareMemory runs after wireWorktree has linked a worktree's Claude project dir
+// to the main worktree's, so for a linked worktree its memory subdir already
+// resolves to the main one's link — only the main worktree's is ever created.
 const REGISTRY: Recipe<any>[] = [
   sandboxRecipe,
   syncPermissionsRecipe,
@@ -496,12 +477,12 @@ export async function materializeRecipes(
   return written;
 }
 
-// --- per-slot hook wiring (installs the static dispatcher entries) -----------
+// --- per-worktree hook wiring (installs the static dispatcher entries) -----------
 
 /**
- * Install the dispatcher entries for one slot. Probes which events have at least
+ * Install the dispatcher entries for one worktree. Probes which events have at least
  * one enabled-recipe command, then writes ONE static `worm hook trigger <event>`
- * entry per such event into the slot's settings.local.json — the actual commands
+ * entry per such event into the worktree's settings.local.json — the actual commands
  * are NOT baked in; they're recomputed at trigger time. Also runs each recipe's
  * imperative `onWire`. Returns whether the file changed.
  */
@@ -514,7 +495,7 @@ export async function applyRecipeWiring(
   const ctx: RecipeWireContext = { mainRoot, projectName, worktree };
   const events = new Set<HookEvent>();
   for (const { recipe, cfg } of enabledRecipes(recipes)) {
-    // Imperative per-slot setup (e.g. shareHistory's symlink) runs first.
+    // Imperative per-worktree setup (e.g. shareHistory's symlink) runs first.
     if (recipe.onWire) await recipe.onWire(ctx, cfg);
     const contribution = recipe.hooks?.(ctx, cfg);
     if (!contribution) continue;
@@ -589,7 +570,7 @@ export async function applyGlobalRecipeWiring(recipes: RecipesConfig): Promise<b
 
 /**
  * Run GLOBAL-scope recipes' run-event commands for `event` — invoked by `worm
- * hook trigger --global <event>`, with NO project/slot context (global recipes
+ * hook trigger --global <event>`, with NO project/worktree context (global recipes
  * act on ~/.worm via WORM_HOME). Output surfaces only on a TTY: a hook's stdout
  * would otherwise be injected into the agent's context, and conflicts already
  * surface via the recipe's own marker + OS notification. Never throws.
@@ -736,7 +717,7 @@ function isWormManaged(entry: unknown): boolean {
   );
 }
 
-/** Merge `install` into a slot's `.claude/settings.local.json` (gitignored). */
+/** Merge `install` into a worktree's `.claude/settings.local.json` (gitignored). */
 async function writeWorktreeHooks(
   slotPath: string,
   install: SettingsContribution
@@ -749,7 +730,7 @@ async function writeWorktreeHooks(
  * recognises (see `isWormManaged`) — so on each run it strips its previous entries
  * and re-adds `install`, leaving every other hook and key intact. Pass an empty
  * `install` to strip. Idempotent. Returns whether the file changed. Used for both
- * a slot's settings.local.json and the machine-wide ~/.claude/settings.json.
+ * a worktree's settings.local.json and the machine-wide ~/.claude/settings.json.
  */
 async function writeHooksFile(
   settingsPath: string,

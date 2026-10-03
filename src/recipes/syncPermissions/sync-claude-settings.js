@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 // SessionStart/SessionEnd hook shipped WITH worm (syncPermissions recipe).
-// Keeps this slot's .claude/settings.local.json in step with a canonical store
-// shared by every slot of the project, so approving a command in one slot teaches
+// Keeps this worktree's .claude/settings.local.json in step with a canonical store
+// shared by every worktree of the project, so approving a command in one worktree teaches
 // them all. Only the CONFIGURED keys are touched (default: `permissions`) — every
 // other key is preserved untouched in each file, so recipes can share
 // settings.local.json without clobbering each other.
 //
 // The merge is the same recursive THREE-WAY merge the global recipe uses
-// (../_lib/settings-merge.js), against a machine-local per-slot base snapshot —
-// so a rule you REVOKE in one slot propagates instead of being resurrected by the
+// (../_lib/settings-merge.js), against a machine-local per-worktree base snapshot —
+// so a rule you REVOKE in one worktree propagates instead of being resurrected by the
 // union on the next session (which is what the old union-only merge did). With no
 // base yet the merge degrades to that same union, so a first run can't lose data.
 //
@@ -46,8 +46,8 @@ const projectDir = process.env.CLAUDE_PROJECT_DIR || process.cwd();
 const worktreeFile = path.join(projectDir, '.claude', 'settings.local.json');
 if (!canonicalFile || !baseFile) process.exit(0);
 
-// The per-slot base snapshots are machine-local (they hold this machine's
-// divergence, and every machine has a slot called `main`), so keep them out of
+// The per-worktree base snapshots are machine-local (they hold this machine's
+// divergence, and every machine has a worktree called `main`), so keep them out of
 // the ~/.worm git repo. init.ts owns the canonical .gitignore list; this mirrors
 // the global recipe's guard for installs that predate the entry.
 const BASE_IGNORE_PATTERN = 'projects/*/.sync-permissions.base.*.json';
@@ -82,7 +82,7 @@ const localNewer = mtime(worktreeFile) >= mtime(canonicalFile);
 const keys = expandKeys(configuredKeys, [local, canon, base]);
 
 // `hooks` (only synced when named in `keys`) merges on its USER-owned entries
-// only — worm's own per-slot dispatch entries are re-attached afterwards.
+// only — worm's own per-worktree dispatch entries are re-attached afterwards.
 const [localUserHooks, localWormHooks] = splitWormHooks(local.hooks);
 const [canonUserHooks] = splitWormHooks(canon.hooks);
 const [baseUserHooks] = splitWormHooks(base.hooks);
