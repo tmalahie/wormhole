@@ -72,8 +72,57 @@ function readSlots(ws) {
 
 const label = (w) => w.branch ?? w.name;
 
-function focus(wt) {
+const inside = (file, root) => file === root || file.startsWith(root + path.sep);
+
+/** Editor tabs showing a file under `root` (text and diff editors). */
+function tabsUnder(root) {
+  const found = [];
+  for (const group of vscode.window.tabGroups.all) {
+    for (const tab of group.tabs) {
+      const uri = tab.input?.uri ?? tab.input?.modified;
+      if (uri?.scheme === 'file' && inside(uri.fsPath, root)) found.push({ tab, group, uri });
+    }
+  }
+  return found;
+}
+
+/**
+ * Switch the window to another worktree — and take the open files along.
+ *
+ * Left alone, the tabs would keep pointing at the old worktree's copies, which
+ * is the other branch's code: the next edit lands in the wrong worktree. So the
+ * old worktree's tabs are closed and the same relative paths reopened from the
+ * new one (a file the other branch does not have is just dropped). Unsaved
+ * changes stop the switch until they are saved or discarded.
+ *
+ * All of it happens before the folder swap: swapping folder 0 restarts the
+ * extension host, and nothing after it is guaranteed to run.
+ */
+async function focus(wt) {
+  const current = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   const n = vscode.workspace.workspaceFolders?.length ?? 0;
+  if (current && current !== wt.path && n === 1) {
+    const old = tabsUnder(current);
+    const dirty = old.filter((t) => t.tab.isDirty);
+    if (dirty.length) {
+      const choice = await vscode.window.showWarningMessage(
+        `${dirty.length} file${dirty.length > 1 ? 's have' : ' has'} unsaved changes in ${path.basename(current)}.`,
+        { modal: true },
+        'Save all and switch',
+      );
+      if (choice !== 'Save all and switch') return false;
+      await vscode.workspace.saveAll(false);
+    }
+    const reopen = old
+      .map(({ uri, group, tab }) => ({ target: path.join(wt.path, path.relative(current, uri.fsPath)), column: group.viewColumn, active: tab.isActive && group.isActive }))
+      .filter((r) => fs.existsSync(r.target));
+    await vscode.window.tabGroups.close(old.map((t) => t.tab), true);
+    // Active one last, so it ends up focused.
+    reopen.sort((a, b) => Number(a.active) - Number(b.active));
+    for (const r of reopen) {
+      await vscode.window.showTextDocument(vscode.Uri.file(r.target), { viewColumn: r.column, preview: false, preserveFocus: !r.active });
+    }
+  }
   return vscode.workspace.updateWorkspaceFolders(0, n, { uri: vscode.Uri.file(wt.path), name: label(wt) });
 }
 

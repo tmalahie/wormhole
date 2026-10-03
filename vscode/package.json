@@ -3,7 +3,7 @@
   "displayName": "worm worktrees",
   "description": "Switch a worm project's VS Code window between its git worktrees.",
   "publisher": "tmalahie",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "license": "UNLICENSED",
   "repository": { "type": "git", "url": "https://github.com/tmalahie/wormhole" },
   "engines": { "vscode": "^1.90.0" },
