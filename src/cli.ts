@@ -12,9 +12,14 @@ import { runCompletion } from "./commands/completion.js";
 import { runSync } from "./commands/sync.js";
 import { runWire } from "./commands/wire.js";
 import { runDetach } from "./commands/detach.js";
-import { runSwitch } from "./commands/switch.js";
-import { runUniverseAdd, runUniverseRemove } from "./commands/universe.js";
-import { runHookTrigger } from "./commands/hook.js";
+import {
+  runWorktreeAdd,
+  runWorktreeList,
+  runWorktreePath,
+  runWorktreeRemove,
+} from "./commands/worktree.js";
+import { runSlotAssign, runSlotCurrent, runSlotList, runSlotRelease } from "./commands/slot.js";
+import { runHookTrigger, runHookWorktreeCreate, runHookWorktreeRemove } from "./commands/hook.js";
 import { runTemplateRender } from "./commands/template.js";
 
 // Single source of truth for the version: read it from package.json at runtime
@@ -29,7 +34,7 @@ const program = new Command();
 program
   .name("worm")
   .description(
-    "A permanent pool of warm git worktrees + a personal cognitive layer for AI coding agents."
+    "Git worktrees under .claude/worktrees, numbered runtime slots, and a personal cognitive layer for AI coding agents."
   )
   .version(version)
   .showHelpAfterError("(run `worm --help` for usage)")
@@ -42,62 +47,106 @@ program
 
 program
   .command("clone <url> [path]")
-  .description("Clone a repo and bind it as Slot 0 (the recommended entry point).")
+  .description("Clone a repo and bind it (the recommended entry point).")
   .option("-n, --name <name>", "Override the project name (default: derived from the URL).")
   .option("-t, --template <dir>", "Seed from a custom template directory.")
   .option("-f, --force", "Overwrite existing profile fields when they conflict.")
-  .option("--skip-hook", "Skip the on_create hook that warms up Slot 0.")
+  .option("--skip-hook", "Skip the on_create hook that sets up the main worktree.")
   .action(async (url: string, target: string | undefined, opts) => {
     await runClone(url, target, opts);
   });
 
 program
   .command("init")
-  .description("Bind the current git clone as Slot 0 of a worm project.")
+  .description("Bind the current git clone (its main worktree) to a worm project.")
   .option("-n, --name <name>", "Override the project name (default: basename of the repo root).")
   .option("-t, --template <dir>", "Seed from a custom template directory (config.json + optional scripts/).")
   .option("-f, --force", "Overwrite existing profile fields when they conflict.")
-  .option("--skip-hook", "Skip the on_create hook that warms up Slot 0.")
+  .option("--skip-hook", "Skip the on_create hook that sets up the main worktree.")
   .action(async (opts) => {
     await runInit(opts);
   });
 
-const universe = program
-  .command("universe")
-  .alias("uni")
-  .description("Manage the permanent universe pool (sibling worktrees).");
+const worktree = program
+  .command("worktree")
+  .alias("wt")
+  .description("Manage the project's worktrees (<root>/.claude/worktrees/<name>).");
 
-universe
+worktree
   .command("add <branch>")
-  .description("Create a permanent universe on <branch> as a sibling worktree.")
-  .option("-c, --create", "Create the branch if it does not exist yet.")
-  .option("--skip-hook", "Skip the on_create hook.")
+  .description("Create a worktree for <branch> (checked out, or created from --base), wire it and set it up.")
+  .option("--name <dir>", "Directory name under .claude/worktrees (default: from the branch).")
+  .option("--base <ref>", "Start point for a new branch (default: origin/<baseBranch>).")
+  .option("--no-setup", "Skip the on_create hook (dependency install).")
+  .option("--json", "Print {path, name, branch} as JSON.")
   .action(async (branch: string, opts) => {
-    await runUniverseAdd(branch, opts);
+    await runWorktreeAdd(branch, opts);
   });
 
-universe
+worktree
   .command("rm <ref>")
   .alias("remove")
-  .description("Remove a sibling universe. `<ref>` is a slot index or a branch. Slot 0 is protected.")
+  .description("Remove a worktree (name, branch, path or slot). The main worktree is protected.")
   .option("-f, --force", "Remove even with uncommitted changes.")
+  .option("--delete-branch", "Also delete the branch when it is merged.")
   .option("--skip-hook", "Skip the on_remove hook.")
   .action(async (ref: string, opts) => {
-    await runUniverseRemove(ref, opts);
+    await runWorktreeRemove(ref, opts);
   });
 
-program
-  .command("switch <branch>")
-  .description("Switch the current slot to <branch> in place and re-run the warm-up hook.")
-  .option("-c, --create", "Create the branch if it does not exist yet.")
-  .option("--skip-hook", "Skip the on_create hook.")
-  .action(async (branch: string, opts) => {
-    await runSwitch(branch, opts);
+worktree
+  .command("ls")
+  .alias("list")
+  .description("List every worktree (main first) with branch, uncommitted changes and slot.")
+  .option("--json", "Output as JSON.")
+  .action(async (opts) => {
+    await runWorktreeList(opts);
+  });
+
+worktree
+  .command("path <ref>")
+  .description("Print a worktree's path (name, branch or slot number).")
+  .action(async (ref: string) => {
+    await runWorktreePath(ref);
+  });
+
+const slot = program
+  .command("slot")
+  .description("Runtime slots: numbered port namespaces a worktree borrows to run its stack.");
+
+slot
+  .command("ls")
+  .alias("list")
+  .description("Show which worktree holds each slot.")
+  .option("--json", "Output as JSON.")
+  .action(async (opts) => {
+    await runSlotList(opts);
+  });
+
+slot
+  .command("assign [worktree] [n]")
+  .description("Give a worktree (default: the current one) a slot (default: the lowest free). Renders its env file, runs on_assign.")
+  .action(async (a?: string, b?: string) => {
+    await runSlotAssign(a, b);
+  });
+
+slot
+  .command("release [ref]")
+  .description("Release a worktree's slot (default: the current one; or pass a slot number). Runs on_release, removes the env file.")
+  .action(async (ref?: string) => {
+    await runSlotRelease(ref);
+  });
+
+slot
+  .command("current")
+  .description("Print the current worktree's slot; exits 1 when it holds none.")
+  .action(async () => {
+    await runSlotCurrent();
   });
 
 program
   .command("sync")
-  .description("Reconcile shared-path links across every slot (declarative, idempotent).")
+  .description("Reconcile every worktree's links, env file and hooks; write project.json and the VS Code workspace (idempotent).")
   .option("--global", "Reconcile HOME-scope links (~/.worm/config.json shared_paths) instead of the project.")
   .option("-y, --yes", "Skip the confirmation prompt when adoption moves are detected.")
   .action(async (opts) => {
@@ -131,7 +180,7 @@ template
 
 program
   .command("status")
-  .description("Show every slot in the universe pool.")
+  .description("Show the project's worktrees and their slots.")
   .option("--json", "Output as JSON.")
   .action(async (opts) => {
     await runStatus(opts);
@@ -139,28 +188,21 @@ program
 
 program
   .command("path <ref>")
-  .description("Print the worktree path for a branch or slot index. Used by `worm cd` / `worm tp`.")
+  .description("Print a worktree's path (name, branch or slot number). Used by `worm cd`.")
   .action(async (ref: string) => {
     await runPath(ref);
   });
 
 program
   .command("cd <ref>")
-  .description("cd into a slot's worktree (branch or index). Requires `worm shell-init`.")
+  .description("cd into a worktree (name, branch or slot number). Requires `worm shell-init`.")
   .action((ref: string) => {
     runShellAlias("cd", ref);
   });
 
 program
-  .command("tp <ref>")
-  .description("Teleport into a slot's worktree (branch or index). Requires `worm shell-init`.")
-  .action((ref: string) => {
-    runShellAlias("tp", ref);
-  });
-
-program
   .command("shell-init")
-  .description("Print a shell function enabling `worm cd <branch>` / `worm tp <N>`. Eval the output in your rc file.")
+  .description("Print a shell function enabling `worm cd <worktree>`. Eval the output in your rc file.")
   .action(() => {
     runShellInit();
   });
@@ -174,7 +216,21 @@ program
 
 const hook = program
   .command("hook")
-  .description("Internal: worm's recipe-hook dispatcher (invoked by a slot's settings.local.json).");
+  .description("Internal: hooks invoked by Claude Code (recipe dispatcher, worktree create/remove).");
+
+hook
+  .command("worktree-create")
+  .description("Claude's WorktreeCreate hook: JSON on stdin, prints the worktree path.")
+  .action(async () => {
+    await runHookWorktreeCreate();
+  });
+
+hook
+  .command("worktree-remove")
+  .description("Claude's WorktreeRemove hook: JSON on stdin, removes that worktree.")
+  .action(async () => {
+    await runHookWorktreeRemove();
+  });
 
 hook
   .command("trigger <event>")
@@ -186,7 +242,7 @@ hook
 
 program
   .command("destroy")
-  .description("Unbind this project: remove sibling universes, .worm/, and the global profile. Slot 0 is left intact.")
+  .description("Unbind this project: remove linked worktrees, .worm/, and the global profile. The main worktree is left intact.")
   .option("-f, --force", "Skip the confirmation prompt and force-remove dirty worktrees.")
   .action(async (opts) => {
     await runDestroy(opts);

@@ -108,7 +108,7 @@ export async function liveDetached(
  * and refuses to touch a path that has become a real file. Caller persists the
  * manifest.
  */
-export async function reconcileSlotLinks(
+export async function reconcileWorktreeLinks(
   slotPath: string,
   desired: ResolvedLink[],
   manifest: LinkManifest
@@ -169,7 +169,7 @@ export async function reconcileSlotLinks(
  * Unlink every managed symlink in a slot (used before removing the worktree).
  * Only touches entries recorded in the manifest, and only if still a symlink.
  */
-export async function stripSlotLinks(
+export async function stripWorktreeLinks(
   slotPath: string,
   manifest: LinkManifest
 ): Promise<void> {

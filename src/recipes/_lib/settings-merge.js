@@ -141,13 +141,14 @@ export function expandKeys(configured, sources, deny = WILDCARD_DENY) {
 // USER's own entries only: worm's are split off before the merge and re-attached
 // to the live file after, and the canonical copy never holds them.
 
-// Kept in sync with DISPATCH_MARKER in src/core/recipes.ts (this script is
-// standalone and can't import it).
-const DISPATCH_MARKER = "hook trigger ";
+// Kept in sync with WORM_HOOK_RE in src/core/recipes.ts (this script is
+// standalone and can't import it): the dispatcher entries (`worm hook trigger …`)
+// and Claude's worktree hooks (`worm hook worktree-create|remove`).
+const WORM_HOOK_RE = /hook (trigger |worktree-(create|remove)\b)/;
 
 const isWormHookEntry = (entry) =>
   Array.isArray(entry?.hooks) &&
-  entry.hooks.some((h) => typeof h?.command === "string" && h.command.includes(DISPATCH_MARKER));
+  entry.hooks.some((h) => typeof h?.command === "string" && WORM_HOOK_RE.test(h.command));
 
 /**
  * Split a settings `hooks` block into `[user, worm]`, preserving the per-event

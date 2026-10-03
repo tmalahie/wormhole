@@ -3,10 +3,10 @@ import { WormError } from "../utils/errors.js";
 import { confirm } from "../utils/prompt.js";
 import { fs, pathExists } from "../utils/fs.js";
 import { gitToplevel, readProjectName } from "../core/project.js";
-import { scanUniverses } from "../core/universe.js";
+import { listProjectWorktrees } from "../core/worktrees.js";
 import { pruneWorktrees, worktreeRemove } from "../core/git.js";
 import { globalProjectDir, localRoot } from "../core/paths.js";
-import { readManifest, stripSlotLinks } from "../core/links.js";
+import { readManifest, stripWorktreeLinks } from "../core/links.js";
 import { stripRecipeWiring } from "../core/recipes.js";
 
 export interface DestroyOptions {
@@ -30,20 +30,19 @@ export async function runDestroy(options: DestroyOptions = {}): Promise<void> {
     });
   }
 
-  const slots = await scanUniverses(root);
-  const siblings = slots.filter((s) => !s.isPrimary);
+  const siblings = (await listProjectWorktrees(root, projectName)).filter((w) => !w.isMain);
   const globalProfile = globalProjectDir(projectName);
 
   logger.info(`💥 About to destroy the ${logger.bold(projectName)} project:`);
   if (siblings.length > 0) {
-    logger.raw(`  • Remove ${siblings.length} sibling universe${siblings.length === 1 ? "" : "s"}:`);
+    logger.raw(`  • Remove ${siblings.length} linked worktree${siblings.length === 1 ? "" : "s"}:`);
     for (const s of siblings) {
       logger.raw(`      - ${s.name}: ${s.branch ?? "(detached)"} at ${logger.dim(s.path)}`);
     }
   }
   logger.raw(`  • Remove ${logger.dim(localRoot(root))}`);
   logger.raw(`  • Remove ${logger.dim(globalProfile)}`);
-  logger.raw(`  • Slot 0 (${logger.dim(root)}) is left untouched.`);
+  logger.raw(`  • The main worktree (${logger.dim(root)}) is left untouched.`);
   logger.raw("");
 
   if (!options.force) {
@@ -61,15 +60,15 @@ export async function runDestroy(options: DestroyOptions = {}): Promise<void> {
 
   const manifest = await readManifest(projectName);
 
-  // 1. Remove sibling worktrees (force so uncommitted changes don't block).
-  for (const slot of siblings) {
-    await stripSlotLinks(slot.path, manifest);
-    await worktreeRemove(root, slot.path, { force: true });
+  // 1. Remove linked worktrees (force so uncommitted changes don't block).
+  for (const wt of siblings) {
+    await stripWorktreeLinks(wt.path, manifest);
+    await worktreeRemove(root, wt.path, { force: true });
   }
   await pruneWorktrees(root);
 
-  // 2. Strip Slot 0's injected tunnels + recipe hooks (but never remove Slot 0 itself).
-  await stripSlotLinks(root, manifest);
+  // 2. Strip the main worktree's injected tunnels + recipe hooks (never remove it).
+  await stripWorktreeLinks(root, manifest);
   await stripRecipeWiring(root);
 
   // 3. Remove local .worm/ state.

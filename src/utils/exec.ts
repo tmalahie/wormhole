@@ -1,3 +1,4 @@
+import { isStdoutReserved } from "./logger.js";
 import { execa, ExecaError, type Options } from "execa";
 import { WormError } from "./errors.js";
 
@@ -8,6 +9,8 @@ export interface RunOptions {
   shell?: boolean | string;
   /** Written to the child's stdin (used by the hook dispatcher's filter run). */
   input?: string;
+  /** Kill the child after this many ms (it then reports a non-zero exit). */
+  timeout?: number;
 }
 
 export interface RunResult {
@@ -26,6 +29,7 @@ export async function run(
     env: options.env,
     stdio: options.inheritStdio ? "inherit" : "pipe",
     reject: false,
+    timeout: options.timeout,
   };
   const result = await execa(command, args, execOptions);
   return {
@@ -59,7 +63,13 @@ export async function runShell(
       cwd: options.cwd,
       env: options.env,
       shell: options.shell ?? true,
-      stdio: options.inheritStdio ? "inherit" : "pipe",
+      // Inherited stdio follows the logger: with stdout reserved for a machine
+      // answer, the child's stdout is sent to our stderr instead.
+      stdio: options.inheritStdio
+        ? isStdoutReserved()
+          ? ["ignore", 2, 2]
+          : "inherit"
+        : "pipe",
       input: options.input,
       reject: false,
     });

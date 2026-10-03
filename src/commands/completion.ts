@@ -1,14 +1,12 @@
 import { WormError } from "../utils/errors.js";
-import { SLOT_DIR_INFIX } from "../core/paths.js";
 
 /**
  * Emit a shell completion script for `worm`. Source from your rc file:
  *
  *   eval "$(worm completion zsh)"   # or bash
  *
- * Completes subcommand names, branch names for `switch` (via `git for-each-ref`),
- * and active branches + slot indices for `cd` / `tp` / `path` (via
- * `git worktree list --porcelain`).
+ * Completes subcommand names, and worktree names + checked-out branches for
+ * `cd` / `path` (via `git worktree list --porcelain`).
  */
 export function runCompletion(shell: string | undefined): void {
   if (!shell) {
@@ -33,24 +31,21 @@ export function runCompletion(shell: string | undefined): void {
 const COMMANDS = [
   "init",
   "clone",
-  "universe",
-  "switch",
+  "worktree",
+  "slot",
   "sync",
   "wire",
   "detach",
   "status",
   "cd",
-  "tp",
   "path",
   "destroy",
   "shell-init",
   "completion",
 ];
 
-// `switch` moves the current slot onto a branch — only branch names are valid.
-const BRANCH_ONLY_COMMANDS = ["switch"];
-// `cd`/`tp`/`path` flow through `worm path`'s resolver: a branch or a slot index.
-const REF_COMMANDS = ["cd", "tp", "path"];
+// `cd`/`path` flow through `worm path`'s resolver: a worktree name, a branch or a slot.
+const REF_COMMANDS = ["cd", "path"];
 
 const BASH = `# worm bash completion. Source with: eval "$(worm completion bash)"
 _worm_complete() {
@@ -64,16 +59,12 @@ _worm_complete() {
   fi
 
   case "$cmd" in
-    ${BRANCH_ONLY_COMMANDS.join("|")})
-      local branches
-      branches="$(git for-each-ref --format='%(refname:short)' refs/heads 2>/dev/null)"
-      COMPREPLY=($(compgen -W "$branches" -- "$cur"))
-      ;;
     ${REF_COMMANDS.join("|")})
       local refs wtlist
       wtlist="$(git worktree list --porcelain 2>/dev/null)"
       refs="$(printf '%s\\n' "$wtlist" | sed -nE 's|^branch refs/heads/||p;')
-$(printf '%s\\n' "$wtlist" | sed -nE 's|^worktree .*${SLOT_DIR_INFIX}([0-9]+)$|\\1|p;')"
+main
+$(printf '%s\\n' "$wtlist" | sed -nE 's|^worktree .*/\\.claude/worktrees/([^/]+)$|\\1|p;')"
       COMPREPLY=($(compgen -W "$refs" -- "$cur"))
       ;;
     completion)
@@ -94,7 +85,7 @@ if ! type compdef >/dev/null 2>&1; then
 fi
 
 _worm_complete() {
-  local -a _worm_commands _worm_branches
+  local -a _worm_commands
   _worm_commands=(${COMMANDS.map((c) => `'${c}'`).join(" ")})
 
   if (( CURRENT == 2 )); then
@@ -103,15 +94,11 @@ _worm_complete() {
   fi
 
   case "\${words[2]}" in
-    ${BRANCH_ONLY_COMMANDS.join("|")})
-      _worm_branches=(\${(f)"$(git for-each-ref --format='%(refname:short)' refs/heads 2>/dev/null)"})
-      compadd -- $_worm_branches
-      ;;
     ${REF_COMMANDS.join("|")})
       local _worm_wtlist
       _worm_wtlist="$(git worktree list --porcelain 2>/dev/null)"
       compadd -- \${(f)"$(printf '%s\\n' "$_worm_wtlist" | sed -nE 's|^branch refs/heads/||p;')"}
-      compadd -- \${(f)"$(printf '%s\\n' "$_worm_wtlist" | sed -nE 's|^worktree .*${SLOT_DIR_INFIX}([0-9]+)$|\\1|p;')"}
+      compadd -- main \${(f)"$(printf '%s\\n' "$_worm_wtlist" | sed -nE 's|^worktree .*/\\.claude/worktrees/([^/]+)$|\\1|p;')"}
       ;;
     completion)
       if (( CURRENT == 3 )); then

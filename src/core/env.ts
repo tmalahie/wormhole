@@ -1,29 +1,22 @@
 import path from "node:path";
 import { WormError } from "../utils/errors.js";
-import { writeTextChanged } from "../utils/fs.js";
+import { fs, pathExists, writeTextChanged } from "../utils/fs.js";
 import { ensureGitExclude } from "./git.js";
 import type { Config } from "../types.js";
 
 /**
- * Per-worktree env generation. Worm writes a DIFFERENT dotenv file into each
- * worktree, with values derived from a STABLE hash of the branch — so a given
- * branch always gets the same port/offset regardless of slot order or whether
- * the worktree is permanent or ephemeral (matches the worktrunk/Conductor model,
- * unlike the positional WORM_SLOT_INDEX which only stabilises for a fixed pool).
+ * Per-worktree env generation. A worktree that has a runtime slot (slots.json)
+ * gets a dotenv file rendered from the project's `env.vars`, with `index` = its
+ * slot number — so slot N's ports are e.g. `{{ 3000 + index * 100 }}`. A worktree
+ * without a slot has no env file at all (it is removed on release).
  *
- * The generated file is the user's window into this: it never authors a template
- * file — `vars` live as a few lines in config.json and worm renders + gitignores
- * the result. The general `renderTemplate` primitive is untouched; this evaluator
- * is dedicated to the env block and is the only place that does arithmetic inside
- * `{{ … }}` (e.g. `{{ 3000 + index * 10000 }}`).
+ * The file is the user's window into this: `vars` live as a few lines in
+ * config.json and worm renders + gitignores the result. The general
+ * `renderTemplate` primitive is untouched; this evaluator is dedicated to the env
+ * block and is the only place that evaluates expressions inside `{{ … }}`.
  *
- * Two offset bases, so both worlds are covered without choosing:
- * - `index` (POSITIONAL): the slot number. `{{ 3000 + index * 10000 }}` →
- *   3000/13000/23000. Clean & sequential; stable for a fixed pool, drifts if
- *   worktrees are ephemeral (the slot number isn't tied to the branch).
- * - `offset` / `hash` (BRANCH-STABLE): derived from the branch. `{{ 8080 + offset }}`
- *   → the same port for a given branch on any machine and any slot order, at the
- *   cost of non-sequential values (the worktrunk/Conductor model).
+ * `offset` / `hash` (branch-stable, derived from the branch name) remain for
+ * projects that prefer values tied to the branch rather than to a slot.
  */
 
 /** Span of stable offsets (so `{{ port 8080 }}` lands in 8080..9079). */
@@ -49,56 +42,60 @@ export function portOffset(branch: string): number {
 }
 
 export interface EnvContext {
-  /** Slot name (`main` for Slot 0, `<N>` for siblings, or a wired worktree's label). */
-  slot: string;
-  /** Numeric slot index (0 for Slot 0). */
+  /** The assigned slot number. */
   index: number;
+  /** Worktree name ("main" for the main worktree). */
+  name: string;
   branch: string;
   /** Full 32-bit stable hash of the branch. */
   hash: number;
   /** Stable port offset for the branch, in [0, PORT_RANGE). */
   offset: number;
+  /** The project's profile dir (`~/.worm/projects/<name>`). */
+  profile: string;
+  /** The main worktree's path. */
+  root: string;
+  /** This worktree's path. */
+  worktree: string;
 }
 
-export function buildEnvContext(
-  slot: { name: string; index: number },
-  branch: string
-): EnvContext {
-  return {
-    slot: slot.name,
-    index: slot.index,
-    branch,
-    hash: stableHash(branch),
-    offset: portOffset(branch),
-  };
+export function buildEnvContext(fields: {
+  index: number;
+  name: string;
+  branch: string;
+  profile: string;
+  root: string;
+  worktree: string;
+}): EnvContext {
+  return { ...fields, hash: stableHash(fields.branch), offset: portOffset(fields.branch) };
 }
 
 const ENV_EXPR_HINT =
-  "Use arithmetic over {{ index }} (slot number), {{ offset }} (stable per-branch, 0–999) or {{ hash }} — e.g. {{ 3000 + index * 10000 }} or {{ 8080 + offset }} — or the text vars {{ slot }} / {{ branch }}.";
+  "Expressions use {{ index }} (slot number), {{ offset }} / {{ hash }} (branch-stable), the text vars name / branch / profile / root / worktree, 'quoted strings', + - * / %, == / != and cond ? a : b — e.g. {{ 3000 + index * 100 }} or {{ index == 0 ? 'app' : 'app-' + index }}.";
+
+type Value = number | string;
 
 /**
- * Render one `env.vars` value: substitute every `{{ … }}` token against the
- * context. A token is either a bare text var (`slot` / `branch`) or an integer
- * ARITHMETIC expression over `index` / `offset` / `hash` with `+ - * / %` and
- * parentheses. A typo or a text var used in arithmetic is a hard error — a stray
- * `{{ … }}` must never reach a dotenv file.
+ * Render one `env.vars` value: substitute every `{{ … }}` token with the value of
+ * its expression. A typo or a type mismatch is a hard error — a stray `{{ … }}`
+ * must never reach a dotenv file.
  */
 export function renderEnvValue(value: string, ctx: EnvContext): string {
-  return value.replace(/\{\{\s*([^}]+?)\s*\}\}/g, (_match, raw: string) => {
-    const expr = raw.trim();
-    if (expr === "slot") return ctx.slot;
-    if (expr === "branch") return ctx.branch;
-    return String(evalArith(expr, ctx));
-  });
+  return value.replace(/\{\{\s*([^}]+?)\s*\}\}/g, (_match, raw: string) =>
+    String(evalExpr(raw.trim(), ctx))
+  );
 }
 
-type ArithToken =
+type Token =
   | { t: "num"; v: number }
+  | { t: "str"; v: string }
   | { t: "id"; v: string }
   | { t: "op"; v: string };
 
-function tokenizeArith(expr: string): ArithToken[] {
-  const toks: ArithToken[] = [];
+const OPERATORS = ["==", "!=", "+", "-", "*", "/", "%", "(", ")", "?", ":"];
+
+function tokenize(expr: string): Token[] {
+  const toks: Token[] = [];
   let i = 0;
   while (i < expr.length) {
     const c = expr.charAt(i);
@@ -109,77 +106,120 @@ function tokenizeArith(expr: string): ArithToken[] {
       while (j < expr.length && expr.charAt(j) >= "0" && expr.charAt(j) <= "9") j++;
       toks.push({ t: "num", v: Number.parseInt(expr.slice(i, j), 10) });
       i = j;
+    } else if (c === "'" || c === '"') {
+      const end = expr.indexOf(c, i + 1);
+      if (end === -1) {
+        throw new WormError(`Unterminated string in env expression "{{ ${expr} }}".`, {
+          hint: ENV_EXPR_HINT,
+        });
+      }
+      toks.push({ t: "str", v: expr.slice(i + 1, end) });
+      i = end + 1;
     } else if (/[a-zA-Z_]/.test(c)) {
       let j = i;
       while (j < expr.length && /\w/.test(expr.charAt(j))) j++;
       toks.push({ t: "id", v: expr.slice(i, j) });
       i = j;
-    } else if ("+-*/%()".includes(c)) {
-      toks.push({ t: "op", v: c });
-      i++;
     } else {
-      throw new WormError(`Invalid character "${c}" in env expression "{{ ${expr} }}".`, {
-        hint: ENV_EXPR_HINT,
-      });
+      const op = OPERATORS.find((o) => expr.startsWith(o, i));
+      if (!op) {
+        throw new WormError(`Invalid character "${c}" in env expression "{{ ${expr} }}".`, {
+          hint: ENV_EXPR_HINT,
+        });
+      }
+      toks.push({ t: "op", v: op });
+      i += op.length;
     }
   }
   return toks;
 }
 
 /**
- * Evaluate a small integer arithmetic expression (recursive descent, no `eval`).
- * Grammar: expr := term (('+'|'-') term)* ; term := factor (('*'|'/'|'%') factor)* ;
- * factor := number | ident | '(' expr ')' | '-' factor. `/` and `%` truncate
- * toward zero. Identifiers resolve to the numeric context vars only.
+ * Evaluate an env expression (recursive descent, no `eval`). Grammar, loosest
+ * first:
+ *   cond   := equal ('?' cond ':' cond)?
+ *   equal  := sum (('==' | '!=') sum)*
+ *   sum    := term (('+' | '-') term)*      '+' concatenates when either side is text
+ *   term   := factor (('*' | '/' | '%') factor)*   numbers only; truncating
+ *   factor := number | 'string' | ident | '(' cond ')' | '-' factor
  */
-function evalArith(expr: string, ctx: EnvContext): number {
-  const toks = tokenizeArith(expr);
+function evalExpr(expr: string, ctx: EnvContext): Value {
+  const toks = tokenize(expr);
   let pos = 0;
   const fail = (msg: string): never => {
     throw new WormError(`${msg} in env expression "{{ ${expr} }}".`, { hint: ENV_EXPR_HINT });
   };
+  const isOp = (v: string): boolean => {
+    const tok = toks[pos];
+    return tok !== undefined && tok.t === "op" && tok.v === v;
+  };
+  const num = (v: Value, op: string): number =>
+    typeof v === "number" ? v : fail(`"${op}" needs numbers, got text "${v}"`);
 
-  const parseExpr = (): number => {
+  const parseCond = (): Value => {
+    const test = parseEqual();
+    if (!isOp("?")) return test;
+    pos++;
+    const yes = parseCond();
+    if (!isOp(":")) fail("expected ':' after '?'");
+    pos++;
+    const no = parseCond();
+    return test !== 0 && test !== "" ? yes : no;
+  };
+
+  const parseEqual = (): Value => {
+    let left = parseSum();
+    while (isOp("==") || isOp("!=")) {
+      const op = String(toks[pos++]!.v);
+      const right = parseSum();
+      left = (left === right) === (op === "==") ? 1 : 0;
+    }
+    return left;
+  };
+
+  const parseSum = (): Value => {
     let left = parseTerm();
-    for (let tok = toks[pos]; tok && tok.t === "op" && "+-".includes(tok.v); tok = toks[pos]) {
-      pos++;
+    while (isOp("+") || isOp("-")) {
+      const op = String(toks[pos++]!.v);
       const right = parseTerm();
-      left = tok.v === "+" ? left + right : left - right;
+      if (op === "+" && (typeof left === "string" || typeof right === "string")) {
+        left = String(left) + String(right);
+      } else {
+        left = op === "+" ? num(left, op) + num(right, op) : num(left, op) - num(right, op);
+      }
     }
     return left;
   };
 
-  const parseTerm = (): number => {
+  const parseTerm = (): Value => {
     let left = parseFactor();
-    for (let tok = toks[pos]; tok && tok.t === "op" && "*/%".includes(tok.v); tok = toks[pos]) {
-      pos++;
-      const right = parseFactor();
-      if ((tok.v === "/" || tok.v === "%") && right === 0) fail("division by zero");
-      left = tok.v === "*" ? left * right : tok.v === "/" ? Math.trunc(left / right) : left % right;
+    while (isOp("*") || isOp("/") || isOp("%")) {
+      const op = String(toks[pos++]!.v);
+      const l = num(left, op);
+      const r = num(parseFactor(), op);
+      if ((op === "/" || op === "%") && r === 0) fail("division by zero");
+      left = op === "*" ? l * r : op === "/" ? Math.trunc(l / r) : l % r;
     }
     return left;
   };
 
-  const parseFactor = (): number => {
+  const parseFactor = (): Value => {
     const tok = toks[pos];
     if (!tok) return fail("unexpected end of expression");
     if (tok.t === "op" && tok.v === "-") {
       pos++;
-      return -parseFactor();
+      return -num(parseFactor(), "-");
     }
     if (tok.t === "op" && tok.v === "(") {
       pos++;
-      const v = parseExpr();
-      const close = toks[pos++];
-      if (!close || close.t !== "op" || close.v !== ")") fail("missing closing ')'");
+      const v = parseCond();
+      if (!isOp(")")) fail("missing closing ')'");
+      pos++;
       return v;
     }
-    if (tok.t === "num") {
-      pos++;
-      return tok.v;
-    }
+    pos++;
+    if (tok.t === "num" || tok.t === "str") return tok.v;
     if (tok.t === "id") {
-      pos++;
       switch (tok.v) {
         case "index":
           return ctx.index;
@@ -187,9 +227,16 @@ function evalArith(expr: string, ctx: EnvContext): number {
           return ctx.offset;
         case "hash":
           return ctx.hash;
-        case "slot":
+        case "name":
+          return ctx.name;
         case "branch":
-          return fail(`"${tok.v}" is text, not a number — use it alone, e.g. {{ ${tok.v} }}`);
+          return ctx.branch;
+        case "profile":
+          return ctx.profile;
+        case "root":
+          return ctx.root;
+        case "worktree":
+          return ctx.worktree;
         default:
           return fail(`unknown variable "${tok.v}"`);
       }
@@ -197,7 +244,7 @@ function evalArith(expr: string, ctx: EnvContext): number {
     return fail(`unexpected "${tok.v}"`);
   };
 
-  const result = parseExpr();
+  const result = parseCond();
   if (pos < toks.length) fail(`unexpected "${toks[pos]!.v}"`);
   return result;
 }
@@ -205,7 +252,7 @@ function evalArith(expr: string, ctx: EnvContext): number {
 /** Render the full dotenv file body for a slot. */
 export function renderEnvFile(vars: Record<string, string>, ctx: EnvContext): string {
   const lines = [
-    "# Generated by worm — do not edit (regenerated on sync/switch, per-worktree).",
+    "# Generated by worm for this worktree's slot — do not edit (re-rendered on assign/sync).",
   ];
   for (const [key, raw] of Object.entries(vars)) {
     lines.push(`${key}=${renderEnvValue(raw, ctx)}`);
@@ -235,33 +282,37 @@ export function assertNoEnvCollision(config: Config): void {
 }
 
 export interface EnvApplyResult {
-  written: boolean;
+  /** "written" (created or changed), "unchanged", or "removed" (no slot). */
+  change: "written" | "unchanged" | "removed";
   file: string;
 }
 
 /**
- * Generate (or refresh) the per-worktree env file for one slot and ensure it's
- * git-excluded. No-op (returns null) when the project has no `env` block or an
- * empty `vars`. Idempotent: only reports `written: true` when the content
- * actually changed. Silent — the caller logs.
+ * Bring a worktree's env file in line with its slot: render it when `ctx` is
+ * given (the worktree has a slot), delete it when `ctx` is null. Ensures the file
+ * is git-excluded either way. Returns null when the project has no `env` block or
+ * an empty `vars`. Silent — the caller logs.
  */
 export async function applyEnv(
-  slotPath: string,
+  worktreePath: string,
   config: Config,
-  slot: { name: string; index: number },
-  branch: string
+  ctx: EnvContext | null
 ): Promise<EnvApplyResult | null> {
   const env = config.env;
   if (!env || Object.keys(env.vars).length === 0) return null;
   assertNoEnvCollision(config);
 
-  const ctx = buildEnvContext(slot, branch);
-  const content = renderEnvFile(env.vars, ctx);
-  const written = await writeTextChanged(path.join(slotPath, env.file), content);
-
+  const target = path.join(worktreePath, env.file);
   // Anchor the pattern to the worktree root so it ignores exactly this file
-  // (the common info/exclude is shared across slots, so one entry covers all).
-  await ensureGitExclude(slotPath, "/" + env.file.replace(/^\/+/, ""));
+  // (the common info/exclude is shared across worktrees, so one entry covers all).
+  await ensureGitExclude(worktreePath, "/" + env.file.replace(/^\/+/, ""));
 
-  return { written, file: env.file };
+  if (!ctx) {
+    if (!(await pathExists(target))) return { change: "unchanged", file: env.file };
+    await fs.rm(target, { force: true });
+    return { change: "removed", file: env.file };
+  }
+  const content = renderEnvFile(env.vars, ctx);
+  const written = await writeTextChanged(target, content);
+  return { change: written ? "written" : "unchanged", file: env.file };
 }

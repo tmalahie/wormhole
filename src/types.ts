@@ -2,10 +2,54 @@ import { z } from "zod";
 
 export const HooksSchema = z
   .object({
-    // on_create: runs once when a slot is created (`worm universe add`) and on `worm switch`.
+    // on_create: runs once when a worktree is created (`worm worktree add`, or
+    // Claude's WorktreeCreate hook). No slot is known yet — install deps only.
     on_create: z.string().optional(),
-    // on_remove: runs when a slot is removed (`worm universe rm`).
+    // on_remove: runs when a worktree is removed (`worm worktree rm`).
     on_remove: z.string().optional(),
+    // on_assign: runs after a slot is assigned to a worktree and its env file is
+    // rendered (WORM_SLOT = the slot number).
+    on_assign: z.string().optional(),
+    // on_release: runs before a worktree's slot is released (env file still present).
+    on_release: z.string().optional(),
+  })
+  .strict();
+
+// Slots are numbered runtime environments (port namespaces). `step` is the port
+// distance between two slots, `max` the highest slot number. Assignment lives in
+// the profile's slots.json; a worktree has no slot until one is assigned.
+export const SlotsSchema = z
+  .object({
+    step: z.number().int().positive().default(100),
+    max: z.number().int().nonnegative().default(9),
+  })
+  .strict();
+
+// A process the control plane supervises for a worktree's slot (or, `shared`,
+// once per project in the main worktree). worm only validates and stores these;
+// it never runs them.
+export const ProcessSchema = z
+  .object({
+    cmd: z.string().min(1),
+    cwd: z.string().optional(),
+    env: z.record(z.string(), z.string()).optional(),
+    autostart: z.boolean().default(false),
+    port: z.string().optional(),
+    http: z.boolean().optional(),
+    requires: z.array(z.string()).optional(),
+    shared: z.boolean().optional(),
+  })
+  .strict();
+
+// A one-click action the control plane offers on a worktree card: a prompt for a
+// new Claude conversation, or a shell command run in the worktree.
+export const QuickActionSchema = z
+  .object({
+    key: z.string().min(1),
+    label: z.string().min(1),
+    prompt: z.string().optional(),
+    run: z.string().optional(),
+    needs: z.enum(["pr", "clean"]).optional(),
   })
   .strict();
 
@@ -47,10 +91,11 @@ export const ShareHistoryRecipeSchema = z.object({}).strict();
 export const ShareMemoryRecipeSchema = z.object({}).strict();
 // GLOBAL-scope (like autosync), declared in ~/.worm/config.json:
 // `notifyPendingInput` — OS notification when input from you is pending (a
-//   finished response to read, or a permission to approve). `openOnClick` is the
-//   macOS app the notification click opens the project folder in (any `open -a`
-//   app name: "Visual Studio Code", "Cursor", "Windsurf", …). Defaults to "" → no
-//   click action (we don't presume an editor); set it to opt into click-to-focus.
+//   finished response to read, or a permission to approve). `openOnClick` is what
+//   a click opens: "claude-desktop" → the conversation itself in Claude Desktop
+//   (claude://resume?session=<id>), or any macOS app name ("Visual Studio Code",
+//   "Cursor", …) → the worktree folder in that app. Defaults to "" → no click
+//   action (we don't presume an editor); set it to opt into click-to-focus.
 // `syncGlobalPermissions` — version-control the global ~/.claude permissions block.
 export const NotifyPendingInputRecipeSchema = z
   .object({ openOnClick: z.string().default("") })
@@ -133,13 +178,15 @@ export const SharedPathSchema = z.union([
 // advanced cases; this is the zero-file-to-maintain path for the common one.
 export const EnvSchema = z
   .object({
-    file: z.string().min(1).default(".env.worm"),
+    file: z.string().min(1).default(".env.slot"),
     vars: z.record(z.string(), z.string()).default({}),
   })
   .strict();
 
 export const ConfigSchema = z
   .object({
+    // The branch the main worktree stays on, and the default base for new ones.
+    baseBranch: z.string().min(1).default("main"),
     // The "wormhole tunnels": files symlinked from each slot back into a store
     // (the profile by default). The pool is emergent — slots are born via
     // `worm universe add <branch>`.
@@ -151,6 +198,10 @@ export const ConfigSchema = z
     env: EnvSchema.optional(),
     hooks: HooksSchema.default({}),
     recipes: RecipesSchema,
+    slots: SlotsSchema.default({}),
+    processes: z.record(z.string(), ProcessSchema).default({}),
+    quickActions: z.array(QuickActionSchema).default([]),
+    features: z.record(z.string(), z.boolean()).default({}),
   })
   .strict();
 
@@ -159,6 +210,8 @@ export type EnvConfig = z.infer<typeof EnvSchema>;
 export type StoreConfig = z.infer<typeof StoreSchema>;
 export type SharedPathConfig = z.infer<typeof SharedPathSchema>;
 export type Hooks = z.infer<typeof HooksSchema>;
+export type SlotsConfig = z.infer<typeof SlotsSchema>;
+export type ProcessConfig = z.infer<typeof ProcessSchema>;
 export type RecipesConfig = z.infer<typeof RecipesSchema>;
 export type SandboxRecipeConfig = z.infer<typeof SandboxRecipeSchema>;
 export type SyncPermissionsRecipeConfig = z.infer<typeof SyncPermissionsRecipeSchema>;
@@ -172,20 +225,20 @@ export const DEFAULT_CONFIG: Config = ConfigSchema.parse({
   hooks: { on_create: 'bash "$WORM_PROJECT_ROOT/.worm/scripts/setup.sh"' },
 });
 
-export type SlotStatus = "READY" | "BROKEN";
-
-export interface UniverseSlot {
-  /** 0 = Slot 0 (the primary working tree). 1.. = sibling pool worktrees. */
-  index: number;
-  /** "main" for Slot 0, "uni-N" for siblings. */
+/**
+ * One git worktree of a worm project: the main checkout (`isMain`, name "main")
+ * or a linked one, typically `<root>/.claude/worktrees/<name>`. `slot` is the
+ * runtime slot assigned to it in slots.json, or null.
+ */
+export interface Worktree {
+  /** "main" for the main worktree, else the directory's basename. */
   name: string;
-  isPrimary: boolean;
-  /** Absolute path to the worktree directory. */
   path: string;
-  status: SlotStatus;
+  isMain: boolean;
   branch?: string;
+  head?: string;
   detached?: boolean;
-  reason?: string;
+  slot: number | null;
 }
 
 export interface ProjectContext {

@@ -18,8 +18,10 @@ export const DETACHED_LINKS_FILE_NAME = ".detached-links.json";
 // Kept in sync with the literal in src/recipes/autosync/sync-worm-home.js (that
 // script is standalone and can't import this module).
 export const AUTOSYNC_CONFLICT_FILE_NAME = ".autosync-conflict.json";
-/** Joins the repo basename and slot index for sibling worktree dirs: `<repo>-<N>`. */
-export const SLOT_DIR_INFIX = "-";
+export const SLOTS_FILE_NAME = "slots.json";
+export const PROJECT_FILE_NAME = "project.json";
+/** Marker Claude Desktop's worktree GC respects; written into every worktree. */
+export const WORKTREE_KEEP_FILE_NAME = ".worktree-keep";
 
 export function globalRoot(): string {
   const override = process.env.WORM_HOME;
@@ -165,8 +167,8 @@ export function packagedRecipeTemplate(recipeName: string, file: string): string
 
 /** Where recipe hooks write their logs: `.worm/logs/` (a symlink into the
  *  profile's `logs/`). */
-export function localLogsDir(slot0Root: string): string {
-  return path.join(localRoot(slot0Root), LOGS_DIR_NAME);
+export function localLogsDir(mainRoot: string): string {
+  return path.join(localRoot(mainRoot), LOGS_DIR_NAME);
 }
 
 /**
@@ -190,13 +192,38 @@ export function detachedLinksFile(projectName: string): string {
 }
 
 /**
- * Directory of a sibling pool worktree. Slot 0 IS the primary working tree
- * (slot0Root itself); extra slots are TRUE siblings one level up:
- *   <parent>/<project>-uni<index>   e.g. ~/git/my-project-uni1
- * Placing them outside slot 0 keeps git from seeing them as untracked dirs.
+ * Where linked worktrees live: `<root>/.claude/worktrees/<name>` — the same place
+ * Claude Code puts its own, so the CLI, Claude Desktop and worm share one layout.
  */
-export function siblingWorktreeDir(slot0Root: string, index: number): string {
-  const parent = path.dirname(slot0Root);
-  const base = path.basename(slot0Root);
-  return path.join(parent, `${base}${SLOT_DIR_INFIX}${index}`);
+export function worktreesDir(mainRoot: string): string {
+  return path.join(mainRoot, ".claude", "worktrees");
+}
+
+export function worktreeDir(mainRoot: string, name: string): string {
+  return path.join(worktreesDir(mainRoot), name);
+}
+
+/** Slot → worktree assignment (`{ "0": { worktree, since }, "1": null, … }`), in the profile. */
+export function slotsFile(projectName: string): string {
+  return globalProjectFile(projectName, SLOTS_FILE_NAME);
+}
+
+/** `{ root }` — lets tools go from a profile to its repo (the reverse of `.worm/`). */
+export function projectFile(projectName: string): string {
+  return globalProjectFile(projectName, PROJECT_FILE_NAME);
+}
+
+/** The VS Code workspace file `worm sync` generates for the project. */
+export function workspaceFile(projectName: string): string {
+  return globalProjectFile(projectName, `${projectName}.code-workspace`);
+}
+
+/** Claude Code's per-project state dir root (`~/.claude/projects`). */
+export function claudeProjectsDir(): string {
+  return path.join(os.homedir(), ".claude", "projects");
+}
+
+/** Claude's project slug for a directory: the absolute path with `/` and `.` → `-`. */
+export function claudeSlug(absPath: string): string {
+  return path.resolve(absPath).replace(/[/.]/g, "-");
 }

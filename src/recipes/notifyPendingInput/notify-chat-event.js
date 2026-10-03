@@ -12,7 +12,8 @@ import path from "node:path";
 import { notify } from "../_lib/notify.js";
 
 // The macOS app a notification click opens the project folder in (passed by the
-// recipe from its `openOnClick` config). Empty → no click action.
+// recipe from its `openOnClick` config): an app name, or "claude-desktop" to
+// open the conversation in Claude Desktop. Empty → no click action.
 const OPEN_ON_CLICK = process.argv[2] ?? "";
 
 // Both the workspace lookup and the background-agent state below read the whole
@@ -251,12 +252,19 @@ function main() {
     }
   }
 
+  // "claude-desktop" opens the conversation itself in Claude Desktop — the
+  // resume link imports a CLI-born session or focuses a Desktop-born one, so it
+  // works whichever surface the conversation runs in. Any other value is an app
+  // name that gets the worktree folder.
+  const toDesktop = OPEN_ON_CLICK === "claude-desktop";
+  const sessionId = /^[0-9a-f-]{36}$/i.test(data.session_id || "") ? data.session_id : "";
   notify({
     title: `Claude Code — ${project}`,
     message: isPermission ? `Waiting for approval${toolName ? `: ${toolName}` : ""}` : "Response ready",
     sound: true,
-    focusPath: cwd,
-    focusApp: OPEN_ON_CLICK,
+    focusPath: toDesktop ? "" : cwd,
+    focusApp: toDesktop ? "" : OPEN_ON_CLICK,
+    clickUrl: toDesktop && sessionId ? `claude://resume?session=${sessionId}` : "",
   });
 }
 

@@ -27,10 +27,8 @@ import {
 import { ensureSymlink } from "../core/symlinks.js";
 import { applyRecipeWiring, materializeRecipes } from "../core/recipes.js";
 import { currentBranch, ensureGitExclude } from "../core/git.js";
-import { applyEnv } from "../core/env.js";
 import { hookEnv, runHook } from "../core/hooks.js";
 import { run } from "../utils/exec.js";
-import type { UniverseSlot } from "../types.js";
 import {
   materializeTemplateScripts,
   resolveTemplate,
@@ -39,7 +37,7 @@ import {
 } from "../core/templates.js";
 import {
   readManifest,
-  reconcileSlotLinks,
+  reconcileWorktreeLinks,
   writeManifest,
   planAdoption,
   executeAdoption,
@@ -149,49 +147,38 @@ export async function bindProject(
     await executeAdoption(projectRoot, adoptionPlan.operations);
   }
 
-  await reconcileSlotLinks(projectRoot, links, manifest);
+  await reconcileWorktreeLinks(projectRoot, links, manifest);
   await writeManifest(projectName, manifest);
-
-  // Generate Slot 0's per-worktree env file (no-op unless `env` is configured).
-  const slot0Branch = (await currentBranch(projectRoot)) ?? "";
-  const envRes = await applyEnv(projectRoot, config, { name: "main", index: 0 }, slot0Branch);
-  if (envRes?.written) logger.step(`📝 generated ${envRes.file}`);
 
   // Materialize enabled recipes' artifacts (a no-op when none are enabled).
   const recipeFiles = await materializeRecipes(projectRoot, projectName, config.recipes);
   for (const file of recipeFiles) logger.step(`📦 recipes/${file}`);
   if (await applyRecipeWiring(projectRoot, projectName, { name: "main", path: projectRoot }, config.recipes)) {
-    logger.step("⚡ wired recipe hooks for Slot 0");
+    logger.step("⚡ wired recipe hooks for the main worktree");
   }
+  // worm writes the worktree's hooks into this file; keep it out of `git status`.
+  await ensureGitExclude(projectRoot, "/.claude/settings.local.json");
 
-  // Warm up Slot 0 by firing on_create — `init` is the "create" event for the
-  // primary slot. Same contract as `universe add`: non-fatal (the bind succeeds
-  // regardless) and skippable via --skip-hook for an already-warm checkout.
+  // Set up the main worktree by firing on_create — `init` is its "create" event.
+  // Same contract as `worktree add`: non-fatal (the bind succeeds regardless) and
+  // skippable via --skip-hook for an already-set-up checkout.
   if (!options.skipHook && config.hooks.on_create) {
     const branch = (await currentBranch(projectRoot)) ?? "";
-    const slot: UniverseSlot = {
-      index: 0,
-      name: "main",
-      isPrimary: true,
-      path: projectRoot,
-      status: "READY",
-      branch: branch || undefined,
-    };
     const result = await runHook("on_create", config.hooks.on_create, {
       cwd: projectRoot,
-      env: hookEnv(projectRoot, slot, branch, projectName),
+      env: hookEnv(projectRoot, { name: "main", path: projectRoot, slot: null }, branch, projectName),
     });
     if (result.ran && result.exitCode !== 0) {
       logger.warn(
-        `on_create hook exited with code ${result.exitCode}. Slot 0 is bound but may not be fully warmed.`
+        `on_create hook exited with code ${result.exitCode}. The project is bound but may not be fully set up.`
       );
     }
   }
 
   logger.success(
     existed
-      ? `Reused profile; refreshed layout for ${projectName} (Slot 0).`
-      : `${projectName} is now bound as Slot 0.`
+      ? `Reused profile; refreshed layout for ${projectName}.`
+      : `${projectName} is now bound (main worktree: ${projectRoot}).`
   );
   logger.raw("");
   logger.raw(

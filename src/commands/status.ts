@@ -1,11 +1,10 @@
 import path from "node:path";
 import pc from "picocolors";
 import { logger } from "../utils/logger.js";
-import { findSlot0Root } from "../core/project.js";
-import { scanUniverses, universeLabel } from "../core/universe.js";
+import { listProjectWorktrees, openProject } from "../core/worktrees.js";
 import { autosyncConflictFile } from "../core/paths.js";
 import { pathExists, readJson } from "../utils/fs.js";
-import type { UniverseSlot } from "../types.js";
+import type { Worktree } from "../types.js";
 
 export interface StatusOptions {
   json?: boolean;
@@ -30,16 +29,16 @@ async function readAutosyncConflict(): Promise<AutosyncConflict | null> {
 }
 
 export async function runStatus(options: StatusOptions = {}): Promise<void> {
-  const root = await findSlot0Root();
-  const slots = await scanUniverses(root);
+  const project = await openProject();
+  const worktrees = await listProjectWorktrees(project.mainRoot, project.projectName);
   const autosyncConflict = await readAutosyncConflict();
 
   if (options.json) {
-    console.log(JSON.stringify({ root, slots, autosyncConflict }, null, 2));
+    console.log(JSON.stringify({ root: project.mainRoot, worktrees, autosyncConflict }, null, 2));
     return;
   }
 
-  renderStatus(root, slots);
+  renderStatus(project.projectName, project.mainRoot, worktrees, project.config.slots.max);
   if (autosyncConflict) renderAutosyncConflict(autosyncConflict);
 }
 
@@ -54,33 +53,23 @@ function renderAutosyncConflict(c: AutosyncConflict): void {
   logger.raw(pc.dim("     💡 Resolve it: cd ~/.worm && git status. It clears on the next clean sync."));
 }
 
-function renderStatus(root: string, slots: UniverseSlot[]): void {
-  const projectName = path.basename(root);
+function renderStatus(projectName: string, root: string, worktrees: Worktree[], maxSlot: number): void {
   logger.raw(`🪐 ${pc.bold("WORMHOLE STATUS")} — ${pc.bold(projectName)}  ${pc.dim(root)}`);
   logger.raw("");
-
-  const labelWidth = Math.max(0, ...slots.map((s) => universeLabel(s).length));
-  for (const slot of slots) {
-    const icon = slot.isPrimary ? "🛸" : slot.status === "BROKEN" ? "💥" : "🚀";
-    const label = universeLabel(slot).padEnd(labelWidth, " ");
-    const detail = renderDetail(slot, root);
-    logger.raw(`  ${icon} ${label}  ${pc.dim("←")} ${detail}`);
+  const width = Math.max(0, ...worktrees.map((w) => w.name.length));
+  for (const wt of worktrees) {
+    const icon = wt.isMain ? "🛸" : "🚀";
+    const slot = wt.slot === null ? pc.dim("   ") : pc.cyan(`s${wt.slot}`.padStart(3));
+    const branch = wt.branch ? pc.bold(wt.branch) : pc.dim("(detached)");
+    const where = wt.isMain ? "" : `  ${pc.dim(path.relative(root, wt.path))}`;
+    logger.raw(`  ${icon} ${slot} ${wt.name.padEnd(width)}  ${branch}${where}`);
   }
-
   logger.raw("");
-  const broken = slots.filter((s) => s.status === "BROKEN").length;
-  const parts = [
-    pc.cyan(`🚀 ${slots.length} universe${slots.length === 1 ? "" : "s"}`),
-    broken > 0 ? pc.yellow(`💥 ${broken} broken`) : pc.dim("💥 0 broken"),
-  ];
-  logger.raw(parts.join("   "));
-}
-
-function renderDetail(slot: UniverseSlot, root: string): string {
-  if (slot.status === "BROKEN") {
-    return pc.yellow(slot.reason ?? "unknown anomaly");
-  }
-  const where = slot.isPrimary ? pc.dim("(Slot 0)") : pc.dim(path.relative(path.dirname(root), slot.path));
-  const branch = slot.branch ? pc.bold(slot.branch) : pc.dim("(detached)");
-  return `branch ${branch}  ${where}`;
+  const used = worktrees.filter((w) => w.slot !== null).length;
+  logger.raw(
+    [
+      pc.cyan(`🚀 ${worktrees.length} worktree${worktrees.length === 1 ? "" : "s"}`),
+      pc.dim(`🎰 ${used}/${maxSlot + 1} slots in use`),
+    ].join("   ")
+  );
 }

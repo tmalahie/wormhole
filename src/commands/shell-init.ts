@@ -3,8 +3,7 @@
  *
  *   eval "$(worm shell-init)"
  *
- * Once installed, `worm cd <branch>` and `worm tp <N>` actually change the
- * shell's cwd. Everything else passes through to the binary as normal.
+ * Once installed, `worm cd <name|branch|slot>` actually changes the shell's cwd. Everything else passes through to the binary as normal.
  */
 export function runShellInit(): void {
   process.stdout.write(SHELL_FUNCTION);
@@ -13,7 +12,7 @@ export function runShellInit(): void {
 const SHELL_FUNCTION = `\
 worm() {
   case "$1" in
-    cd|tp)
+    cd)
       shift
       local _worm_path
       _worm_path="$(command worm path "$@")" || return $?

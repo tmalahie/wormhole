@@ -26,7 +26,7 @@ function findTerminalNotifier() {
   return which.status === 0 && which.stdout.trim() ? "terminal-notifier" : null;
 }
 
-export function notify({ title, message, sound = false, focusPath = "", focusApp = "" } = {}) {
+export function notify({ title, message, sound = false, focusPath = "", focusApp = "", clickUrl = "" } = {}) {
   try {
     // Test seam: when WORM_NOTIFY_SINK is set, record the payload instead of
     // firing a real OS notification. Lets the suite assert whether (and with
@@ -35,7 +35,7 @@ export function notify({ title, message, sound = false, focusPath = "", focusApp
     if (process.env.WORM_NOTIFY_SINK) {
       appendFileSync(
         process.env.WORM_NOTIFY_SINK,
-        JSON.stringify({ title, message, sound, focusPath, focusApp }) + "\n"
+        JSON.stringify({ title, message, sound, focusPath, focusApp, clickUrl }) + "\n"
       );
       return;
     }
@@ -50,7 +50,9 @@ export function notify({ title, message, sound = false, focusPath = "", focusApp
         // terminal-notifier runs `-execute` through a shell, so single-quote both
         // values (a path/app name may legally contain spaces or even a quote, e.g.
         // ~/git/o'brien) — otherwise the click action breaks or mis-parses.
-        if (focusApp && focusPath) {
+        if (clickUrl) {
+          args.push("-execute", `open ${shQuote(clickUrl)}`);
+        } else if (focusApp && focusPath) {
           args.push("-execute", `open -a ${shQuote(focusApp)} ${shQuote(focusPath)}`);
         }
         spawnSync(tn, args, { stdio: "ignore" });

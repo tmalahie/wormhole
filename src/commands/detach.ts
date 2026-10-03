@@ -2,7 +2,7 @@ import path from "node:path";
 import { logger } from "../utils/logger.js";
 import { WormError } from "../utils/errors.js";
 import { fs, isSymlink, pathExists } from "../utils/fs.js";
-import { findSlot0Root, gitToplevel, readProjectName } from "../core/project.js";
+import { findMainRoot, gitToplevel, readProjectName } from "../core/project.js";
 import { readDetached, readManifest, writeDetached, writeManifest } from "../core/links.js";
 
 /**
@@ -26,8 +26,8 @@ export async function runDetach(file?: string): Promise<void> {
     });
   }
   const worktreeRoot = await fs.realpath(top);
-  const slot0Root = await findSlot0Root(worktreeRoot);
-  const projectName = await readProjectName(slot0Root);
+  const mainRoot = await findMainRoot(worktreeRoot);
+  const projectName = await readProjectName(mainRoot);
 
   const manifest = await readManifest(projectName);
   const key = worktreeRoot;

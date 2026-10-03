@@ -81,7 +81,7 @@ export async function worktreeAdd(
   repoRoot: string,
   targetPath: string,
   branch: string,
-  options: { createIfMissing?: boolean; detach?: boolean } = {}
+  options: { createIfMissing?: boolean; detach?: boolean; base?: string } = {}
 ): Promise<void> {
   const args = ["worktree", "add"];
 
@@ -105,6 +105,9 @@ export async function worktreeAdd(
       const remoteRef = await remoteBranchExists(repoRoot, branch);
       if (remoteRef) {
         args.push("--track", "-b", branch, targetPath, remoteRef);
+      } else if (options.base) {
+        // --no-track: a new branch cut from origin/main must not track origin/main.
+        args.push("--no-track", "-b", branch, targetPath, options.base);
       } else {
         args.push("-b", branch, targetPath);
       }
@@ -258,4 +261,27 @@ export async function dirtyFiles(worktreePath: string): Promise<string[]> {
     .split("\n")
     .map((line) => line.trimEnd())
     .filter((line) => line.length > 0);
+}
+
+/** True when `ref` resolves to a commit (a branch, remote-tracking ref, tag or sha). */
+export async function refExists(repoRoot: string, ref: string): Promise<boolean> {
+  const { exitCode } = await run("git", ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], {
+    cwd: repoRoot,
+  });
+  return exitCode === 0;
+}
+
+/** `git branch -d` (safe delete: refuses an unmerged branch). Returns git's error, or null. */
+export async function deleteMergedBranch(repoRoot: string, branch: string): Promise<string | null> {
+  const { exitCode, stderr } = await run("git", ["branch", "-d", branch], { cwd: repoRoot });
+  return exitCode === 0 ? null : stderr.trim() || `git branch -d ${branch} failed`;
+}
+
+/** Best-effort `git fetch <remote> <branch>` (quiet, bounded); false when it failed or timed out. */
+export async function fetchBranch(repoRoot: string, remote: string, branch: string): Promise<boolean> {
+  const { exitCode } = await run("git", ["fetch", "--quiet", remote, branch], {
+    cwd: repoRoot,
+    timeout: 20_000,
+  });
+  return exitCode === 0;
 }

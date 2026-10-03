@@ -11,7 +11,7 @@ export function deriveProjectName(projectRoot: string): string {
 /**
  * Absolute toplevel of the working tree containing `cwd`, or null when not in a
  * git repo. Used by `worm init` to bind the current normal clone as Slot 0
- * (before `.worm/` exists, so `findSlot0Root` can't be used yet).
+ * (before `.worm/` exists, so `findMainRoot` can't be used yet).
  */
 export async function gitToplevel(cwd: string): Promise<string | null> {
   const { stdout, exitCode } = await run(
@@ -46,7 +46,7 @@ export async function gitCommonDir(cwd: string): Promise<string | null> {
  * always lives there. From any slot we ask git for the common dir and take its
  * parent, then verify a `.worm/` exists. Replaces the bare-container walk.
  */
-export async function findSlot0Root(
+export async function findMainRoot(
   start: string = process.cwd()
 ): Promise<string> {
   const commonDir = await gitCommonDir(start);

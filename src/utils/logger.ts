@@ -1,14 +1,33 @@
 import pc from "picocolors";
 
+// When stdout carries a machine-readable answer (`worm hook worktree-create`
+// prints only the path; `--json` prints only JSON), every human-facing line goes
+// to stderr instead. Child hooks follow the same switch (see utils/exec.ts).
+let stdoutReserved = false;
+
+/** Route all human-facing output to stderr from now on (for the life of the process). */
+export function reserveStdout(): void {
+  stdoutReserved = true;
+}
+
+export function isStdoutReserved(): boolean {
+  return stdoutReserved;
+}
+
+function out(message: string): void {
+  if (stdoutReserved) console.error(message);
+  else console.log(message);
+}
+
 export const logger = {
   info(message: string): void {
-    console.log(message);
+    out(message);
   },
   step(message: string): void {
-    console.log(`  ${pc.dim("·")} ${pc.dim(message)}`);
+    out(`  ${pc.dim("·")} ${pc.dim(message)}`);
   },
   success(message: string): void {
-    console.log(`✨ ${pc.green(message)}`);
+    out(`✨ ${pc.green(message)}`);
   },
   warn(message: string): void {
     console.warn(`⚠️  ${pc.yellow(message)}`);
@@ -20,10 +39,10 @@ export const logger = {
     console.error(`   💡 ${pc.dim(message)}`);
   },
   raw(message: string): void {
-    console.log(message);
+    out(message);
   },
   blank(): void {
-    console.log("");
+    out("");
   },
   dim(message: string): string {
     return pc.dim(message);

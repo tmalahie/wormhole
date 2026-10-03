@@ -2,12 +2,9 @@ import path from "node:path";
 import { logger } from "../utils/logger.js";
 import { WormError } from "../utils/errors.js";
 import { confirm } from "../utils/prompt.js";
-import { findSlot0Root, readProjectName } from "../core/project.js";
-import { loadLocalConfig } from "../core/config.js";
-import { scanUniverses } from "../core/universe.js";
+import { listProjectWorktrees, openProject, wireWorktree } from "../core/worktrees.js";
 import {
   readManifest,
-  reconcileSlotLinks,
   writeManifest,
   readDetached,
   writeDetached,
@@ -18,12 +15,13 @@ import {
   tildeify,
   type AdoptionOperation,
 } from "../core/links.js";
-import type { UniverseSlot } from "../types.js";
-import { applyGlobalRecipeWiring, applyRecipeWiring, materializeRecipes } from "../core/recipes.js";
+import type { Worktree } from "../types.js";
+import { applyGlobalRecipeWiring } from "../core/recipes.js";
 import { resolveStoreLinks } from "../core/stores.js";
-import { applyEnv, assertNoEnvCollision } from "../core/env.js";
+import { assertNoEnvCollision } from "../core/env.js";
 import { gitHasRemote } from "../core/git.js";
-import { globalRoot } from "../core/paths.js";
+import { globalRoot, projectFile, workspaceFile } from "../core/paths.js";
+import { pathExists, readJson, writeJson, writeTextChanged } from "../utils/fs.js";
 import { ensureLocalLayout } from "../core/layout.js";
 import { loadGlobalConfig } from "../core/global-config.js";
 import {
@@ -56,16 +54,14 @@ export async function runSync(options: SyncOptions = {}): Promise<void> {
     await runGlobalSync();
     return;
   }
-  const root = await findSlot0Root();
-  const config = await loadLocalConfig(root);
+  const project = await openProject();
+  const { mainRoot: root, config, projectName } = project;
   // Fail fast on a misconfigured env block (file also declared as a shared_path).
   assertNoEnvCollision(config);
-  const projectName = await readProjectName(root);
   // Ensure the consolidated layout (recipes/logs symlinks into the profile,
   // manifest in the profile); migrates an old project in place.
   await ensureLocalLayout(root, projectName);
-  const slots = await scanUniverses(root);
-  const manifest = await readManifest(projectName);
+  const slots = await listProjectWorktrees(root, projectName);
   // Resolve shared_paths to concrete sources once (clones any missing store).
   const links = await resolveStoreLinks(config, projectName);
 
@@ -83,14 +79,14 @@ export async function runSync(options: SyncOptions = {}): Promise<void> {
     if (!liveKeys.has(key)) delete detached[key];
   }
   await writeDetached(projectName, detached);
-  const slotLinks = (slot: UniverseSlot) => {
+  const slotLinks = (slot: Worktree) => {
     const d = detachedBySlot.get(path.resolve(slot.path)) ?? [];
     return d.length > 0 ? links.filter((l) => !d.includes(l.tail)) : links;
   };
 
   // Plan adoption (move slot-local files into the profile, then symlink) for
   // every slot, then execute once the whole plan is confirmed conflict-free.
-  const allOperations: Array<{ slot: UniverseSlot; operations: AdoptionOperation[] }> = [];
+  const allOperations: Array<{ slot: Worktree; operations: AdoptionOperation[] }> = [];
   for (const slot of slots) {
     const plan = await planAdoption(slot.path, slotLinks(slot));
     if (plan.operations.length > 0) {
@@ -163,45 +159,79 @@ export async function runSync(options: SyncOptions = {}): Promise<void> {
     }
   }
 
+  // Wire every worktree (links, slot env file, Claude project dir, recipe + worktree hooks).
   let created = 0;
   let pruned = 0;
-  for (const slot of slots) {
-    const res = await reconcileSlotLinks(slot.path, slotLinks(slot), manifest);
-    created += res.created.length;
-    pruned += res.pruned.length;
-    for (const rel of res.created) logger.step(`🔗 ${slot.name}: linked ${rel}`);
-    for (const rel of res.pruned) logger.step(`🧹 ${slot.name}: pruned ${rel}`);
-    for (const rel of res.skipped) {
-      logger.warn(`${slot.name}: ${rel} is a real file, not a managed link — left as-is.`);
+  for (const wt of slots) {
+    const res = await wireWorktree(project, wt);
+    created += res.links.created.length;
+    pruned += res.links.pruned.length;
+    for (const rel of res.links.created) logger.step(`🔗 ${wt.name}: linked ${rel}`);
+    for (const rel of res.links.pruned) logger.step(`🧹 ${wt.name}: pruned ${rel}`);
+    for (const rel of res.links.skipped) {
+      logger.warn(`${wt.name}: ${rel} is a real file, not a managed link — left as-is.`);
     }
-    for (const rel of res.missing) {
-      logger.warn(`${slot.name}: ${rel} — store source not found yet; not linked.`);
+    for (const rel of res.links.missing) {
+      logger.warn(`${wt.name}: ${rel} — store source not found yet; not linked.`);
     }
-    // Refresh this slot's per-worktree env file (no-op unless `env` is configured).
-    const envRes = await applyEnv(slot.path, config, slot, slot.branch ?? "");
-    if (envRes?.written) logger.step(`📝 ${slot.name}: generated ${envRes.file}`);
+    if (res.env?.change === "written") logger.step(`📝 ${wt.name}: generated ${res.env.file} (slot ${wt.slot})`);
+    if (res.env?.change === "removed") logger.step(`🧹 ${wt.name}: removed ${res.env.file} (no slot)`);
+    if (res.claudeDir === "linked") logger.step(`🔗 ${wt.name}: Claude project dir → main's`);
+    if (res.claudeDir === "real-dir") {
+      logger.warn(`${wt.name}: its Claude project dir is a real directory — merge it into the main one by hand.`);
+    }
+    if (res.recipeHooksChanged) logger.step(`⚡ ${wt.name}: hooks rewired`);
   }
 
-  // Garbage-collect manifest entries for slots that no longer exist.
+  // Drop manifest entries for worktrees that no longer exist.
+  const manifest = await readManifest(projectName);
   const live = new Set(slots.map((s) => path.resolve(s.path)));
   for (const key of Object.keys(manifest)) {
     if (!live.has(key)) delete manifest[key];
   }
   await writeManifest(projectName, manifest);
 
-  // Materialize enabled recipes' artifacts (a no-op when none enabled; non-clobbering).
-  const recipeFiles = await materializeRecipes(root, projectName, config.recipes);
-  for (const file of recipeFiles) logger.step(`📦 recipes/${file}`);
-  const anyEnabled = Object.keys(config.recipes).length > 0;
-  for (const slot of slots) {
-    if (await applyRecipeWiring(root, projectName, slot, config.recipes)) {
-      logger.step(`⚡ ${slot.name}: recipe hooks ${anyEnabled ? "wired" : "removed"}`);
-    }
-  }
+  if (await writeProjectFile(projectName, root)) logger.step("📝 project.json");
+  const ws = await syncWorkspaceFile(projectName, root);
+  if (ws === "created") logger.step(`📝 ${projectName}.code-workspace`);
+  if (ws === "unparseable") logger.warn(`${projectName}.code-workspace is not plain JSON — left as-is.`);
 
   logger.success(
-    `Synced ${slots.length} universe${slots.length === 1 ? "" : "s"} — ${created} linked, ${pruned} pruned.`
+    `Synced ${slots.length} worktree${slots.length === 1 ? "" : "s"} — ${created} linked, ${pruned} pruned.`
   );
+}
+
+/** `project.json` = `{ root }`: lets tools go from the profile to the repo. */
+async function writeProjectFile(projectName: string, root: string): Promise<boolean> {
+  return writeTextChanged(projectFile(projectName), JSON.stringify({ root }, null, 2) + "\n");
+}
+
+/**
+ * The project's VS Code workspace file: one folder (the main worktree; the
+ * worm-vscode extension swaps it to show another worktree, and VS Code saves that
+ * back into this file — so an existing file keeps its folders) and a window title
+ * that keeps the project name whichever worktree is shown.
+ */
+async function syncWorkspaceFile(
+  projectName: string,
+  root: string
+): Promise<"created" | "updated" | "unchanged" | "unparseable"> {
+  const file = workspaceFile(projectName);
+  const title = `${projectName} · \${rootName}\${separator}\${activeEditorShort}`;
+  if (!(await pathExists(file))) {
+    await writeJson(file, { folders: [{ path: root }], settings: { "window.title": title } });
+    return "created";
+  }
+  let ws: { settings?: Record<string, unknown> } & Record<string, unknown>;
+  try {
+    ws = await readJson(file);
+  } catch {
+    return "unparseable";
+  }
+  if (ws.settings?.["window.title"] === title) return "unchanged";
+  ws.settings = { ...(ws.settings ?? {}), "window.title": title };
+  await writeJson(file, ws);
+  return "updated";
 }
 
 /**

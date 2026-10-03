@@ -16,6 +16,8 @@ import { logger } from "../utils/logger.js";
 import { ensureSymlink } from "./symlinks.js";
 import { hookEnv } from "./hooks.js";
 import {
+  claudeProjectsDir,
+  claudeSlug,
   globalProjectFile,
   syncPermissionsBaseFile,
   globalProjectMemoryDir,
@@ -34,7 +36,7 @@ import type {
   ShareMemoryRecipeConfig,
   SyncGlobalPermissionsRecipeConfig,
   SyncPermissionsRecipeConfig,
-  UniverseSlot,
+  Worktree,
 } from "../types.js";
 
 /**
@@ -68,16 +70,16 @@ export interface RecipeArtifact {
 /** Claude hook-event key (PreToolUse / SessionStart / SessionEnd) → entries. */
 export type SettingsContribution = Record<string, unknown[]>;
 
-/** Minimal slot shape the wiring needs (UniverseSlot satisfies it). */
-export interface WiringSlot {
+/** Minimal worktree shape the wiring needs (UniverseSlot satisfies it). */
+export interface WiringWorktree {
   name: string;
   path: string;
 }
 
 export interface RecipeWireContext {
-  slot0Root: string;
+  mainRoot: string;
   projectName: string;
-  slot: WiringSlot;
+  worktree: WiringWorktree;
 }
 
 export interface Recipe<C = unknown> {
@@ -97,8 +99,8 @@ export interface Recipe<C = unknown> {
    *  time by the dispatcher (and probed at wiring time to decide which static
    *  dispatcher entries to install). */
   hooks?(ctx: RecipeWireContext, cfg: C): HookContribution;
-  /** Imperative per-slot setup (idempotent), run when a slot is wired. */
-  onSlotCreate?(ctx: RecipeWireContext, cfg: C): Promise<void>;
+  /** Imperative per-slot setup (idempotent), run when a worktree is wired. */
+  onWire?(ctx: RecipeWireContext, cfg: C): Promise<void>;
 }
 
 // --- hook events & the dispatcher contract -----------------------------------
@@ -166,6 +168,23 @@ export type HookContribution = Partial<Record<HookEvent, HookCommand[]>>;
 // the same marker, so a re-sync replaces them with the `worm` form).
 const DISPATCH_MARKER = "hook trigger ";
 
+// Every hook entry worm writes — the dispatcher entries above plus Claude's
+// WorktreeCreate/WorktreeRemove (`worm hook worktree-create|remove`). Kept in sync
+// with WORM_HOOK_RE in src/recipes/_lib/settings-merge.js (standalone script).
+const WORM_HOOK_RE = /hook (trigger |worktree-(create|remove)\b)/;
+
+/**
+ * Claude Code's worktree hooks, wired into every worktree regardless of recipes:
+ * whoever creates a worktree through Claude (`EnterWorktree`, `--worktree`,
+ * Desktop) gets worm's — `.claude/worktrees/<name>`, wired and set up — and
+ * removal goes through worm too. Setup can take a while (dependency install),
+ * hence the long timeout.
+ */
+const WORKTREE_HOOKS: SettingsContribution = {
+  WorktreeCreate: [{ hooks: [{ type: "command", command: "worm hook worktree-create", timeout: 600 }] }],
+  WorktreeRemove: [{ hooks: [{ type: "command", command: "worm hook worktree-remove", timeout: 120 }] }],
+};
+
 /** The static settings command that routes an event back into worm. Resolved via
  *  `worm` on PATH (not a baked absolute path): the hook was only written because
  *  `worm sync` ran — i.e. `worm` was on PATH — so it stays valid across reinstalls,
@@ -193,15 +212,15 @@ const sandboxRecipe: Recipe<SandboxRecipeConfig> = {
       },
     ];
   },
-  hooks({ slot0Root, projectName, slot }, cfg) {
-    const dir = localRecipeDir(slot0Root, "sandbox");
+  hooks({ mainRoot, projectName, worktree }, cfg) {
+    const dir = localRecipeDir(mainRoot, "sandbox");
     const compose = path.join(dir, "compose.yml");
     const policy = path.join(dir, "sandbox-policy.json");
     // Code lives ONCE in the package; the per-project bits (container, compose,
     // policy) are computed here at trigger time and passed as args.
     const script = packagedRecipeScript("sandbox", "redirect-to-sandbox.js");
-    const container = `${projectName}-${slot.name}-sandbox`;
-    const project = `${projectName}-${slot.name}`;
+    const container = `${projectName}-${worktree.name}-sandbox`;
+    const project = `${projectName}-${worktree.name}`;
     const out: HookContribution = {
       // Filter: the interceptor reads the tool input on stdin and self-logs its
       // decision to <container>-redirect.log (via WORM_LOG_DIR set by dispatch).
@@ -210,7 +229,7 @@ const sandboxRecipe: Recipe<SandboxRecipeConfig> = {
     if (cfg.autostart) {
       out["session-start"] = [
         {
-          command: `SANDBOX_DIR="${slot.path}" SANDBOX_CONTAINER="${container}" docker compose -p "${project}" -f "${compose}" up -d`,
+          command: `SANDBOX_DIR="${worktree.path}" SANDBOX_CONTAINER="${container}" docker compose -p "${project}" -f "${compose}" up -d`,
           log: container,
         },
       ];
@@ -254,7 +273,7 @@ const syncPermissionsRecipe: Recipe<SyncPermissionsRecipeConfig> = {
   select: (recipes) => recipes.syncPermissions,
   // No artifacts: the sync script is worm-owned code that lives ONCE in the
   // package (parameterized at run time), never copied into a project.
-  hooks({ projectName, slot }, cfg) {
+  hooks({ projectName, worktree }, cfg) {
     const script = packagedRecipeScript("syncPermissions", "sync-claude-settings.js");
     // The canonical store lives in the PERSISTENT global profile (in ~/.worm —
     // committed, shared across slots, surviving re-clones), NOT the ephemeral
@@ -262,7 +281,7 @@ const syncPermissionsRecipe: Recipe<SyncPermissionsRecipeConfig> = {
     // already lives, so existing permissions are pulled in on first run.
     const canonical = globalProjectFile(projectName, path.join(".claude", "settings.local.json"));
     // Three-way ancestor, one per slot (each diverges from canonical on its own).
-    const base = syncPermissionsBaseFile(projectName, slot.name);
+    const base = syncPermissionsBaseFile(projectName, worktree.name);
     const command = `node "${script}" "${canonical}" "${base}"${keyArgs(cfg?.keys)}`;
     // Same bidirectional sync on both boundaries: pull on start, push on end.
     return { "session-start": [{ command }], "session-end": [{ command }] };
@@ -271,14 +290,9 @@ const syncPermissionsRecipe: Recipe<SyncPermissionsRecipeConfig> = {
 
 // --- the shareHistory recipe -------------------------------------------------
 // Symlinks each sibling slot's Claude history dir to Slot 0's canonical one, so
-// every slot shares one conversation history. Purely imperative (onSlotCreate)
+// every slot shares one conversation history. Purely imperative (onWire)
 // — no artifacts, no hook commands. (Lifts the `ln -sfn` block that used to live
 // in projects' setup.sh into a first-class recipe.)
-
-/** Claude's project-history slug: the absolute path with `/` and `.` → `-`. */
-function claudeSlug(absPath: string): string {
-  return path.resolve(absPath).replace(/[/.]/g, "-");
-}
 
 const shareHistoryRecipe: Recipe<ShareHistoryRecipeConfig> = {
   name: "shareHistory",
@@ -291,16 +305,16 @@ const shareHistoryRecipe: Recipe<ShareHistoryRecipeConfig> = {
     const script = packagedRecipeScript("shareHistory", "inject-cwd-on-switch.js");
     return { "user-prompt-submit": [{ command: `node "${script}"` }] };
   },
-  async onSlotCreate({ slot, slot0Root }) {
-    const projectsDir = path.join(os.homedir(), ".claude", "projects");
-    const canonicalSlug = claudeSlug(slot0Root);
-    const slotSlug = claudeSlug(slot.path);
-    if (slotSlug === canonicalSlug) return; // Slot 0 *is* the canonical store.
+  async onWire({ worktree, mainRoot }) {
+    const projectsDir = claudeProjectsDir();
+    const canonicalSlug = claudeSlug(mainRoot);
+    const worktreeSlug = claudeSlug(worktree.path);
+    if (worktreeSlug === canonicalSlug) return; // Slot 0 *is* the canonical store.
 
-    const linkPath = path.join(projectsDir, slotSlug);
+    const linkPath = path.join(projectsDir, worktreeSlug);
     if ((await pathExists(linkPath)) && !(await isSymlink(linkPath))) {
       logger.warn(
-        `${slot.name}: ${linkPath} is a real history dir — merge it into ${canonicalSlug}/ by hand; skipping.`
+        `${worktree.name}: ${linkPath} is a real history dir — merge it into ${canonicalSlug}/ by hand; skipping.`
       );
       return;
     }
@@ -308,7 +322,7 @@ const shareHistoryRecipe: Recipe<ShareHistoryRecipeConfig> = {
       relative: true,
       type: "dir",
     });
-    if (res.created) logger.step(`🔗 ${slot.name}: Claude history → ${canonicalSlug}`);
+    if (res.created) logger.step(`🔗 ${worktree.name}: Claude history → ${canonicalSlug}`);
   },
 };
 
@@ -317,7 +331,7 @@ const shareHistoryRecipe: Recipe<ShareHistoryRecipeConfig> = {
 // (~/.worm/projects/<name>/.claude/memory), so all slots read & write one
 // shared memory that survives a slot-0 reclone. Unlike shareHistory — whose
 // canonical store IS Slot 0, so Slot 0 is left alone — the store here lives in
-// the profile, so Slot 0 is linked too. Purely imperative (onSlotCreate).
+// the profile, so Slot 0 is linked too. Purely imperative (onWire).
 
 /** Move a real `memory/` dir into the profile to seed the shared store, with an
  *  EXDEV fallback (copy+remove) for a profile on a different filesystem. */
@@ -335,29 +349,29 @@ async function seedMemory(src: string, dest: string): Promise<void> {
 const shareMemoryRecipe: Recipe<ShareMemoryRecipeConfig> = {
   name: "shareMemory",
   select: (recipes) => recipes.shareMemory,
-  async onSlotCreate({ slot, projectName }) {
-    const projectsDir = path.join(os.homedir(), ".claude", "projects");
-    const slotMemory = path.join(projectsDir, claudeSlug(slot.path), "memory");
+  async onWire({ worktree, projectName }) {
+    const projectsDir = claudeProjectsDir();
+    const worktreeMemory = path.join(projectsDir, claudeSlug(worktree.path), "memory");
     const canonical = globalProjectMemoryDir(projectName);
 
-    if ((await pathExists(slotMemory)) && !(await isSymlink(slotMemory))) {
+    if ((await pathExists(worktreeMemory)) && !(await isSymlink(worktreeMemory))) {
       // A real memory dir: seed the empty profile store from it on first run,
       // else refuse to clobber — the user merges the two by hand.
       if (await pathExists(canonical)) {
         logger.warn(
-          `${slot.name}: ${slotMemory} is a real memory dir — merge it into ${canonical} by hand; skipping.`
+          `${worktree.name}: ${worktreeMemory} is a real memory dir — merge it into ${canonical} by hand; skipping.`
         );
         return;
       }
-      await seedMemory(slotMemory, canonical);
-      logger.step(`🌱 ${slot.name}: seeded shared memory into the profile`);
+      await seedMemory(worktreeMemory, canonical);
+      logger.step(`🌱 ${worktree.name}: seeded shared memory into the profile`);
     } else {
       // Ensure the canonical store exists so the link resolves to a real dir.
       await ensureDir(canonical);
     }
 
-    const res = await ensureSymlink(slotMemory, canonical, { relative: false, type: "dir" });
-    if (res.created) logger.step(`🔗 ${slot.name}: Claude memory → profile`);
+    const res = await ensureSymlink(worktreeMemory, canonical, { relative: false, type: "dir" });
+    if (res.created) logger.step(`🔗 ${worktree.name}: Claude memory → profile`);
   },
 };
 
@@ -457,7 +471,7 @@ function enabledRecipes(
  * Returns the `<name>/<relPath>` of each file actually written.
  */
 export async function materializeRecipes(
-  slot0Root: string,
+  mainRoot: string,
   projectName: string,
   recipes: RecipesConfig
 ): Promise<string[]> {
@@ -465,11 +479,11 @@ export async function materializeRecipes(
   const enabled = enabledRecipes(recipes);
   // Pre-create the log dir so the dispatcher's `>> .worm/logs/…` redirects don't
   // fail (the shell opens the redirect before the command body runs).
-  if (enabled.length > 0) await ensureDir(localLogsDir(slot0Root));
+  if (enabled.length > 0) await ensureDir(localLogsDir(mainRoot));
   for (const { recipe, cfg } of enabled) {
     const artifacts = (await recipe.artifacts?.(projectName, cfg)) ?? [];
     if (artifacts.length === 0) continue;
-    const dir = localRecipeDir(slot0Root, recipe.name);
+    const dir = localRecipeDir(mainRoot, recipe.name);
     await ensureDir(dir);
     for (const artifact of artifacts) {
       const filePath = path.join(dir, artifact.relPath);
@@ -489,19 +503,19 @@ export async function materializeRecipes(
  * one enabled-recipe command, then writes ONE static `worm hook trigger <event>`
  * entry per such event into the slot's settings.local.json — the actual commands
  * are NOT baked in; they're recomputed at trigger time. Also runs each recipe's
- * imperative `onSlotCreate`. Returns whether the file changed.
+ * imperative `onWire`. Returns whether the file changed.
  */
 export async function applyRecipeWiring(
-  slot0Root: string,
+  mainRoot: string,
   projectName: string,
-  slot: WiringSlot,
+  worktree: WiringWorktree,
   recipes: RecipesConfig
 ): Promise<boolean> {
-  const ctx: RecipeWireContext = { slot0Root, projectName, slot };
+  const ctx: RecipeWireContext = { mainRoot, projectName, worktree };
   const events = new Set<HookEvent>();
   for (const { recipe, cfg } of enabledRecipes(recipes)) {
     // Imperative per-slot setup (e.g. shareHistory's symlink) runs first.
-    if (recipe.onSlotCreate) await recipe.onSlotCreate(ctx, cfg);
+    if (recipe.onWire) await recipe.onWire(ctx, cfg);
     const contribution = recipe.hooks?.(ctx, cfg);
     if (!contribution) continue;
     for (const [event, cmds] of Object.entries(contribution) as Array<
@@ -519,19 +533,22 @@ export async function applyRecipeWiring(
     if (meta.matcher) entry.matcher = meta.matcher;
     (install[meta.claudeEvent] ??= []).push(entry);
   }
-  return writeSlotHooks(slot.path, install);
+  for (const [event, entries] of Object.entries(WORKTREE_HOOKS)) {
+    (install[event] ??= []).push(...entries);
+  }
+  return writeWorktreeHooks(worktree.path, install);
 }
 
-/** Remove all worm-managed recipe hooks from a slot (used on `destroy`). */
+/** Remove all worm-managed recipe hooks from a worktree (used on `destroy`). */
 export async function stripRecipeWiring(slotPath: string): Promise<boolean> {
-  return writeSlotHooks(slotPath, {});
+  return writeWorktreeHooks(slotPath, {});
 }
 
 // --- global (machine-wide) recipe wiring + dispatch --------------------------
 
-/** A context stub for global recipes — they ignore slot info and act on ~/.worm. */
+/** A context stub for global recipes — they ignore worktree info and act on ~/.worm. */
 function globalWireContext(): RecipeWireContext {
-  return { slot0Root: globalRoot(), projectName: "global", slot: { name: "global", path: globalRoot() } };
+  return { mainRoot: globalRoot(), projectName: "global", worktree: { name: "global", path: globalRoot() } };
 }
 
 function globalSettingsPath(): string {
@@ -600,9 +617,9 @@ export async function runGlobalRecipeHooks(
 // --- the dispatcher (invoked by `worm hook trigger <event>`) -----------------
 
 export interface DispatchContext {
-  slot0Root: string;
+  mainRoot: string;
   projectName: string;
-  slot: UniverseSlot;
+  worktree: Worktree;
   branch: string;
 }
 
@@ -611,14 +628,14 @@ export interface DispatchContext {
 function dispatchEnv(ctx: DispatchContext, recipe: string, logDir: string): NodeJS.ProcessEnv {
   return {
     ...process.env,
-    ...hookEnv(ctx.slot0Root, ctx.slot, ctx.branch, ctx.projectName),
+    ...hookEnv(ctx.mainRoot, ctx.worktree, ctx.branch, ctx.projectName),
     WORM_LOG_DIR: logDir,
     WORM_RECIPE: recipe,
   };
 }
 
 function wireContext(ctx: DispatchContext): RecipeWireContext {
-  return { slot0Root: ctx.slot0Root, projectName: ctx.projectName, slot: ctx.slot };
+  return { mainRoot: ctx.mainRoot, projectName: ctx.projectName, worktree: ctx.worktree };
 }
 
 /**
@@ -631,14 +648,14 @@ export async function runRecipeHooks(
   recipes: RecipesConfig,
   event: HookEvent
 ): Promise<void> {
-  const logDir = localLogsDir(ctx.slot0Root);
+  const logDir = localLogsDir(ctx.mainRoot);
   await ensureDir(logDir);
   for (const { recipe, cfg } of enabledRecipes(recipes)) {
     const cmds = recipe.hooks?.(wireContext(ctx), cfg)?.[event] ?? [];
     for (const hc of cmds) {
       const logFile = path.join(logDir, `${hc.log ?? recipe.name}.log`);
       await runShell(logged(hc.command, logFile, event), {
-        cwd: ctx.slot.path,
+        cwd: ctx.worktree.path,
         env: dispatchEnv(ctx, recipe.name, logDir),
       });
     }
@@ -656,12 +673,12 @@ export async function runRecipeFilters(
   event: HookEvent,
   input: string
 ): Promise<string | null> {
-  const logDir = localLogsDir(ctx.slot0Root);
+  const logDir = localLogsDir(ctx.mainRoot);
   for (const { recipe, cfg } of enabledRecipes(recipes)) {
     const cmds = recipe.hooks?.(wireContext(ctx), cfg)?.[event] ?? [];
     for (const hc of cmds) {
       const res = await runShell(hc.command, {
-        cwd: ctx.slot.path,
+        cwd: ctx.worktree.path,
         env: dispatchEnv(ctx, recipe.name, logDir),
         input,
       });
@@ -684,13 +701,13 @@ export async function runRecipeContext(
   event: HookEvent,
   input: string
 ): Promise<string | null> {
-  const logDir = localLogsDir(ctx.slot0Root);
+  const logDir = localLogsDir(ctx.mainRoot);
   const parts: string[] = [];
   for (const { recipe, cfg } of enabledRecipes(recipes)) {
     const cmds = recipe.hooks?.(wireContext(ctx), cfg)?.[event] ?? [];
     for (const hc of cmds) {
       const res = await runShell(hc.command, {
-        cwd: ctx.slot.path,
+        cwd: ctx.worktree.path,
         env: dispatchEnv(ctx, recipe.name, logDir),
         input,
       });
@@ -714,13 +731,13 @@ function isWormManaged(entry: unknown): boolean {
     Array.isArray(hooks) &&
     hooks.some((h) => {
       const cmd = (h as { command?: unknown })?.command;
-      return typeof cmd === "string" && cmd.includes(DISPATCH_MARKER);
+      return typeof cmd === "string" && WORM_HOOK_RE.test(cmd);
     })
   );
 }
 
 /** Merge `install` into a slot's `.claude/settings.local.json` (gitignored). */
-async function writeSlotHooks(
+async function writeWorktreeHooks(
   slotPath: string,
   install: SettingsContribution
 ): Promise<boolean> {
