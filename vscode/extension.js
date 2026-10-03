@@ -1,0 +1,145 @@
+// worm-vscode — one VS Code window per worm project, pointed at whichever
+// worktree you are working in.
+//
+// The window is opened from the project's `<p>.code-workspace` (written by
+// `worm sync` in the profile, next to slots.json). Focusing a worktree swaps
+// folder 0 with `updateWorkspaceFolders` — no window reload, the extension host
+// restarts (~1.5 s). The control plane drives it through a URI:
+//
+//   vscode://tmalahie.worm-vscode/focus?workspace=<abs .code-workspace>&path=<abs worktree>
+//
+// URIs reach whichever window is focused, so a window acts only when the URI
+// names *its* workspace file; any other window ignores it. A misrouted click
+// then does nothing instead of taking over the wrong window.
+//
+// Never writes settings. Inert in any window not opened from a worm workspace.
+const vscode = require('vscode');
+const { execFile } = require('child_process');
+const fs = require('fs');
+const path = require('path');
+
+const git = (cwd, args) =>
+  new Promise((resolve) => {
+    execFile('git', args, { cwd, timeout: 10_000 }, (err, stdout) => resolve(err ? '' : stdout));
+  });
+
+/** The workspace file, when this window was opened from a worm profile's one. */
+function wormWorkspace() {
+  const file = vscode.workspace.workspaceFile;
+  if (!file || file.scheme !== 'file' || !file.fsPath.endsWith('.code-workspace')) return null;
+  const profileDir = path.dirname(file.fsPath);
+  if (!fs.existsSync(path.join(profileDir, 'config.json'))) return null;
+  return { file: file.fsPath, profileDir };
+}
+
+/** The repo's main worktree, from folder 0 (whichever worktree it shows). */
+async function repoRoot() {
+  const folder = vscode.workspace.workspaceFolders?.[0];
+  if (!folder) return null;
+  const common = (await git(folder.uri.fsPath, ['rev-parse', '--path-format=absolute', '--git-common-dir'])).trim();
+  return common ? path.dirname(common) : null;
+}
+
+async function listWorktrees() {
+  const root = await repoRoot();
+  if (!root) return [];
+  const out = await git(root, ['worktree', 'list', '--porcelain']);
+  const list = [];
+  let cur = null;
+  for (const line of out.split('\n')) {
+    if (line.startsWith('worktree ')) {
+      cur = { path: line.slice(9), branch: null, prunable: false };
+      list.push(cur);
+    } else if (cur && line.startsWith('branch ')) cur.branch = line.slice(7).replace('refs/heads/', '');
+    else if (cur && line.startsWith('prunable')) cur.prunable = true;
+  }
+  return list
+    .filter((w) => !w.prunable)
+    .map((w) => ({ ...w, name: w.path === root ? 'main' : path.basename(w.path), isMain: w.path === root }));
+}
+
+/** worktree path → slot, from the profile's slots.json (written by worm). */
+function readSlots(ws) {
+  const map = new Map();
+  try {
+    const table = JSON.parse(fs.readFileSync(path.join(ws.profileDir, 'slots.json'), 'utf8'));
+    for (const [n, e] of Object.entries(table)) if (e?.worktree) map.set(path.resolve(e.worktree), Number(n));
+  } catch {
+    /* no slots yet */
+  }
+  return map;
+}
+
+const label = (w) => w.branch ?? w.name;
+
+function focus(wt) {
+  const n = vscode.workspace.workspaceFolders?.length ?? 0;
+  return vscode.workspace.updateWorkspaceFolders(0, n, { uri: vscode.Uri.file(wt.path), name: label(wt) });
+}
+
+async function pick(placeHolder) {
+  const ws = wormWorkspace();
+  const slots = ws ? readSlots(ws) : new Map();
+  const current = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  const items = (await listWorktrees()).map((w) => ({
+    label: `${w.path === current ? '$(check) ' : ''}${label(w)}`,
+    description: [w.isMain ? 'main' : w.name, slots.has(w.path) ? `slot ${slots.get(w.path)}` : null].filter(Boolean).join(' · '),
+    detail: w.path,
+    wt: w,
+  }));
+  return (await vscode.window.showQuickPick(items, { placeHolder, matchOnDescription: true, matchOnDetail: true }))?.wt;
+}
+
+function activate(context) {
+  const ws = wormWorkspace();
+  const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
+  status.command = 'worm.focusWorktree';
+
+  const refresh = async () => {
+    if (!wormWorkspace()) return status.hide();
+    const current = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    const wt = (await listWorktrees()).find((w) => w.path === current);
+    if (!wt) return status.hide();
+    const slot = readSlots(ws).get(wt.path);
+    status.text = `$(git-branch) ${label(wt)}${slot === undefined ? '' : ` · slot ${slot}`}`;
+    status.tooltip = `${wt.path}\nClick to focus another worktree`;
+    status.show();
+  };
+
+  context.subscriptions.push(
+    status,
+    vscode.commands.registerCommand('worm.focusWorktree', async (target) => {
+      const wt = typeof target === 'string' ? (await listWorktrees()).find((w) => w.path === path.resolve(target)) : await pick('Focus a worktree');
+      if (wt) focus(wt);
+    }),
+    vscode.commands.registerCommand('worm.showAllWorktrees', async () => {
+      const all = await listWorktrees();
+      const n = vscode.workspace.workspaceFolders?.length ?? 0;
+      vscode.workspace.updateWorkspaceFolders(0, n, ...all.map((w) => ({ uri: vscode.Uri.file(w.path), name: label(w) })));
+    }),
+    vscode.commands.registerCommand('worm.refreshWorktrees', refresh),
+    vscode.commands.registerCommand('worm.openTerminalInWorktree', async () => {
+      const wt = await pick('Open a terminal in…');
+      if (wt) vscode.window.createTerminal({ name: label(wt), cwd: wt.path }).show();
+    }),
+    vscode.window.registerUriHandler({
+      async handleUri(uri) {
+        if (uri.path !== '/focus') return;
+        const q = new URLSearchParams(uri.query);
+        const mine = wormWorkspace();
+        // Not ours: the URI landed in whichever window had focus. Ignore it.
+        if (!mine || path.resolve(q.get('workspace') ?? '') !== mine.file) return;
+        const target = path.resolve(q.get('path') ?? '');
+        const wt = (await listWorktrees()).find((w) => w.path === target);
+        if (wt) focus(wt);
+        else vscode.window.showWarningMessage(`worm: ${target} is not a worktree of this project`);
+      },
+    }),
+    vscode.workspace.onDidChangeWorkspaceFolders(refresh),
+  );
+  const timer = setInterval(refresh, 10_000);
+  context.subscriptions.push({ dispose: () => clearInterval(timer) });
+  refresh();
+}
+
+module.exports = { activate, deactivate() {} };
