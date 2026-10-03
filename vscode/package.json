@@ -3,19 +3,47 @@
   "displayName": "worm worktrees",
   "description": "Switch a worm project's VS Code window between its git worktrees.",
   "publisher": "tmalahie",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "license": "UNLICENSED",
-  "repository": { "type": "git", "url": "https://github.com/tmalahie/wormhole" },
-  "engines": { "vscode": "^1.90.0" },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tmalahie/wormhole"
+  },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
   "main": "./extension.js",
-  "activationEvents": ["onStartupFinished", "onUri"],
-  "capabilities": { "untrustedWorkspaces": { "supported": true } },
+  "activationEvents": [
+    "onStartupFinished",
+    "onUri"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": true
+    }
+  },
   "contributes": {
     "commands": [
-      { "command": "worm.focusWorktree", "title": "Focus Worktree…", "category": "worm" },
-      { "command": "worm.showAllWorktrees", "title": "Show All Worktrees", "category": "worm" },
-      { "command": "worm.refreshWorktrees", "title": "Refresh Worktrees", "category": "worm" },
-      { "command": "worm.openTerminalInWorktree", "title": "Open Terminal in Worktree", "category": "worm" }
+      {
+        "command": "worm.focusWorktree",
+        "title": "Focus Worktree…",
+        "category": "worm"
+      },
+      {
+        "command": "worm.showAllWorktrees",
+        "title": "Show All Worktrees",
+        "category": "worm"
+      },
+      {
+        "command": "worm.refreshWorktrees",
+        "title": "Refresh Worktrees",
+        "category": "worm"
+      },
+      {
+        "command": "worm.openTerminalInWorktree",
+        "title": "Open Terminal in Worktree",
+        "category": "worm"
+      }
     ]
   }
 }

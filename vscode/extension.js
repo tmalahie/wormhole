@@ -97,10 +97,17 @@ function tabsUnder(root) {
  *
  * All of it happens before the folder swap: swapping folder 0 restarts the
  * extension host, and nothing after it is guaranteed to run.
+ *
+ * Outside a worm workspace, swapping folders would turn the window into an
+ * "Untitled (Workspace)", so the worktree is opened as a plain folder instead.
  */
 async function focus(wt) {
   const current = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   const n = vscode.workspace.workspaceFolders?.length ?? 0;
+  if (current === wt.path && n === 1) return true;
+  if (!wormWorkspace()) {
+    return vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(wt.path), { forceReuseWindow: true });
+  }
   if (current && current !== wt.path && n === 1) {
     const old = tabsUnder(current);
     const dirty = old.filter((t) => t.tab.isDirty);
@@ -139,8 +146,41 @@ async function pick(placeHolder) {
   return (await vscode.window.showQuickPick(items, { placeHolder, matchOnDescription: true, matchOnDetail: true }))?.wt;
 }
 
+/**
+ * Language servers a previous extension host left behind.
+ *
+ * Swapping folder 0 restarts the extension host, and some extensions' servers
+ * outlive it — oxc's `oxlint --lsp` does, one orphan (~40 MB) per switch. This
+ * host's own server is our sibling's child; the leftovers were re-parented to
+ * launchd (ppid 1). Only those, and only ones running from this repo's
+ * node_modules (main checkout or a worktree under it), are stopped.
+ */
+async function reapOrphanServers() {
+  const root = await repoRoot();
+  if (!root) return 0;
+  const out = await new Promise((resolve) => {
+    execFile('ps', ['-axo', 'pid=,ppid=,args='], { timeout: 5000, maxBuffer: 8 << 20 }, (err, stdout) => resolve(err ? '' : stdout));
+  });
+  let reaped = 0;
+  for (const line of out.split('\n')) {
+    const m = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line);
+    if (!m || m[2] !== '1') continue;
+    const args = m[3];
+    if (!/\boxlint\b.*--lsp\b/.test(args)) continue;
+    if (!args.includes(`${root}/node_modules/`) && !args.includes(`${root}/.claude/worktrees/`)) continue;
+    try {
+      process.kill(Number(m[1]), 'SIGTERM');
+      reaped += 1;
+    } catch {
+      /* already gone */
+    }
+  }
+  return reaped;
+}
+
 function activate(context) {
   const ws = wormWorkspace();
+  if (ws) reapOrphanServers().catch(() => {});
   const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
   status.command = 'worm.focusWorktree';
 
@@ -162,6 +202,9 @@ function activate(context) {
       if (wt) focus(wt);
     }),
     vscode.commands.registerCommand('worm.showAllWorktrees', async () => {
+      if (!wormWorkspace()) {
+        return vscode.window.showWarningMessage('worm: Show All Worktrees needs a window opened from a worm project workspace.');
+      }
       const all = await listWorktrees();
       const n = vscode.workspace.workspaceFolders?.length ?? 0;
       vscode.workspace.updateWorkspaceFolders(0, n, ...all.map((w) => ({ uri: vscode.Uri.file(w.path), name: label(w) })));
