@@ -11,7 +11,7 @@ cli.ts
 
 ## The model in one paragraph
 
-A worm project is a **normal git clone**. **Slot 0 is the primary working tree itself** (`~/git/<repo>/`, never renamed). Extra slots are permanent sibling worktrees at `~/git/<repo>-<N>`, added on demand. The pool is **emergent** — it's whatever `git worktree list` reports, not a fixed count. There is no bare container and no spawn/teardown: you `git switch` branches in place. The `.worm/` directory at Slot 0 is (almost) all **pointers into the profile** (`~/.worm/projects/<name>/`): `config.json`, `scripts`, `recipes`, and `logs` are symlinks, plus a local `.gitignore`. The durable per-project state (recipe artifacts, logs, the managed-link manifest) lives in the profile and survives a slot-0 reclone.
+A worm project is a **normal git clone** — the **main worktree** (`~/git/<repo>/`), kept on `baseBranch`. Work in progress lives in **linked worktrees** under `<root>/.claude/worktrees/<name>`: the layout Claude Code and Claude Desktop use, and worm is the `WorktreeCreate`/`WorktreeRemove` hook they call, so every creator (worm, the CLI, Desktop, a dashboard) converges on one code path. The set of worktrees is **emergent** — whatever `git worktree list` reports. A **slot** is separate: a number (0…`slots.max`) a worktree borrows to run its stack; the profile's `slots.json` is the only record of who holds what, and holding one is what makes a worktree get an env file. The `.worm/` directory in the main worktree is (almost) all **pointers into the profile** (`~/.worm/projects/<name>/`): `config.json`, `scripts`, `recipes`, and `logs` are symlinks, plus a local `.gitignore`. The durable per-project state (recipe artifacts, logs, the managed-link manifest, slots.json) lives in the profile and survives a reclone.
 
 ## Layers
 
@@ -24,36 +24,37 @@ One file per command. Each exports a single `runX(args, options)` async function
 | File | Responsibility |
 |---|---|
 | `clone.ts` | `git clone <url>` (normal, non-bare) → `bindProject`. The recommended entry point. |
-| `init.ts` | Bind the current clone as Slot 0. Lazily provisions `~/.worm/` on first run, writes the structural symlinks (`config.json`, `scripts/`), provisions `shared_paths`, seeds the managed-link manifest, and excludes `.worm/` via `.git/info/exclude`. Idempotent. |
-| `universe.ts` | `add <branch>` — create a permanent sibling worktree + run `on_create`. `rm <ref>` — remove a sibling (Slot 0 protected; refuses dirty without `--force`; runs `on_remove`; strips managed links before `git worktree remove`). |
-| `switch.ts` | `git switch <branch>` in the current slot + re-run `on_create`. Sugar over plain `git switch`, plus the "branch held elsewhere" guard. |
-| `sync.ts` | Declarative reconcile of shared-path links across all slots via the manifest; prunes removed links; GCs manifest entries for vanished slots; self-heals + applies the detach registry per slot. Idempotent. `--global` reconciles HOME-scope links (`~/<tail>` → `~/.worm/shared/<tail>`) **and** installs/strips global-scope recipes (`autosync`) into `~/.claude/settings.json` via `applyGlobalRecipeWiring`. |
-| `wire.ts` | `worm wire [path]` — apply the cognitive layer (tunnels + env + recipe hooks) to a worktree worm didn't create. Reuses `reconcileSlotLinks` / `applyEnv` / `applyRecipeWiring` against an arbitrary path; identifies the slot via `scanUniverses`, else a synthetic external slot (`index` = branch offset). The seam for composing with Conductor/worktrunk/native worktrees. |
+| `init.ts` | Bind the current clone (its main worktree). Lazily provisions `~/.worm/` on first run, writes the structural symlinks (`config.json`, `scripts/`), provisions `shared_paths`, seeds the managed-link manifest, and excludes `.worm/` via `.git/info/exclude`. Idempotent. |
+| `worktree.ts` | `add <branch>` / `rm <ref>` / `ls` / `path <ref>` — thin wrappers over `core/worktrees.ts` (create + wire + `on_create`; release + `on_remove` + strip + `git worktree remove`). |
+| `slot.ts` | `ls` / `assign [wt] [n]` / `release [ref]` / `current` — over `core/slots.ts` + `assignSlot`/`releaseSlot`. |
+| `sync.ts` | Declarative reconcile of every worktree (adoption plan first, then `wireWorktree` each); GCs manifest entries for vanished worktrees; writes `project.json` and the VS Code workspace file (folders never rewritten). Idempotent. `--global` reconciles HOME-scope links (`~/<tail>` → `~/.worm/shared/<tail>`) **and** installs/strips global-scope recipes (`autosync`) into `~/.claude/settings.json` via `applyGlobalRecipeWiring`. |
+| `wire.ts` | `worm wire [path]` — `wireWorktree` on one worktree (one worm didn't create, or one to repair). |
 | `detach.ts` | `worm detach <file>` — replace a shared symlink with a local real copy in the current worktree, drop it from the manifest, and record it in the detach registry (so adoption/reconcile leave it alone). Reversible by deleting the file + `worm sync`. |
-| `status.ts` | Enumerate the pool, render a table or `--json`. |
-| `destroy.ts` | Remove sibling universes + `.worm/` + the global profile. **Slot 0 is left intact.** |
-| `hook.ts` | `worm hook trigger <event>` — internal recipe-hook dispatcher invoked by each slot's `settings.local.json` (one static entry per event). Events: `pre-tool-use` (filter), `user-prompt-submit` (context), `session-start` / `session-end` / `stop` / `permission-request` (run). Resolves the live slot, runs enabled **project-scope** recipes with injected env, and owns logging. `--global` runs **global-scope** recipes (`autosync`, `notifyPendingInput`, `syncGlobalPermissions`) from `~/.worm/config.json` with NO project context (the form `worm sync --global` writes into `~/.claude/settings.json`); it forwards stdin so payload-reading recipes (`notifyPendingInput`) work. Must never throw; fails open on the hot path. Recipe scripts live in `src/recipes/<name>/`; shared script helpers (the notification backend, the three-way settings merge) in `src/recipes/_lib/`. |
+| `status.ts` | List worktrees with their slots, render a table or `--json`. |
+| `destroy.ts` | Remove linked worktrees + `.worm/` + the global profile. **The main worktree is left intact.** |
+| `hook.ts` | `worm hook worktree-create` / `worktree-remove` — Claude Code's worktree hooks (stdout reserved for the path; logs and child output go to stderr; idempotent by name). `worm hook trigger <event>` — internal recipe-hook dispatcher invoked by each worktree's `settings.local.json` (one static entry per event). Events: `pre-tool-use` (filter), `user-prompt-submit` (context), `session-start` / `session-end` / `stop` / `permission-request` (run). Resolves the live worktree (cheaply — no `git worktree list`), runs enabled **project-scope** recipes with injected env, and owns logging. `--global` runs **global-scope** recipes (`autosync`, `notifyPendingInput`, `syncGlobalPermissions`) from `~/.worm/config.json` with NO project context (the form `worm sync --global` writes into `~/.claude/settings.json`); it forwards stdin so payload-reading recipes (`notifyPendingInput`) work. Must never throw; fails open on the hot path. Recipe scripts live in `src/recipes/<name>/`; shared script helpers (the notification backend, the three-way settings merge) in `src/recipes/_lib/`. |
 | `template.ts` | `worm template render <file> KEY=VALUE …` — render a `{{var}}` template file to stdout (worm's templating primitive, for user setup scripts). |
-| `path.ts` / `shell-init.ts` / `completion.ts` | Navigation helpers, shell wrapper, and tab-completion. |
+| `path.ts` / `shell-init.ts` / `completion.ts` | Navigation helpers (`worm path`/`worm cd` by name, branch or slot), shell wrapper, and tab-completion. |
 
 ### `core/`
 Domain primitives. Pure functions where possible; the only side effects are filesystem and `git`.
 
 | File | Owns |
 |---|---|
-| `paths.ts` | **Single source of truth** for every path. `globalRoot()` honours `WORM_HOME`. `siblingWorktreeDir`/`SLOT_DIR_INFIX` define the `<repo>-<N>` layout; `globalProject{Recipes,Logs}Dir` the durable profile state; `managedLinksFile(projectName)` the manifest (now in the profile). |
-| `layout.ts` | `ensureLocalLayout` makes `.worm/recipes` & `.worm/logs` symlinks into the profile (and gitignores generated logs). Run on init/sync/universe-add. |
-| `project.ts` | `findSlot0Root()` (via `git rev-parse --git-common-dir`) is the root resolver used by every command but `init`/`clone`, which use `gitToplevel()`. Retains a legacy `isBareCloneContainer` detector for a future `worm migrate`. |
+| `paths.ts` | **Single source of truth** for every path. `globalRoot()` honours `WORM_HOME`. `worktreesDir`/`worktreeDir` define the `.claude/worktrees/<name>` layout; `slotsFile`, `projectFile`, `workspaceFile`, `globalProject{Recipes,Logs}Dir` the durable profile state; `managedLinksFile(projectName)` the manifest; `claudeProjectsDir`/`claudeSlug` Claude's per-project dirs. |
+| `layout.ts` | `ensureLocalLayout` makes `.worm/recipes` & `.worm/logs` symlinks into the profile (and gitignores generated logs). Run on init/sync/worktree add. |
+| `project.ts` | `findMainRoot()` (via `git rev-parse --git-common-dir`) is the root resolver used by every command but `init`/`clone`, which use `gitToplevel()`. Retains a legacy `isBareCloneContainer` detector for a future `worm migrate`. |
 | `config.ts` | Load / save / validate `Config` via zod (`.strict()`, parsed as-is — no legacy normalization). |
 | `templates.ts` | Seed `~/.worm/templates/default/` and resolve a template (override → global default → built-in) into a `Config` + `scripts/`. |
-| `git.ts` | Typed wrappers for `git worktree {add,remove,list,prune}`, `switchBranch`, `currentBranch`, branch lookups, `dirtyFiles`. Parses porcelain output. Also `gitCommonDir` + `ensureGitExclude` (idempotent add to the shared `info/exclude`, used for `.worm/` and each slot's generated env file). |
-| `env.ts` | The per-worktree `env` block: `stableHash`/`portOffset` (deterministic, branch-keyed), the value evaluator (integer arithmetic over `index`/`offset`/`hash`, plus text `slot`/`branch`), `renderEnvFile`, `applyEnv` (write-if-changed + git-exclude), and `assertNoEnvCollision`. Distinct from `utils/template.ts` — only this evaluator does arithmetic inside `{{ … }}`. |
+| `git.ts` | Typed wrappers for `git worktree {add,remove,list,prune}` (add takes a `base` for new branches), `currentBranch`, branch/ref lookups, `fetchBranch` (bounded), `deleteMergedBranch`, `dirtyFiles`. Parses porcelain output. Also `gitCommonDir` + `ensureGitExclude` (idempotent add to the shared `info/exclude`, used for `.worm/`, `.claude/worktrees/`, `.worktree-keep`, `settings.local.json` and the env file). |
+| `env.ts` | The slot env file: `stableHash`/`portOffset` (deterministic, branch-keyed), the expression evaluator (numbers and text over `index`/`offset`/`hash`/`name`/`branch`/`profile`/`root`/`worktree`; `+ - * / %`, `== !=`, `?:`, string `+`), `renderEnvFile`, `applyEnv` (render-if-changed with a context, delete without one; git-exclude), and `assertNoEnvCollision`. Distinct from `utils/template.ts` — only this evaluator does arithmetic inside `{{ … }}`. |
 | `symlinks.ts` | `ensureSymlink()` — idempotent, prefers relative paths, refuses to overwrite real files. |
-| `links.ts` | The managed-link manifest (in the profile): `reconcileSlotLinks` (links each slot's tails straight at their resolved source, absolute; sprouts a missing profile source, skips a missing external one; create/prune, deref-guarded on BOTH sides — a real file is never clobbered, and the manifest stores only tails actually maintained as symlinks) and `stripSlotLinks` (before worktree removal). Also the **detach registry** (`.detached-links.json`): `readDetached`/`writeDetached`/`liveDetached` (self-healing — a deleted local file re-attaches). |
+| `links.ts` | The managed-link manifest (in the profile): `reconcileWorktreeLinks` (links each slot's tails straight at their resolved source, absolute; sprouts a missing profile source, skips a missing external one; create/prune, deref-guarded on BOTH sides — a real file is never clobbered, and the manifest stores only tails actually maintained as symlinks) and `stripWorktreeLinks` (before worktree removal). Also the **detach registry** (`.detached-links.json`): `readDetached`/`writeDetached`/`liveDetached` (self-healing — a deleted local file re-attaches). |
 | `stores.ts` | `resolveStoreLinks` maps `shared_paths` to concrete sources: bare/`{path}` → the profile store; `{path, store}` → that named store's `root` (project `stores` override global `~/.worm/config.json` ones), cloning a missing root from its `url` on demand. |
 | `global-links.ts` | HOME-scope analogue of `links.ts`: `reconcileGlobalLinks` links `~/<tail>` → `~/.worm/shared/<tail>` for `worm sync --global`, with its own manifest (`~/.worm/.managed-links.json`). |
-| `hooks.ts` | Runs `on_create`/`on_remove` with inherited stdio and `WORM_*` env (`hookEnv`). |
-| `universe.ts` | `scanUniverses()` builds the slot list from `git worktree list` (Slot 0 + matched siblings); `resolveSlotRef` / `findSlotByBranch` / `nextFreeIndex` / `universeLabel`. |
+| `hooks.ts` | Runs the four lifecycle hooks with inherited stdio (redirected to stderr when stdout is reserved) and `WORM_*` env (`hookEnv`). |
+| `worktrees.ts` | The worktree model: `openProject`, `listProjectWorktrees` (git + slots.json), `resolveWorktreeRef` (name / branch / slot / explicit path), `worktreeNameForBranch`, `wireWorktree` (links, env, Claude project-dir link, keep marker, recipe + worktree hooks), `createWorktree`, `removeWorktree`, `assignSlot` / `releaseSlot`. |
+| `slots.ts` | `slots.json` I/O (atomic write; entries whose worktree is gone read as free) and the pure `chooseSlot` (idempotent, explicit, lowest free; range/holder errors). |
 
 ### `utils/`
 Cross-cutting helpers. No domain knowledge here.
@@ -61,7 +62,7 @@ Cross-cutting helpers. No domain knowledge here.
 | File | Owns |
 |---|---|
 | `errors.ts` | `WormError` with optional `hint`. Throw this for any user-facing failure. |
-| `logger.ts` | picocolors-wrapped `info` / `step` / `success` / `warn` / `error` / `hint`. Consistent tone in one place. |
+| `logger.ts` | picocolors-wrapped `info` / `step` / `success` / `warn` / `error` / `hint`. Consistent tone in one place. `reserveStdout()` sends everything to stderr for commands whose stdout is a machine answer (`hook worktree-create`, `--json`). |
 | `fs.ts` | `pathExists`, `isDirectory`, `isSymlink`, `ensureDir`, `readJson` / `writeJson`, `readSymlinkTarget`. |
 | `exec.ts` | `run` (no throw), `runOrThrow` (throws `WormError` with stderr), `runShell` (for hooks). |
 | `template.ts` | `renderTemplate(tmpl, vars)` — strict `{{var}}` substitution (worm's one rendering primitive; leaves shell `${VAR}` untouched). Used by recipe scaffolds and `worm template render`. |
@@ -73,21 +74,23 @@ Shared types and the canonical `ConfigSchema` (zod) + `DEFAULT_CONFIG` + `Recipe
 
 These are easy to break and hard to debug — keep them in mind when touching the code.
 
-1. **Slot 0 is the primary working tree.** Resolve it via `findSlot0Root` (git common dir → parent). Because Slot 0 is a real checkout, `.worm/` is hidden from `git status` via `.git/info/exclude` (`init.ts:ensureGitExclude`).
+1. **The main worktree is the clone itself.** Resolve it via `findMainRoot` (git common dir → parent). `.worm/` and `.claude/worktrees/` are hidden from `git status` via `.git/info/exclude`.
 
-2. **The pool is emergent.** `scanUniverses` reads `git worktree list`; a slot is Slot 0 (path === root) or a sibling matching `<repo>-<N>` one level up. No `universes_count`.
+2. **Worktrees are emergent; slots are recorded.** `listProjectWorktrees` reads `git worktree list`; a worktree's slot comes only from `slots.json`. Never derive a slot from a path or a name.
 
-3. **Symlinks point at the profile (absolute).** Post-consolidation, `.worm/` is (almost) all pointers into `~/.worm/projects/<name>/`: `config.json`, `scripts`, `recipes`, and `logs` are symlinks, and each slot's shared-path tunnels link **straight at the profile source** (`<slot>/<tail>` → `profile/<tail>`, absolute — the old `.worm/shared` two-hop is gone). `core/layout.ts:ensureLocalLayout` establishes this and migrates an old project in place.
+3. **Symlinks point at the profile (absolute).** `.worm/` is (almost) all pointers into `~/.worm/projects/<name>/`, and each worktree's shared-path tunnels link **straight at the profile source**. `core/layout.ts:ensureLocalLayout` establishes this.
 
-4. **The managed-link manifest is the source of truth for injected links.** It lives in the **profile** (`~/.worm/projects/<name>/.managed-links.json`), so `readManifest`/`writeManifest` take the project name. `sync`/`rm`/`destroy` only touch links recorded there, and the prune skips a link that became a real file. Strip managed links before `git worktree remove`.
+4. **The managed-link manifest is the source of truth for injected links.** It lives in the profile; `sync`/`rm`/`destroy` only touch links recorded there, and the prune skips a link that became a real file. Strip managed links before `git worktree remove`.
 
-5. **All paths route through `core/paths.ts`.** No string concatenation of path segments elsewhere. The `<repo>-<N>` naming lives on one constant (`SLOT_DIR_INFIX`).
+5. **All paths route through `core/paths.ts`.** No string concatenation of path segments elsewhere.
 
-6. **Commands are idempotent.** Re-running `init`, `sync`, or `universe add` on the same input produces the same end state. `sync` is fully declarative.
+6. **Commands are idempotent.** Re-running `init`, `sync`, `wire`, `slot assign`, or Claude's `worktree-create` hook with the same input produces the same end state.
 
-7. **Templates are seeded, not symlinked.** Each project owns its own copy of `config.json` and `scripts/setup.sh` after creation — editing a template later does not affect existing projects.
+7. **stdout is sacred where it's an answer.** `worm hook worktree-create` prints the path and nothing else — Claude reads it. Anything that may log on such a path must go through `logger` (which honours `reserveStdout`) and child processes through `runShell` with inherited stdio.
 
-8. **Never destroy Slot 0.** `universe rm` refuses it; `destroy` sweeps only siblings.
+8. **Templates are seeded, not symlinked.** Each project owns its own copy of `config.json` and `scripts/setup.sh` after creation.
+
+9. **Never destroy the main worktree.** `worktree rm`, `hook worktree-remove` and `destroy` all refuse or skip it.
 
 ## Adding a new command
 

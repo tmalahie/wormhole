@@ -47,7 +47,7 @@ export interface WorktreeRemoveOptions {
 export async function runWorktreeRemove(ref: string, options: WorktreeRemoveOptions = {}): Promise<void> {
   const project = await openProject();
   const wt = resolveWorktreeRef(ref, await listProjectWorktrees(project.mainRoot, project.projectName));
-  logger.info(`🧹 Removing ${logger.bold(wt.name)} (${logger.dim(wt.path)})`);
+  if (!wt.isMain) logger.info(`🧹 Removing ${logger.bold(wt.name)} (${logger.dim(wt.path)})`);
   const res = await removeWorktree(project, wt, options);
   if (res.releasedSlot !== null) logger.step(`released slot ${res.releasedSlot}`);
   if (res.branchError) logger.warn(`kept branch ${res.branchKept}: ${res.branchError}`);

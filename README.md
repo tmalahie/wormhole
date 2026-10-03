@@ -1,18 +1,18 @@
 # wormhole
 
-> A hub for your coding agents — one git-tracked home for their config and instructions, the tooling to maintain it, and a warm pool of worktrees to run several at once.
+> A hub for your coding agents — one git-tracked home for their config and instructions, the tooling to maintain it, and worktrees with their own ports to run several at once.
 
 A coding agent is only as good as its setup: the right instructions and skills, an allowlist of commands it may run unattended, a sandbox around the ones you don't fully trust, and room to work without colliding with the next agent. That setup is usually ad-hoc, trapped on one machine, and untracked — and it falls apart the moment you run more than one agent on a project.
 
 `worm` turns it into a managed, version-controlled layer with three parts:
 
 - **A meta-repo for your agents — `~/.worm`.** A single git repository holds the config and instructions for every project's agents: `CLAUDE.md`, skills, slash commands, settings, the permission allowlist, the sandbox policy. Because it's just git, your agent setup is reviewable, shareable, and portable — re-clone a machine and your agents come back configured.
-- **Tooling to maintain that config — recipes.** Composable capabilities you switch on per project: a Docker **sandbox** that keeps filesystem-mutating commands off the host, **permission sync** so approving a command in one slot teaches every agent, **shared history** across worktrees. `worm sync` reconciles everything declaratively; templates seed new projects.
-- **Tooling to run agents in parallel — a warm worktree pool.** Permanent `git worktree` slots let several agents work different branches at once without trampling each other. Think of them as **parallel universes** of your repo: your main clone is **Slot 0**, siblings are `<repo>-1`, `<repo>-2`, … Each universe is isolated, always-warm (no re-`npm install` per task), and wired with the same shared config via tunnels - this is where `wormhole` gets its name from.
+- **Tooling to maintain that config — recipes.** Composable capabilities you switch on per project: a Docker **sandbox** that keeps filesystem-mutating commands off the host, **permission sync** so approving a command in one worktree teaches every agent, **shared history** across worktrees. `worm sync` reconciles everything declaratively; templates seed new projects.
+- **Tooling to run agents in parallel — worktrees and slots.** Every branch in progress gets a `git worktree` under `<repo>/.claude/worktrees/<name>` — the same place Claude Code and Claude Desktop put theirs, and worm is the hook they call to create one, so every worktree comes out set up and wired with the same shared config via tunnels (this is where `wormhole` gets its name from). To *run* something, a worktree borrows a **slot**: a number that becomes its ports (`3000 + 100 × slot`, …) through a generated env file, and goes back to the pool when you're done.
 
-The worktree pool used to be the whole story; now it's the backend. The product is the cognitive layer it serves — the git-tracked home that keeps your agents consistent, contained, and reproducible across every universe.
+The worktrees used to be the whole story; now they're the backend. The product is the cognitive layer they serve — the git-tracked home that keeps your agents consistent, contained, and reproducible across every worktree.
 
-> Built around **Claude Code** today (the recipes wire Claude's hooks and settings) on a deliberately agent-agnostic core — the pool, tunnels, and lifecycle hooks don't care which agent you run. Opening the recipe set and wiring other agents are the next iterations — see [Roadmap](#roadmap).
+> Built around **Claude Code** today (the recipes wire Claude's hooks and settings) on a deliberately agent-agnostic core — worktrees, slots, tunnels, and lifecycle hooks don't care which agent you run. Opening the recipe set and wiring other agents are the next iterations — see [Roadmap](#roadmap).
 
 ## Video - Overview & Demo
 
@@ -54,81 +54,93 @@ eval "$(worm shell-init)"
 eval "$(worm completion zsh)"    # or `bash`
 ```
 
-- `worm shell-init` installs a `worm()` wrapper so `worm cd <branch>` / `worm tp <N>` actually change your shell's working directory.
-- `worm completion <shell>` registers tab completion: subcommand names (`worm sta<tab>` → `worm status`), branch completion for `switch`, and slot/branch completion for `cd` / `tp` / `path`.
+- `worm shell-init` installs a `worm()` wrapper so `worm cd <worktree>` actually changes your shell's working directory.
+- `worm completion <shell>` registers tab completion: subcommand names (`worm sta<tab>` → `worm status`) and worktree/branch completion for `cd` / `path`.
 
 ## Quick start
 
 ```bash
-# Clone a repo and bind it as Slot 0 (a normal clone — no bare container).
+# Clone a repo and bind it (a normal clone — no bare container).
 worm clone https://github.com/you/mkpc.git ~/git/mkpc
 cd ~/git/mkpc
 
-# Day to day, just switch branches in place — Slot 0 stays warm.
-git switch my-feature        # or: worm switch my-feature   (also re-runs setup.sh)
+# A worktree per branch in progress, under .claude/worktrees/ (runs setup.sh).
+worm worktree add feat/my-feature        # → ~/git/mkpc/.claude/worktrees/my-feature
+worm cd my-feature
 
-# Want a second branch checked out at the same time? Add a permanent universe.
-worm universe add my-other-feature        # creates ~/git/mkpc-1, runs setup.sh
-worm cd my-other-feature                   # hop into it
+# Give it ports when you want to run it: the lowest free slot, or a number.
+worm slot assign                          # renders .env.slot (slot 0 → 3000, slot 1 → 3100, …)
+worm slot ls
 
-# See the whole pool.
+# See every worktree and its slot.
 worm status
 
-# Done with a universe? Collapse it (Slot 0 can never be removed).
-worm universe rm my-other-feature
+# Done? Release the slot and remove the worktree (the branch stays).
+worm worktree rm my-feature
 ```
 
-`worm sync` reconciles your shared-file tunnels across every slot (run it after editing `shared_paths`). `worm sync --global` does the HOME-scope equivalent **and** installs any global recipes (`autosync`) from `~/.worm/config.json` into `~/.claude/settings.json`. Drop your install commands into [.worm/scripts/setup.sh](#configuration) — it runs on `worm universe add` and `worm switch`.
+Claude Code does the same for you: `EnterWorktree`, `claude --worktree` and Claude Desktop's worktree option all go through worm (`worm hook worktree-create`), so their worktrees land in the same place, set up and wired.
+
+`worm sync` reconciles your shared-file tunnels, env files and hooks across every worktree (run it after editing the config). `worm sync --global` does the HOME-scope equivalent **and** installs any global recipes (`autosync`) from `~/.worm/config.json` into `~/.claude/settings.json`. Drop your install commands into [.worm/scripts/setup.sh](#configuration) — it runs when a worktree is created.
 
 ## Commands
 
 | Command | What it does |
 |---|---|
-| `worm clone <url> [path] [--name X] [--template <dir>] [--skip-hook]` | Recommended entry point. Normal-clones `<url>`, binds it as Slot 0, and warms it via `on_create`. |
-| `worm init [--name X] [--template <dir>] [--skip-hook]` | Bind the current git clone as Slot 0 and warm it via `on_create`. Lazily creates `~/.worm/` on first use. Idempotent. |
-| `worm status [--json]` | List every slot in the pool (Slot 0 + siblings) and the branch each is on. |
-| `worm universe add <branch> [--create] [--skip-hook]` | Create a permanent sibling worktree on `<branch>` at `<repo>-<N>`, link shared paths, run `on_create`. Refuses a branch already checked out in another slot. If `<branch>` doesn't exist, prompts to create it (`--create` skips the prompt). |
-| `worm universe rm <ref> [--force] [--skip-hook]` | Remove a sibling universe — `<ref>` is a slot index or a branch. Refuses Slot 0; refuses uncommitted changes unless `--force`; runs `on_remove`. |
-| `worm switch <branch> [--create] [--skip-hook]` | `git switch <branch>` in the current slot and re-run the warm-up hook. If `<branch>` doesn't exist, prompts to create it (`--create` skips the prompt). (Plain `git switch` works too — this just adds the hook + the "branch held elsewhere" guard.) |
-| `worm sync` | Declaratively reconcile shared-path links across all slots: create missing tunnels, prune removed ones, clone any missing store. Idempotent. |
-| `worm wire [path]` | Apply the cognitive layer (shared-path tunnels, the `env` file, recipe hooks) to a worktree worm **didn't** create (default: cwd). Call it from another tool's worktree-create hook (Conductor, worktrunk, plain `git worktree`) to use worm without adopting its topology. Idempotent. |
-| `worm detach <file>` | Sever a shared-path tunnel in the **current worktree only** — replace the symlink with an independent local copy. The other slots keep the link; `worm sync` won't restore it. Reverse it by deleting the local file and re-running `worm sync`. |
+| `worm clone <url> [path] [--name X] [--template <dir>] [--skip-hook]` | Recommended entry point. Normal-clones `<url>`, binds it, and sets up the main worktree via `on_create`. |
+| `worm init [--name X] [--template <dir>] [--skip-hook]` | Bind the current git clone (its main worktree) and set it up via `on_create`. Lazily creates `~/.worm/` on first use. Idempotent. |
+| `worm status [--json]` | List every worktree (main first) with its branch and slot. |
+| `worm worktree add <branch> [--name <dir>] [--base <ref>] [--no-setup] [--json]` | Create `<root>/.claude/worktrees/<name>` (name = the branch's last segment, `-2`, `-3` on a clash) on `<branch>` — checked out if it exists locally or on a remote, else created from `--base` (default `origin/<baseBranch>`, not tracking it). Wires it (tunnels, Claude project dir, hooks) and runs `on_create`. Refuses a branch already checked out elsewhere. Prints the path. |
+| `worm worktree rm <ref> [--force] [--delete-branch] [--skip-hook]` | Remove a worktree (name, branch, path or slot number): releases its slot (`on_release`), runs `on_remove`, strips worm's links, removes the worktree and its Claude project-dir link. Refuses the main worktree, and uncommitted changes unless `--force`. Keeps the branch unless `--delete-branch` (which still refuses an unmerged one). |
+| `worm worktree ls [--json]` / `worm worktree path <ref>` | List worktrees with branch, uncommitted changes and slot / print one's path. |
+| `worm slot ls [--json]` | Which worktree holds each slot, and which are free. |
+| `worm slot assign [<worktree>] [<N>]` | Give a worktree (default: the current one) a slot (default: the lowest free). Records it in the profile's `slots.json`, renders the `env` file, runs `on_assign`. Idempotent. |
+| `worm slot release [<worktree>\|<N>]` | Run `on_release`, delete the env file, free the slot. |
+| `worm slot current` | Print the current worktree's slot; exit 1 when it holds none. |
+| `worm sync` | Declaratively reconcile every worktree: create missing tunnels, prune removed ones, render/remove env files, rewire hooks, clone any missing store; write `project.json` and the VS Code workspace. Idempotent. |
+| `worm wire [path]` | Apply the cognitive layer to one worktree (default: cwd) — for a worktree created by something else (plain `git worktree add`, Conductor, …), or to repair one. Idempotent. |
+| `worm detach <file>` | Sever a shared-path tunnel in the **current worktree only** — replace the symlink with an independent local copy. The other worktrees keep the link; `worm sync` won't restore it. Reverse it by deleting the local file and re-running `worm sync`. |
 | `worm sync --global` | Reconcile **HOME-scope** links from `~/.worm/config.json`'s `shared_paths` (e.g. `~/.claude/commands` → `~/.worm/shared/.claude/commands`), **and** install/strip global recipes (`autosync`) into `~/.claude/settings.json` — machine-wide setup, independent of any project. |
 | `worm template render <file> [KEY=VALUE …]` | Render a `{{var}}` template file to stdout (worm's templating primitive; leaves shell `${VAR}` untouched). For setup scripts that want to drop hand-rolled sed. |
-| `worm cd <branch>` / `worm tp <N>` | Change directory into a slot by branch name or 0-based index. Requires the shell-init wrapper. |
-| `worm path <ref>` | Print the worktree path for a branch or slot index (what `cd`/`tp` use under the hood). |
-| `worm destroy [--force]` | Unbind the project: remove sibling universes, `.worm/`, and the global profile. **Slot 0 (your repo) is left intact.** Prompts unless `--force`. |
+| `worm cd <ref>` / `worm path <ref>` | Change directory into / print the path of a worktree by name, branch or slot number. `cd` requires the shell-init wrapper. |
+| `worm hook worktree-create` / `worktree-remove` | Claude Code's `WorktreeCreate` / `WorktreeRemove` hooks (wired automatically): JSON on stdin; create prints only the worktree path on stdout. |
+| `worm destroy [--force]` | Unbind the project: remove linked worktrees, `.worm/`, and the global profile. **The main worktree (your repo) is left intact.** Prompts unless `--force`. |
 | `worm shell-init` | Print the shell function described in [Shell integration](#shell-integration-recommended). |
 | `worm completion <bash\|zsh>` | Print a tab-completion script for the chosen shell. |
 
-Run `worm <command> --help` for the full option list. Project-scoped commands resolve Slot 0 via git (`--git-common-dir`), so they work from any slot or subdirectory.
+Run `worm <command> --help` for the full option list. Project-scoped commands resolve the main worktree via git (`--git-common-dir`), so they work from any worktree or subdirectory.
 
 ## How it works
 
-For a project named `mkpc` with two extra universes:
+For a project named `mkpc` with two worktrees, one of them holding slot 1:
 
 ```
-~/git/
-├── mkpc/                              ← Slot 0: the primary working tree (a normal clone)
-│   ├── .git/                          ← standard git directory (the common dir for all slots)
-│   ├── .worm/                         ← thin wiring: (almost) all pointers (git-excluded locally)
-│   │   ├── .gitignore                 ← single line: `*`
-│   │   ├── config.json                → ~/.worm/projects/mkpc/config.json
-│   │   ├── scripts/                   → ~/.worm/projects/mkpc/scripts/   (setup.sh lives here)
-│   │   ├── recipes/                   → ~/.worm/projects/mkpc/recipes/   (materialized artifacts)
-│   │   └── logs/                      → ~/.worm/projects/mkpc/logs/      (recipe-hook logs)
-│   └── .env                           → ~/.worm/projects/mkpc/.env       (a tunnel, on Slot 0)
-├── mkpc-1/                            ← sibling universe (worm universe add …)
-│   └── .env                           → ~/.worm/projects/mkpc/.env
-└── mkpc-2/                            ← another sibling universe
+~/git/mkpc/                            ← the main worktree (a normal clone, stays on baseBranch)
+├── .git/                              ← the common git dir for every worktree
+├── .worm/                             ← thin wiring: (almost) all pointers (git-excluded locally)
+│   ├── .gitignore                     ← single line: `*`
+│   ├── config.json                    → ~/.worm/projects/mkpc/config.json
+│   ├── scripts/                       → ~/.worm/projects/mkpc/scripts/   (setup.sh lives here)
+│   ├── recipes/                       → ~/.worm/projects/mkpc/recipes/   (materialized artifacts)
+│   └── logs/                          → ~/.worm/projects/mkpc/logs/      (recipe-hook logs)
+├── .env                               → ~/.worm/projects/mkpc/.env       (a tunnel)
+└── .claude/worktrees/                 ← git-excluded
+    ├── my-feature/                    ← `worm worktree add feat/my-feature`
+    │   ├── .env                       → ~/.worm/projects/mkpc/.env
+    │   ├── .env.slot                  ← rendered for slot 1 (absent without a slot)
+    │   └── .worktree-keep             ← tells Claude Desktop's worktree GC to leave it alone
+    └── brave-otter-1a2b/              ← created by Claude (`EnterWorktree`) through worm's hook
 
-~/.worm/                              ← your agents' meta-repo (a git repo)
-└── projects/mkpc/                 ← mkpc's PROFILE — the durable state, survives a reclone
+~/.worm/                               ← your agents' meta-repo (a git repo)
+└── projects/mkpc/                     ← mkpc's PROFILE — the durable state, survives a reclone
     ├── config.json  .env  scripts/  recipes/  logs/
-    └── .managed-links.json           ← manifest of the symlinks worm created per slot
+    ├── slots.json                     ← which worktree holds which slot
+    ├── project.json                   ← { "root": "~/git/mkpc" }
+    ├── mkpc.code-workspace            ← VS Code workspace (written once by `worm sync`)
+    └── .managed-links.json            ← manifest of the symlinks worm created per worktree
 ```
 
-Slots are **permanent** — there's no spawn/teardown, so they stay warm (your `node_modules`, build state, etc. just persist in each one). Sibling worktrees live one level up so Slot 0's `git status` never sees them, and `.worm/` is hidden from git locally. A project's `.worm/` is almost entirely **symlinks into its profile** (`~/.worm/projects/<project>/`), where the durable state lives; each slot's shared files link **straight at the profile** (absolute, one hop), recorded in the profile's manifest so `worm sync` can add/prune them safely.
+Worktrees are **long-lived** — they stay set up (your `node_modules`, build state, etc. persist in each one) until you remove them. `.claude/worktrees/` and `.worm/` are hidden from git locally. A project's `.worm/` is almost entirely **symlinks into its profile** (`~/.worm/projects/<project>/`), where the durable state lives; each worktree's shared files link **straight at the profile** (absolute, one hop), recorded in the profile's manifest so `worm sync` can add/prune them safely. Every worktree's Claude project dir (`~/.claude/projects/<slug>`) is a symlink to the main worktree's, so a repo has one conversation history and one auto-memory however many worktrees it has.
 
 ## Configuration
 
@@ -136,11 +148,13 @@ Each project gets a config at `~/.worm/projects/<project-name>/config.json`. The
 
 ```json
 {
+  "baseBranch": "main",
   "shared_paths": [],
   "stores": {},
   "hooks": {
     "on_create": "bash \"$WORM_PROJECT_ROOT/.worm/scripts/setup.sh\""
   },
+  "slots": { "step": 100, "max": 9 },
   "recipes": {}
 }
 ```
@@ -149,27 +163,31 @@ Edit the file (or pre-seed a `--template <dir>`) to add what your project needs.
 
 > 💡 **A complete real-world example:** [`worm-mkpc`](https://github.com/tmalahie/worm-mkpc) is the full profile behind the [demo video](#video---overview--demo) — `config.json`, `setup.sh`, a per-worktree `env` block, the recipe set, and the docker/`CLAUDE.local.md` templates for a real project. A good setup to crib from.
 
-- **`shared_paths`** — files tunnelled into every slot. Each entry is either a bare path, pulled from the project **profile** (`~/.worm/projects/<project>/<path>`, sprouting an empty placeholder if absent), or `{ "path": ".claude/docs", "store": "team" }` to pull it from a named **store** instead. Each slot gets an absolute symlink straight at the source. Common entries: `.env`, `CLAUDE.local.md`, `.mcp.json`. A tail ending in **`/*`** is a *directory glob*: `".claude/skills/*"` links each child of `~/.worm/projects/<project>/.claude/skills/` individually, so the slot's `.claude/skills/` stays a **real, git-tracked directory** that can also hold entries committed to the repo. Add a skill to the profile and `worm sync` picks it up — no config change; delete one and it's pruned. `*` is only allowed as the whole final segment, dot-prefixed children are skipped (as a shell `*` would), and an entry that's already a real file in a slot is left alone rather than clobbered. Run `worm sync` after changing this list.
+- **`baseBranch`** — the branch the main worktree stays on, and the default start point (`origin/<baseBranch>`) for a new branch created by `worm worktree add` or Claude's hook.
+- **`shared_paths`** — files tunnelled into every worktree. Each entry is either a bare path, pulled from the project **profile** (`~/.worm/projects/<project>/<path>`, sprouting an empty placeholder if absent), or `{ "path": ".claude/docs", "store": "team" }` to pull it from a named **store** instead. Each worktree gets an absolute symlink straight at the source. Common entries: `.env`, `CLAUDE.local.md`, `.mcp.json`. A tail ending in **`/*`** is a *directory glob*: `".claude/skills/*"` links each child of `~/.worm/projects/<project>/.claude/skills/` individually, so the worktree's `.claude/skills/` stays a **real, git-tracked directory** that can also hold entries committed to the repo. Add a skill to the profile and `worm sync` picks it up — no config change; delete one and it's pruned. `*` is only allowed as the whole final segment, dot-prefixed children are skipped (as a shell `*` would), and an entry that's already a real file in a worktree is left alone rather than clobbered. Run `worm sync` after changing this list.
 - **`stores`** — named external sources for `shared_paths`, e.g. `{ "team": { "root": "~/git/team-shared", "url": "git@github.com:org/team-shared" } }`. A `shared_paths` entry with `"store": "team"` links from that store's `root` instead of the profile — so team docs/commands can live in a **separate git repo**, shared with your team and editable in place (your edits land as changes in that repo). If `root` is missing and a `url` is given, `worm sync` clones it on demand. Declare stores per project here, or machine-wide in `~/.worm/config.json` (project stores win on a name clash).
-- **`env`** — a per-worktree dotenv file (off unless present). Unlike `shared_paths` (one source symlinked identically everywhere), `env` writes a **different** file into each slot. Shape: `{ "file": ".env.worm", "vars": { "FRONT": "{{ 3000 + index * 10000 }}" } }`. `file` (default `.env.worm`) is the generated filename, gitignored automatically. Each `vars` value is an integer **arithmetic expression** (`+ - * / %`, parentheses) over two offset bases — pick the one that fits:
-  - **`index`** — the slot number (positional). `{{ 3000 + index * 10000 }}` → `3000`, `13000`, `23000`. Clean and sequential; stable for a fixed pool, but drifts if worktrees are ephemeral (the slot number isn't tied to the branch).
-  - **`offset`** / **`hash`** — derived from a **stable hash of the branch**. `{{ 8080 + offset }}` gives the same port for a given branch on any machine and any slot order (`offset` ∈ 0–999), at the cost of non-sequential values. The ephemeral-worktree-safe choice.
+- **`slots`** — `{ "step": 100, "max": 9 }`. Slots are numbered runtime environments `0…max`; `step` is the port distance between two slots, for tools that compute ports. Which worktree holds which slot lives in the profile's `slots.json`.
+- **`env`** — the env file a worktree gets while it holds a slot (off unless present). Unlike `shared_paths` (one source symlinked identically everywhere), `env` writes a **different** file into each worktree, rendered on `worm slot assign` and on `sync`, deleted on release. Shape: `{ "file": ".env.slot", "vars": { "PORT": "{{ 3000 + index * 100 }}" } }`. `file` (default `.env.slot`) is gitignored automatically. Each value may contain `{{ … }}` expressions over:
+  - **`index`** — the slot number. `{{ 3000 + index * 100 }}` → `3000`, `3100`, `3200`.
+  - **`offset`** / **`hash`** — derived from a **stable hash of the branch** (`offset` ∈ 0–999), for values that should follow the branch rather than the slot.
+  - the text vars **`name`** (the worktree's name, `main` for the main one), **`branch`**, **`profile`** (the profile dir), **`root`** (the main worktree) and **`worktree`** (this worktree's path).
 
-  Plus the text vars `{{ slot }}` / `{{ branch }}` (e.g. `DB_NAME=app_{{ slot }}`). Multiple components just share the same basis: `FRONT={{ 3000 + index * 10000 }}`, `BACK={{ 3001 + index * 10000 }}`. Regenerated on `init`, `universe add`, `switch`, and `sync` (rewritten only when the content changes), and may not also appear in `shared_paths` (worm refuses the clash). For advanced cases (a real config file with holes) keep using `worm template render` in `setup.sh`; `env` is the zero-file-to-maintain path for the common one.
-- **`hooks`** — `on_create` runs inside a slot to warm it up: when Slot 0 is bound (`init` / `clone`), when a sibling is created (`universe add`), and on `switch`. `on_remove` runs before a slot is removed. The default `on_create` invokes `.worm/scripts/setup.sh` — drop your install commands there (`npm install`, `pip install -r requirements.txt`, …) instead of editing the JSON. A non-zero `on_create` warns but doesn't abort; a non-zero `on_remove` aborts the removal unless `--force`. Pass `--skip-hook` to any of these commands to bind/switch without running the hook (e.g. on an already-warm checkout).
+  Operators: `+ - * / %` and parentheses on numbers, `+` concatenates when either side is text, `==` / `!=`, and `cond ? a : b`; strings are `'quoted'`. E.g. `"REDIS_PREFIX": "{{ index == 0 ? 'app' : 'app-slot' + index }}"`. A typo or a type error fails loudly rather than reaching the file. The file may not also appear in `shared_paths` (worm refuses the clash). For advanced cases (a real config file with holes) use `worm template render` in an `on_assign` hook.
+- **`hooks`** — shell commands run inside a worktree at four moments. `on_create`: the worktree was just created (`worktree add`, Claude's hook, or `init`/`clone` for the main one) — install dependencies here; no slot exists yet. `on_assign`: a slot was assigned and the env file rendered — port-dependent setup goes here. `on_release`: the slot is about to be released (the env file is still there). `on_remove`: the worktree is about to be removed. The default `on_create` invokes `.worm/scripts/setup.sh` — drop your install commands there (`npm install`, `pip install -r requirements.txt`, …) instead of editing the JSON. A non-zero `on_create`/`on_assign`/`on_release` warns but doesn't abort; a non-zero `on_remove` aborts the removal unless `--force`. `--skip-hook` (`--no-setup` for `worktree add`) skips them.
+- **`processes`**, **`quickActions`**, **`features`** — validated and stored for tools that drive the worktrees (a dashboard starting each worktree's processes on its slot's ports, one-click actions); worm itself never runs them.
 - **`recipes`** — composable capabilities, keyed by name (provider-style). A recipe is **enabled iff its key is present**; each value is validated by that recipe's own schema. Two kinds of thing back a recipe, kept deliberately separate:
   - **Worm-owned code ships with the binary** — config-independent scripts (the sandbox interceptor, the permission-sync script) parameterized at run time, so they live **once** and a fix propagates by upgrading `worm`, with nothing to re-materialize per project.
   - **Genuinely per-project artifacts** (the sandbox `Dockerfile` / `compose.yml` / policy) are **materialized** under `.worm/recipes/<name>/` (→ the profile), **non-clobbering** — edit a generated file and it's kept. To pull a scaffold update, delete it (e.g. `rm .worm/recipes/sandbox/Dockerfile`) and re-run `worm sync`. (A planned regenerate/upgrade command is the last roadmap item — see [docs/recipes-roadmap.md](docs/recipes-roadmap.md).)
 
-  Hooks are **inverted**: each slot's `.claude/settings.local.json` (gitignored, per-slot) holds **one static entry per event** — `worm hook trigger <event>` — installed once. At tool/session time that dispatcher resolves the live slot, runs each enabled recipe's command for the event, injects env, and owns logging. So **enabling, disabling, or updating a recipe is a pure `config.json` edit** — settings never churn, and recipes compose without clobbering each other or your own hooks. Recipe-hook logs land in **`.worm/logs/`** (→ the profile): `<container>.log` for the container's `up`/`down` output, `<container>-redirect.log` for the sandbox's allow/deny decisions, `sync-permissions.log` for permission sync. `tail -f` them to see what fired.
+  Hooks are **inverted**: each worktree's `.claude/settings.local.json` (gitignored, per-worktree) holds **one static entry per event** — `worm hook trigger <event>` — installed once, next to Claude's `WorktreeCreate`/`WorktreeRemove` hooks that worm always installs. At tool/session time that dispatcher resolves the live worktree, runs each enabled recipe's command for the event, injects env, and owns logging. So **enabling, disabling, or updating a recipe is a pure `config.json` edit** — settings never churn, and recipes compose without clobbering each other or your own hooks. Recipe-hook logs land in **`.worm/logs/`** (→ the profile): `<container>.log` for the container's `up`/`down` output, `<container>-redirect.log` for the sandbox's allow/deny decisions, `sync-permissions.log` for permission sync. `tail -f` them to see what fired.
 
-  Built-in recipes (enable by adding the key, e.g. `"recipes": { "sandbox": {}, "syncPermissions": {} }`). Most are **project-scoped** (per-project config, wired per-slot); **`autosync`**, **`notifyPendingInput`** and **`syncGlobalPermissions`** are **global** — declare them in `~/.worm/config.json` and run `worm sync --global` (they wire into `~/.claude/settings.json` and fire for every Claude session, any project):
-  - **`sandbox`** — `{ "backend": "docker", "image": "node:22-bookworm", "tools": [], "neverSandbox": [...], "exemptDirs": [], "autostart": true, "autostop": false }`. Materializes a Dockerfile (from `image` + `tools`), a compose file, and a sandbox policy (the interceptor itself ships with worm), then wires each slot so its container auto-starts (`autostart`) and filesystem-mutating commands are redirected into it (mounted at the same path via `$SANDBOX_DIR`). See [docs/strategy-3-spec.md](docs/strategy-3-spec.md) §6.
-  - **`syncPermissions`** (`{ "keys": ["permissions"] }`) — wires `SessionStart`/`SessionEnd` hooks that keep the `permissions` block of each slot's `settings.local.json` in step with a canonical store shared across slots (approve a command once, every slot learns it). A **three-way merge** against a per-slot base snapshot, so a rule you **revoke** in one slot propagates instead of being resurrected by the union on the next session. Set `keys` to sync more top-level keys (`"*"` for all of them, minus the same denylist as `syncGlobalPermissions`); naming `hooks` syncs your own hook entries only (worm's dispatcher entries stay per-slot). Merge-preserving — it never touches other recipes' hooks or keys.
-  - **`shareHistory`** (`{}`) — symlinks each sibling slot's Claude history dir (`~/.claude/projects/<slot-slug>`) to Slot 0's, so all slots share one conversation history. Refuses to clobber a real history dir (warns instead).
-  - **`shareMemory`** (`{}`) — symlinks every slot's Claude memory dir (`~/.claude/projects/<slot-slug>/memory`) at one canonical store in the profile (`~/.worm/projects/<name>/.claude/memory`), so all slots share one memory that's **durable across a Slot 0 reclone**. Because the store is the profile (not Slot 0), **Slot 0 is linked too**; on first run it seeds the store from an existing memory dir, and refuses to clobber a real one once the store exists (warns instead).
-  - **`autosync`** (`{ "remote": "origin", "debounceMinutes": 5, "notify": true }`) — the one **global-scope** recipe: declare it in the **global** `~/.worm/config.json` (`"recipes": { "autosync": {} }`) and run **`worm sync --global`** to wire it into `~/.claude/settings.json`, so it fires for **every** Claude session machine-wide (any project, even non-worm dirs) — not per-slot. It keeps the `~/.worm` meta-repo synced across machines without manual push/pull on every node: **pull** (`fetch` + `rebase`) on `SessionStart`, **push** (auto-commit + push, debounced) on every turn's `Stop` — the reliable trigger for a session that's never closed — plus a best-effort flush on `SessionEnd`. Runs are **serialized** by a machine-local lock (many open windows all firing `SessionStart`/`Stop` won't run git on `~/.worm` concurrently — a busy run just skips; the lock carries an owner token so a stale-steal can't hand it to two racers). Each sync **commits local work *before* rebasing onto the remote** — a committed change survives a conflict abort (back on `HEAD`), whereas an autostash pop-conflict would strand it invisibly. **Conflicts are never auto-resolved**: a clean `git rebase --abort`, a durable marker that **`worm status`** surfaces, and an OS notification (`notify: false` to silence). Requires a git remote on `~/.worm` (else it no-ops). Machine-local state (`.managed-links.json`, logs, the conflict marker) is gitignored so it never syncs. Remove it from the config + re-run `worm sync --global` to uninstall.
-  - **`notifyPendingInput`** (`{ "openOnClick": "" }`, **global**) — fires an OS notification when Claude is waiting on you (your input is pending): *"Response ready"* on `Stop`, *"Waiting for approval"* on `PermissionRequest`. On macOS it uses `terminal-notifier` and falls back to `osascript`; on Linux, `notify-send`. Set `openOnClick` to any `open -a` app name (`"Visual Studio Code"`, `"Cursor"`, `"Windsurf"`, …) to make clicking the notification open the project folder there; **default `""` = no click action** (no editor is presumed). Debounces the burst of intermediate `Stop` yields a background-agent turn produces (one notification on the final answer) and ignores sub-agent events. Shares the notification backend (`src/recipes/_lib/notify.js`) with `autosync`.
+  Built-in recipes (enable by adding the key, e.g. `"recipes": { "sandbox": {}, "syncPermissions": {} }`). Most are **project-scoped** (per-project config, wired per-worktree); **`autosync`**, **`notifyPendingInput`** and **`syncGlobalPermissions`** are **global** — declare them in `~/.worm/config.json` and run `worm sync --global` (they wire into `~/.claude/settings.json` and fire for every Claude session, any project):
+  - **`sandbox`** — `{ "backend": "docker", "image": "node:22-bookworm", "tools": [], "neverSandbox": [...], "exemptDirs": [], "autostart": true, "autostop": false }`. Materializes a Dockerfile (from `image` + `tools`), a compose file, and a sandbox policy (the interceptor itself ships with worm), then wires each worktree so its container auto-starts (`autostart`) and filesystem-mutating commands are redirected into it (mounted at the same path via `$SANDBOX_DIR`). See [docs/strategy-3-spec.md](docs/strategy-3-spec.md) §6.
+  - **`syncPermissions`** (`{ "keys": ["permissions"] }`) — wires `SessionStart`/`SessionEnd` hooks that keep the `permissions` block of each worktree's `settings.local.json` in step with a canonical store shared across worktrees (approve a command once, every worktree learns it). A **three-way merge** against a per-worktree base snapshot, so a rule you **revoke** in one worktree propagates instead of being resurrected by the union on the next session. Set `keys` to sync more top-level keys (`"*"` for all of them, minus the same denylist as `syncGlobalPermissions`); naming `hooks` syncs your own hook entries only (worm's own entries stay per-worktree). Merge-preserving — it never touches other recipes' hooks or keys.
+  - **`shareHistory`** (`{}`) — a `UserPromptSubmit` reminder telling the model when the conversation's working directory changed since the previous prompt (an old conversation resumed from another worktree). Sharing the history itself is core worm behaviour: every worktree's Claude project dir links to the main worktree's.
+  - **`shareMemory`** (`{}`) — symlinks the repo's Claude memory dir (`~/.claude/projects/<slug>/memory`) at one canonical store in the profile (`~/.worm/projects/<name>/.claude/memory`), so it's **durable across a reclone** of the main worktree. On first run it seeds the store from an existing memory dir, and refuses to clobber a real one once the store exists (warns instead).
+  - **`autosync`** (`{ "remote": "origin", "debounceMinutes": 5, "notify": true }`) — the one **global-scope** recipe: declare it in the **global** `~/.worm/config.json` (`"recipes": { "autosync": {} }`) and run **`worm sync --global`** to wire it into `~/.claude/settings.json`, so it fires for **every** Claude session machine-wide (any project, even non-worm dirs) — not per-worktree. It keeps the `~/.worm` meta-repo synced across machines without manual push/pull on every node: **pull** (`fetch` + `rebase`) on `SessionStart`, **push** (auto-commit + push, debounced) on every turn's `Stop` — the reliable trigger for a session that's never closed — plus a best-effort flush on `SessionEnd`. Runs are **serialized** by a machine-local lock (many open windows all firing `SessionStart`/`Stop` won't run git on `~/.worm` concurrently — a busy run just skips; the lock carries an owner token so a stale-steal can't hand it to two racers). Each sync **commits local work *before* rebasing onto the remote** — a committed change survives a conflict abort (back on `HEAD`), whereas an autostash pop-conflict would strand it invisibly. **Conflicts are never auto-resolved**: a clean `git rebase --abort`, a durable marker that **`worm status`** surfaces, and an OS notification (`notify: false` to silence). Requires a git remote on `~/.worm` (else it no-ops). Machine-local state (`.managed-links.json`, logs, the conflict marker) is gitignored so it never syncs. Remove it from the config + re-run `worm sync --global` to uninstall.
+  - **`notifyPendingInput`** (`{ "openOnClick": "" }`, **global**) — fires an OS notification when Claude is waiting on you (your input is pending): *"Response ready"* on `Stop`, *"Waiting for approval"* on `PermissionRequest`. On macOS it uses `terminal-notifier` and falls back to `osascript`; on Linux, `notify-send`. Set `openOnClick` to `"claude-desktop"` to make clicking the notification open the conversation itself in Claude Desktop (`claude://resume?session=<id>` — it imports a CLI-born session or focuses a Desktop one), or to any `open -a` app name (`"Visual Studio Code"`, `"Cursor"`, …) to open the worktree folder there; **default `""` = no click action** (no editor is presumed). Debounces the burst of intermediate `Stop` yields a background-agent turn produces (one notification on the final answer) and ignores sub-agent events. Shares the notification backend (`src/recipes/_lib/notify.js`) with `autosync`.
   - **`syncGlobalPermissions`** (`{ "keys": [...] }`, **global**) — the machine-wide analogue of `syncPermissions`: keeps a configurable set of top-level `~/.claude/settings.json` keys in step with a git-tracked canonical copy in `~/.worm/shared/.claude/settings.json`, so your global settings are version-controlled (and synced across machines once `autosync` pushes them). Omit `keys` for **auto mode** — `permissions` + `sandbox` + every top-level scalar (`effortLevel`, `tui`, …). Name keys explicitly to add structured ones (`autoMode`, `env`, `hooks`, …), or set `"keys": "*"` to sync **every** top-level key except a denylist: **`env`** (where an API key would live, and the canonical copy is committed and pushed) and **`trustedDirectories`** (a per-machine "I vetted this checkout" answer). Name one alongside the wildcard — `["*", "env"]` — to opt it back in. The wildcard also means keys added by future Claude Code versions start syncing on their own; that's the trade. Everything outside the configured set is left untouched in the live file, and the canonical copy holds only that set. Conflicts resolve by **recursive three-way merge** against a machine-local base snapshot: arrays merge as sets (a rule removed on either side propagates), objects merge **per key** (two machines adding different keys both win), and only a scalar edited on both sides falls back to last-edited-file-wins. Naming `hooks` syncs **your own** hook entries only — the `worm hook trigger …` entries are worm's, re-wired per machine by `worm sync --global`, and never reach the canonical copy.
 
 ### Hook environment
@@ -178,13 +196,14 @@ Hook commands (and any script they invoke, like `setup.sh`) receive:
 
 | Variable | Value |
 |---|---|
-| `WORM_PROJECT_ROOT` | Absolute path to Slot 0 (the primary working tree). |
-| `WORM_SLOT` | Slot name being acted on (`main` for Slot 0, `<N>` for siblings). |
-| `WORM_SLOT_INDEX` | The numeric, 0-based slot index. Handy for derived values: `PORT=$((8080 + WORM_SLOT_INDEX))` (positional — stable only for a fixed pool). |
+| `WORM_PROJECT_ROOT` | Absolute path to the main worktree. |
+| `WORM_WORKTREE` | This worktree's path (equals `WORM_PROJECT_ROOT` for the main one). |
+| `WORM_WORKTREE_NAME` | Its name: `main`, or the directory name under `.claude/worktrees/`. |
+| `WORM_SLOT` / `WORM_SLOT_INDEX` | The slot it holds (same number twice; the second name is for older scripts), or empty — always empty in `on_create`. `PORT=$((3000 + WORM_SLOT * 100))` in an `on_assign` hook. |
 | `WORM_BRANCH` | Branch name. |
-| `WORM_WORKTREE` | This slot's worktree path (equals `WORM_PROJECT_ROOT` for Slot 0). |
-| `WORM_BRANCH_HASH` | Stable 32-bit hash of the branch — same value across machines and slot reordering. |
-| `WORM_PORT_OFFSET` | Stable per-branch offset in 0–999. `PORT=$((8080 + WORM_PORT_OFFSET))` is the ephemeral-worktree-safe alternative to `WORM_SLOT_INDEX` (same basis as the `env` block's `{{ offset }}`). |
+| `WORM_PROFILE` | The project's profile dir (`~/.worm/projects/<name>`). |
+| `WORM_BRANCH_HASH` | Stable 32-bit hash of the branch — same value across machines. |
+| `WORM_PORT_OFFSET` | Stable per-branch offset in 0–999 (same basis as the `env` block's `{{ offset }}`). |
 
 ### Templates
 
@@ -199,10 +218,10 @@ On first run, `~/.worm/templates/default/` is seeded with a `config.json` and `s
 
 ## Roadmap
 
-worm's substrate is already agent-agnostic — the warm pool, shared-file tunnels, lifecycle hooks, and your instructions file (`CLAUDE.md` / `AGENTS.md` / …) don't care which agent you run. The **recipe engine** is the part still wired specifically to Claude Code. The next two iterations open both up:
+worm's substrate is already agent-agnostic — worktrees and slots, shared-file tunnels, lifecycle hooks, and your instructions file (`CLAUDE.md` / `AGENTS.md` / …) don't care which agent you run. The **recipe engine** is the part still wired specifically to Claude Code. The next two iterations open both up:
 
 - **Shareable recipe packages** — author a recipe in its own folder (`~/.worm/recipes/<name>/`) or a git repo and drop it in, instead of forking wormhole. A recipe becomes a directory of data + real script files, loaded alongside the built-ins, with its config validated from a manifest. Details: [docs/recipes-roadmap.md](docs/recipes-roadmap.md) §1–§2 and the "Next up" plan.
-- **Agents beyond Claude** — an agent-adapter seam so recipes can wire Cursor, Gemini, Codex, … not just Claude Code. Agents with a pre-tool/session hook system get **full** recipe support (sandbox, permission sync); agents without one still get the pool, tunnels, and shared instructions. Details: [docs/multi-agent-roadmap.md](docs/multi-agent-roadmap.md).
+- **Agents beyond Claude** — an agent-adapter seam so recipes can wire Cursor, Gemini, Codex, … not just Claude Code. Agents with a pre-tool/session hook system get **full** recipe support (sandbox, permission sync); agents without one still get worktrees, slots, tunnels, and shared instructions. Details: [docs/multi-agent-roadmap.md](docs/multi-agent-roadmap.md).
 
 The two halves fit together: a recipe-as-data format is what an agent adapter renders per agent. Earlier iterations — live-once recipe code, the inverted hook dispatcher, named stores, home-scope `worm sync --global`, and `worm template render` — are already shipped (the roadmap docs carry the full history). The one deferred item is a Terraform-style `plan`/`apply` for regenerating scaffolding you've edited.
 

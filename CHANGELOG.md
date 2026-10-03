@@ -7,7 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — breaking
+
+- **Worktrees live in `<root>/.claude/worktrees/<name>`, and ports come from
+  numbered slots.** The sibling pool (`<repo>-1`, `<repo>-2`, …, one folder per
+  port namespace) is gone. Worktrees now sit where Claude Code and Claude
+  Desktop put theirs, and a **slot** is a number a worktree borrows to run its
+  stack: `worm slot assign` records it in the profile's `slots.json`, renders the
+  `env` file with `index` = that number, and runs the new `on_assign` hook;
+  `worm slot release` runs `on_release` and deletes the file. A worktree has no
+  slot (and no env file) until one is assigned.
+- **Commands:** `worm universe add|rm` → `worm worktree add|rm` (plus
+  `worktree ls` / `worktree path`); new `worm slot ls|assign|release|current`.
+  `worm switch` and `worm tp` are removed (plain `git switch` in a worktree is
+  fine; `worm cd <name|branch|slot>` replaces `tp`). `worm path` resolves a
+  worktree name, a branch or a slot number.
+- **`env`**: `file` defaults to `.env.slot`; the text var `slot` is gone (use
+  `name`, the worktree's name). Rendered only for a worktree that holds a slot.
+- **Hook environment:** `WORM_SLOT` / `WORM_SLOT_INDEX` are the assigned slot
+  number (empty when none — always empty in `on_create`); the worktree is
+  `WORM_WORKTREE` / new `WORM_WORKTREE_NAME`.
+- **`shareHistory`** no longer links project dirs — every wired worktree's
+  `~/.claude/projects/<slug>` is linked to the main worktree's by worm itself.
+  The recipe now only adds its cwd-switch reminder.
+
 ### Added
+
+- **Claude Code's worktree hooks.** Every wired worktree's
+  `.claude/settings.local.json` gets `WorktreeCreate` → `worm hook
+  worktree-create` and `WorktreeRemove` → `worm hook worktree-remove`, so
+  `EnterWorktree`, `claude --worktree` and Claude Desktop create (and remove)
+  worktrees through worm: same place, wired, set up.
+- **`env` expressions** gain text values: `'quoted strings'`, `==` / `!=`,
+  `cond ? a : b` and string `+`, plus the text vars `name`, `profile`, `root`,
+  `worktree`.
+- **Config keys** `baseBranch` (default base for new branches), `slots`
+  (`{ step, max }`), and `processes` / `quickActions` / `features`, which worm
+  validates and stores for tools that drive the worktrees (worm itself never
+  runs processes).
+- **`worm sync`** also writes `project.json` (`{ root }`) and a VS Code
+  `<project>.code-workspace` in the profile (folders are never rewritten once
+  it exists).
+- **`notifyPendingInput`**: `"openOnClick": "claude-desktop"` opens the
+  conversation itself in Claude Desktop (`claude://resume?session=<id>`).
 
 - **Directory globs in `shared_paths`** — a tail ending in `/*` (e.g.
   `".claude/skills/*"`) links each **child** of that store directory

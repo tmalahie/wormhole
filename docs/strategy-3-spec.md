@@ -1,5 +1,9 @@
 # Strategy 3 — Implementation Spec
 
+> **Superseded** by worktrees v2 (see CHANGELOG, Unreleased): sibling `<repo>-N` universes were
+> replaced by `<root>/.claude/worktrees/<name>` plus numbered slots in `slots.json`. Kept as the
+> design history of the normal-clone layout, which v2 builds on.
+
 > Status: **design / pre-implementation**. No code changed yet. This is the agreed plan from the
 > architecture review. Build against isolated `WORM_HOME` sandboxes (the e2e harness already does
 > this); do **not** run the live migration against `~/.worm` / real projects without a clear runway

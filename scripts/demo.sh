@@ -3,9 +3,10 @@
 #
 # Usage:  pnpm demo
 #
-# Runs init → universe add → switch → sync → universe rm against a throwaway
-# HOME and a throwaway clone, so the real ~/.worm is never touched. Use this for
-# eyeballing UX changes; for automated correctness checks, use `pnpm test`.
+# Runs init → worktree add → slot assign → sync → worktree rm against a
+# throwaway HOME and a throwaway clone, so the real ~/.worm and ~/.claude are
+# never touched. Use this for eyeballing UX changes; for automated correctness
+# checks, use `pnpm test`.
 
 set -euo pipefail
 
@@ -19,12 +20,13 @@ fi
 
 SANDBOX=$(mktemp -d /tmp/worm-demo-home.XXXXXX)
 PROJ=$(mktemp -d /tmp/worm-demo-proj.XXXXXX)
-# Clean the sandbox, the clone, and any sibling pool worktrees (<proj>-N).
-trap 'rm -rf "$SANDBOX" "$PROJ" "$PROJ"-*' EXIT
+# Worktrees live inside the clone (.claude/worktrees), so removing it cleans them too.
+trap 'rm -rf "$SANDBOX" "$PROJ"' EXIT
 
-export WORM_HOME="$SANDBOX"
+# HOME too: worm links each worktree's ~/.claude/projects dir.
+export WORM_HOME="$SANDBOX" HOME="$SANDBOX"
 
-# Slot 0 is just a normal clone — no bare container.
+# The main worktree is just a normal clone — no bare container.
 cd "$PROJ"
 git init -q -b main
 git config user.email demo@worm.dev
@@ -32,44 +34,40 @@ git config user.name "Worm Demo"
 echo "seed" > README.md
 git add . && git commit -q -m "seed"
 git branch feature-stripe-fix
-git branch feature-billing
-git branch experiment-ai
 
 worm() { node "$WORM_BIN" "$@"; }
 header() { echo; echo "════════════════════ $* ════════════════════"; }
 
-header "worm init (binds this clone as Slot 0, lazy-creates ~/.worm/)"
+header "worm init (binds this clone, lazy-creates ~/.worm/)"
 worm init
 
-header "worm status (just Slot 0 so far)"
+header "worm worktree add feature-stripe-fix (an existing branch)"
+worm worktree add feature-stripe-fix --no-setup
+
+header "worm worktree add feat/billing (a new branch, cut from main)"
+worm worktree add feat/billing --base main --no-setup
+
+header "ERROR: add a branch that's already checked out"
+worm worktree add feature-stripe-fix --no-setup || true
+
+header "worm slot assign billing (lowest free slot) / main 3"
+worm slot assign billing
+worm slot assign main 3
+
+header "worm status (worktrees and their slots)"
 worm status
 
-header "worm universe add feature-stripe-fix"
-worm universe add feature-stripe-fix --skip-hook
+header "worm slot ls"
+worm slot ls
 
-header "worm universe add feature-billing"
-worm universe add feature-billing --skip-hook
-
-header "worm status (a pool of 3: main + 2 siblings)"
-worm status
-
-header "ERROR: add a branch that's already in a slot"
-worm universe add feature-billing --skip-hook || true
-
-header "worm switch experiment-ai (move Slot 0 in place)"
-worm switch experiment-ai --skip-hook
-
-header "worm sync (reconcile shared-path tunnels across slots)"
+header "worm sync (reconcile tunnels, env files and hooks across worktrees)"
 worm sync
 
-header "worm status (Slot 0 now on experiment-ai)"
-worm status
+header "worm worktree rm billing (releases its slot)"
+worm worktree rm billing
 
-header "worm universe rm 1 (collapse a sibling)"
-worm universe rm 1 --skip-hook
+header "ERROR: refuse to remove the main worktree"
+worm worktree rm main || true
 
-header "ERROR: refuse to remove Slot 0"
-worm universe rm 0 || true
-
-header "worm status (after removing universe 1)"
+header "worm status"
 worm status
