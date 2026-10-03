@@ -32,12 +32,20 @@ function wormWorkspace() {
   return { file: file.fsPath, profileDir };
 }
 
-/** The repo's main worktree, from folder 0 (whichever worktree it shows). */
+const WORKTREE_RE = /^(.*)\/\.claude\/worktrees\/[^/]+$/;
+
+/**
+ * The repo's main worktree, from folder 0 (whichever worktree it shows). When
+ * folder 0 is a worktree that has since been deleted, git can't say, so its
+ * path does: worm worktrees live in <root>/.claude/worktrees/<name>.
+ */
 async function repoRoot() {
   const folder = vscode.workspace.workspaceFolders?.[0];
   if (!folder) return null;
   const common = (await git(folder.uri.fsPath, ['rev-parse', '--path-format=absolute', '--git-common-dir'])).trim();
-  return common ? path.dirname(common) : null;
+  if (common) return path.dirname(common);
+  const m = WORKTREE_RE.exec(folder.uri.fsPath);
+  return m && fs.existsSync(path.join(m[1], '.git')) ? m[1] : null;
 }
 
 async function listWorktrees() {
@@ -101,7 +109,7 @@ function tabsUnder(root) {
  * Outside a worm workspace, swapping folders would turn the window into an
  * "Untitled (Workspace)", so the worktree is opened as a plain folder instead.
  */
-async function focus(wt) {
+async function focus(wt, { gone = false } = {}) {
   const current = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   const n = vscode.workspace.workspaceFolders?.length ?? 0;
   if (current === wt.path && n === 1) return true;
@@ -109,7 +117,9 @@ async function focus(wt) {
     return vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(wt.path), { forceReuseWindow: true });
   }
   if (current && current !== wt.path && n === 1) {
-    const old = tabsUnder(current);
+    // A deleted worktree's unsaved tabs stay open as they are: saving them would
+    // recreate files in the folder that was just removed.
+    const old = tabsUnder(current).filter((t) => !(gone && t.tab.isDirty));
     const dirty = old.filter((t) => t.tab.isDirty);
     if (dirty.length) {
       const choice = await vscode.window.showWarningMessage(
@@ -131,6 +141,27 @@ async function focus(wt) {
     }
   }
   return vscode.workspace.updateWorkspaceFolders(0, n, { uri: vscode.Uri.file(wt.path), name: label(wt) });
+}
+
+/**
+ * Folder 0 was a worktree that has been deleted (from the control plane, `amt`,
+ * worm, or Desktop archiving the conversation that leased it). Left alone the
+ * window shows an empty explorer and every git/terminal action fails, so it
+ * goes back to the main worktree — on the base branch — by itself.
+ */
+let rescuing = false;
+async function leaveDeletedWorktree() {
+  const current = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  if (rescuing || !current || fs.existsSync(current) || !wormWorkspace()) return false;
+  const main = (await listWorktrees()).find((w) => w.isMain);
+  if (!main) return false;
+  rescuing = true;
+  vscode.window.showInformationMessage(`worm: ${path.basename(current)} was deleted — back on ${label(main)}.`);
+  try {
+    return await focus(main, { gone: true });
+  } finally {
+    rescuing = false;
+  }
 }
 
 async function pick(placeHolder) {
@@ -186,6 +217,7 @@ function activate(context) {
 
   const refresh = async () => {
     if (!wormWorkspace()) return status.hide();
+    if (await leaveDeletedWorktree()) return;
     const current = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     const wt = (await listWorktrees()).find((w) => w.path === current);
     if (!wt) return status.hide();
@@ -231,6 +263,19 @@ function activate(context) {
   );
   const timer = setInterval(refresh, 10_000);
   context.subscriptions.push({ dispose: () => clearInterval(timer) });
+  // Notice a deletion at once rather than on the next tick: watch the folder
+  // that holds the worktrees (folder 0's parent) for entries going away.
+  const shown = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  if (ws && shown && WORKTREE_RE.test(shown)) {
+    try {
+      const watcher = fs.watch(path.dirname(shown), () => {
+        if (!fs.existsSync(shown)) leaveDeletedWorktree().catch(() => {});
+      });
+      context.subscriptions.push({ dispose: () => watcher.close() });
+    } catch {
+      /* the 10 s tick still catches it */
+    }
+  }
   refresh();
 }
 
