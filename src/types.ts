@@ -53,6 +53,19 @@ export const QuickActionSchema = z
   })
   .strict();
 
+// A worktree health check (read by the control plane, not by worm): `check`
+// exits 0 healthy, 1 needs `repair`, 75 can't tell yet; `restart` restarts a
+// running stack after the repair.
+export const HealthCheckSchema = z
+  .object({
+    key: z.string().min(1),
+    label: z.string().min(1).optional(),
+    check: z.string().min(1),
+    repair: z.string().min(1).optional(),
+    restart: z.boolean().optional(),
+  })
+  .strict();
+
 // --- Recipes: composable capabilities, keyed by name (provider-style). A
 // recipe is ENABLED iff its key is present in `recipes`; each value is validated
 // by that recipe's own schema. The engine in `core/recipes.ts` iterates the
@@ -201,6 +214,7 @@ export const ConfigSchema = z
     slots: SlotsSchema.default({}),
     processes: z.record(z.string(), ProcessSchema).default({}),
     quickActions: z.array(QuickActionSchema).default([]),
+    health: z.array(HealthCheckSchema).default([]),
     features: z.record(z.string(), z.boolean()).default({}),
   })
   .strict();
