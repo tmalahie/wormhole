@@ -3008,17 +3008,20 @@ test("sync writes project.json and a workspace file whose folders it never rewri
 
   const wsFile = path.join(profile, `${name}.code-workspace`);
   const ws = JSON.parse(await readFile(wsFile, "utf8"));
-  assert.deepEqual(ws.folders, [{ path: root }]);
-  assert.match(ws.settings["window.title"], new RegExp(`^${escapeRegex(name)} · \\$\\{rootName\\}`));
+  assert.deepEqual(ws, { folders: [{ path: root }] }, "no window.title: the user's own setting applies");
 
-  // VS Code swaps folder 0 to show a worktree and saves it: sync keeps that.
+  // VS Code swaps folder 0 to show a worktree and saves it: sync keeps that,
+  // and drops the window title earlier versions wrote.
   ws.folders = [{ path: wtPath(root, "x") }];
-  ws.settings["editor.tabSize"] = 2;
+  ws.settings = {
+    "editor.tabSize": 2,
+    "window.title": `${name} · \${rootName}\${separator}\${activeEditorShort}`,
+  };
   await writeFile(wsFile, JSON.stringify(ws));
   await sb.worm(["sync"]);
   const after = JSON.parse(await readFile(wsFile, "utf8"));
   assert.deepEqual(after.folders, [{ path: wtPath(root, "x") }]);
-  assert.equal(after.settings["editor.tabSize"], 2);
+  assert.deepEqual(after.settings, { "editor.tabSize": 2 });
 });
 
 test('notifyPendingInput openOnClick "claude-desktop" opens the conversation via claude://resume', async (t) => {

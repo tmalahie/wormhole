@@ -209,17 +209,17 @@ async function writeProjectFile(projectName: string, root: string): Promise<bool
 /**
  * The project's VS Code workspace file: one folder (the main worktree; the
  * worm-vscode extension swaps it to show another worktree, and VS Code saves that
- * back into this file — so an existing file keeps its folders) and a window title
- * that keeps the project name whichever worktree is shown.
+ * back into this file — so an existing file keeps its folders). No window title:
+ * the file is named after the project, so the user's own `window.title` can show
+ * it with `${rootNameShort}`. The title earlier versions wrote is removed.
  */
 async function syncWorkspaceFile(
   projectName: string,
   root: string
 ): Promise<"created" | "updated" | "unchanged" | "unparseable"> {
   const file = workspaceFile(projectName);
-  const title = `${projectName} · \${rootName}\${separator}\${activeEditorShort}`;
   if (!(await pathExists(file))) {
-    await writeJson(file, { folders: [{ path: root }], settings: { "window.title": title } });
+    await writeJson(file, { folders: [{ path: root }] });
     return "created";
   }
   let ws: { settings?: Record<string, unknown> } & Record<string, unknown>;
@@ -228,8 +228,10 @@ async function syncWorkspaceFile(
   } catch {
     return "unparseable";
   }
-  if (ws.settings?.["window.title"] === title) return "unchanged";
-  ws.settings = { ...(ws.settings ?? {}), "window.title": title };
+  const legacyTitle = `${projectName} · \${rootName}\${separator}\${activeEditorShort}`;
+  if (!ws.settings || ws.settings["window.title"] !== legacyTitle) return "unchanged";
+  delete ws.settings["window.title"];
+  if (Object.keys(ws.settings).length === 0) delete ws.settings;
   await writeJson(file, ws);
   return "updated";
 }
