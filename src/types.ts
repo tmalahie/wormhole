@@ -42,7 +42,8 @@ export const ProcessSchema = z
   .strict();
 
 // A one-click action the control plane offers on a worktree card: a prompt for a
-// new Claude conversation, or a shell command run in the worktree.
+// new Claude conversation, or a shell command run in the worktree. `main` also
+// offers it on the main worktree, which otherwise gets none.
 export const QuickActionSchema = z
   .object({
     key: z.string().min(1),
@@ -50,6 +51,7 @@ export const QuickActionSchema = z
     prompt: z.string().optional(),
     run: z.string().optional(),
     needs: z.enum(["pr", "clean"]).optional(),
+    main: z.boolean().optional(),
   })
   .strict();
 
