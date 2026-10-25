@@ -1013,6 +1013,24 @@ test("worktree add on a missing branch creates it from origin/<baseBranch>, untr
   await stat(wtPath(root, "new-2"));
 });
 
+test("worktree add falls back to origin/HEAD when baseBranch doesn't exist (master repo)", async (t) => {
+  const sb = await createSandbox();
+  t.after(() => sb.cleanup());
+  await execa("git", ["branch", "-m", "main", "master"], { cwd: sb.seedRepo });
+  await execa("git", ["fetch", "--quiet", "--prune", "origin"], { cwd: sb.projectRoot });
+  await execa("git", ["remote", "set-head", "origin", "master"], { cwd: sb.projectRoot });
+  await execa("git", ["branch", "-m", "main", "master"], { cwd: sb.projectRoot });
+  await sb.worm(["init"]);
+
+  const r = await sb.worm(["worktree", "add", "feat/x", "--no-setup"]);
+  assert.equal(r.exitCode, 0, r.stderr);
+  assert.match(r.stderr, /using origin\/master/);
+  const root = await realpath(sb.projectRoot);
+  const head = await execa("git", ["rev-parse", "HEAD"], { cwd: wtPath(root, "x") });
+  const base = await execa("git", ["rev-parse", "origin/master"], { cwd: root });
+  assert.equal(head.stdout, base.stdout, "cut from origin/master");
+});
+
 test("worktree add keeps a checkout whose post-checkout hook fails (husky before install)", async (t) => {
   const sb = await createSandbox();
   t.after(() => sb.cleanup());

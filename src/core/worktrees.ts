@@ -310,11 +310,28 @@ export async function createWorktree(project: ProjectRef, opts: CreateOptions): 
   return wt;
 }
 
-/** origin/<baseBranch> after a best-effort fetch, else the local <baseBranch>. */
+/**
+ * origin/<baseBranch> after a best-effort fetch, else the local <baseBranch>, else
+ * the remote's default branch (a `master` repo whose config kept the `main` default).
+ */
 async function defaultBase(mainRoot: string, baseBranch: string): Promise<string> {
   await fetchBranch(mainRoot, "origin", baseBranch);
   if (await refExists(mainRoot, `origin/${baseBranch}`)) return `origin/${baseBranch}`;
   if (await refExists(mainRoot, baseBranch)) return baseBranch;
+  const remoteDefault = await remoteDefaultRef(mainRoot);
+  if (remoteDefault) {
+    const [remote, ...rest] = remoteDefault.split("/");
+    await fetchBranch(mainRoot, remote!, rest.join("/"));
+  }
+  // origin/HEAD can be missing (repo not cloned, or set-head never run): try master too.
+  const fallbacks = [remoteDefault, "origin/master", "master"].filter((r): r is string => !!r);
+  for (const ref of fallbacks) {
+    if (!(await refExists(mainRoot, ref))) continue;
+    logger.warn(
+      `baseBranch "${baseBranch}" not found; using ${ref}. Set "baseBranch" in the project config to silence this.`
+    );
+    return ref;
+  }
   throw new WormError(`Neither origin/${baseBranch} nor ${baseBranch} exists.`, {
     hint: 'Set "baseBranch" in the project config, or pass --base <ref>.',
   });

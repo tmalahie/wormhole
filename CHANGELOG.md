@@ -66,6 +66,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **New worktrees in a `master` repo no longer fail on the `main` default.**
+  When the configured `baseBranch` exists neither on `origin` nor locally, worm
+  cuts the branch from the remote's default branch (`origin/HEAD`), then
+  `origin/master`, then `master`, with a warning to set `baseBranch` — instead
+  of failing `worm worktree add` and the `WorktreeCreate` hook.
 - **`notifyPendingInput` fires once per background-agent turn, not once per
   agent.** A `/review` turn yields every time an agent reports in, and the
   debounce that collapses those yields into a single notification was being
